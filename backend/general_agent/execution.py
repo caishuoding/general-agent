@@ -7,6 +7,7 @@ from uuid import UUID
 from general_agent.budget import OperationContext
 from general_agent.calls import CallGateway
 from general_agent.memory import MemoryService
+from general_agent.memory_candidates import MemoryCandidates, candidate_eligible
 from general_agent.memory_correction import MemoryCorrection, correction_intent
 from general_agent.recall import MemoryRecall
 from general_agent.provider import ModelMessage
@@ -52,6 +53,7 @@ class ChatExecution:
         self.recall = MemoryRecall(memory)
         self.search = search
         self.correction = MemoryCorrection(memory)
+        self.candidates = MemoryCandidates(memory)
 
     def embedding_revision(self, content: str) -> str | None:
         """保存、更正或召回涉及嵌入时绑定版本，暂停尝试不能沿用修改前的配置批准。"""
@@ -69,7 +71,7 @@ class ChatExecution:
         return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """更正先停用旧值，搜索和全文在具体步骤申请预算，其余只预留真实下一次调用。"""
+        """预留保存或召回调用；候选、搜索、更正与全文处理先记录状态，再逐步检查预算。"""
         if correction_intent(content) is not None:
             # 更正先持久化目标版本并停用旧值，再在步骤内申请预算。
             return None
@@ -87,7 +89,7 @@ class ChatExecution:
             except ValueError:
                 return None
             return self.calls.budget.reserve(operation, embedding, 'embedding_tokens')
-        if search_query(content):
+        if candidate_eligible(content) or search_query(content):
             return None
         if self.recall.available():
             try:
@@ -98,23 +100,26 @@ class ChatExecution:
         return None if summary_mode(content) else self.calls.budget.reserve(operation, settings)
 
     def prepare_answer(self, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None) -> list[ModelMessage]:
-        """普通回答提供已批准相关记忆，兼容文字或视觉消息组合；明确保存维持独立回执。"""
+        """提供正式相关记忆及候选授权提示；当前个人表达不得被回答模型声称为自动保存。"""
         if explicit_intent(content).fact:
             return []
         with self.memory.database.connect() as connection:
-            row=connection.execute('SELECT unit FROM model_calls WHERE id=%s',(reserved,)).fetchone() if reserved else None
-        return self.recall.prepare(user_id,content,operation,reserved,skip=bool(row and row['unit']=='chat_tokens'))
+            row=connection.execute('SELECT unit,status FROM model_calls WHERE id=%s',(reserved,)).fetchone() if reserved else None
+        material=self.recall.prepare(user_id,content,operation,reserved,skip=bool(row and row['unit']=='chat_tokens'))
+        if candidate_eligible(content):
+            material.append({'role':'system','content':'当前用户消息的自动记忆识别仅能提出候选，不代表已保存或更正。不要声称自动记住了这条信息；是否写入长期记忆以应用确认卡片的真实状态为准，待确认候选需要用户点击批准。'})
+        return material
 
     def chat_reservation(self, content: str, reserved: UUID | None) -> UUID | None:
-        """仅复用聊天预留；记忆保存或召回用过的嵌入请求不得挪作回答调用。"""
+        """仅复用尚未启动的聊天预留；候选、保存或召回已经用过的请求不得再次启动。"""
         if reserved is None:
             return None
         with self.memory.database.connect() as connection:
-            row=connection.execute('SELECT unit FROM model_calls WHERE id=%s',(reserved,)).fetchone()
-        return reserved if row and row['unit']=='chat_tokens' else None
+            row=connection.execute('SELECT unit,status FROM model_calls WHERE id=%s',(reserved,)).fetchone()
+        return reserved if row and row['unit']=='chat_tokens' and row['status']=='reserved' else None
 
-    def prepare(self, conversation_id: UUID, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None) -> str | None:
-        """执行当前明确保存或更正并返回真实回执；空值表示继续普通回答。"""
+    def prepare(self, conversation_id: UUID, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None, settings: StoredSettings | None = None) -> str | None:
+        """执行明确保存或更正；普通个人事实先提出候选，再继续普通回答。"""
         if correction_intent(content) is not None:
             return self.correction.chat(content,user_id,conversation_id,operation)
         intent = explicit_intent(content)
@@ -123,4 +128,6 @@ class ChatExecution:
         if intent.fact:
             saved = self.memory.save(conversation_id, user_id, intent.fact, operation, reserved)
             return None if intent.answer else '已保存长期记忆：' + str(saved['fact'])
+        if settings is not None:
+            self.candidates.discover(conversation_id,user_id,settings,operation)
         return None

@@ -80,15 +80,15 @@ def test_http_failure_preserves_returned_usage(database_url: str, tmp_path: Path
 
 
 def test_conversations_keep_separate_model_context(database_url: str, tmp_path: Path) -> None:
-    """往返两个会话时，模型只收到当前会话按顺序保存的消息。"""
+    """往返两个会话提出普通问题时，模型只收到当前会话的消息；个人事实候选另有专项验证。"""
     expected = [
-        [{"role": "user", "content": "我喜欢茶"}],
+        [{"role": "user", "content": "介绍一下绿茶"}],
         [{"role": "user", "content": "今天下雨吗"}],
-        [{"role": "user", "content": "我喜欢茶"}, {"role": "assistant", "content": "已了解本会话的信息。"}, {"role": "user", "content": "继续"}],
+        [{"role": "user", "content": "介绍一下绿茶"}, {"role": "assistant", "content": "已了解本会话的信息。"}, {"role": "user", "content": "继续"}],
     ]
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """依据独立的预期上下文检查外部请求，而不检查内部对象或数据库。"""
+        """依据普通问题的预期上下文检查外部请求，排除候选提取等独立动作。"""
         assert json.loads(request.content)["messages"] == expected.pop(0)
         return httpx.Response(200, json={"choices": [{"message": {"content": "已了解本会话的信息。"}}]})
 
@@ -96,7 +96,7 @@ def test_conversations_keep_separate_model_context(database_url: str, tmp_path: 
         client.put("/api/settings", json={"base_url": "https://model.example/v1", "model": "chat", "api_key": "test-key"})
         first = client.post("/api/conversations", json={}).json()["id"]
         second = client.post("/api/conversations", json={}).json()["id"]
-        for conversation_id, content in [(first, "我喜欢茶"), (second, "今天下雨吗"), (first, "继续")]:
+        for conversation_id, content in [(first, "介绍一下绿茶"), (second, "今天下雨吗"), (first, "继续")]:
             assert client.post(f"/api/conversations/{conversation_id}/messages", json={"content": content}).status_code == 200
         assert len(client.get(f"/api/conversations/{first}").json()["messages"]) == 4
         assert len(client.get(f"/api/conversations/{second}").json()["messages"]) == 2

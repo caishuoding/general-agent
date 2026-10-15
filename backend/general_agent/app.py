@@ -27,6 +27,7 @@ from general_agent.capabilities import Capability, CapabilityResult, CapabilityS
 from general_agent.chat import ChatService
 from general_agent.execution import ChatExecution
 from general_agent.memory import MemoryService
+from general_agent.memory_candidates_api import candidates_router
 from general_agent.memory_correction import MemoryCorrection
 from general_agent.memory_correction_api import correction_router
 from general_agent.database import Database
@@ -62,6 +63,8 @@ class Message(BaseModel):
     created_at: datetime
     reply_to: UUID | None = None
     error: str | None = None
+    memory_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    memory_discovery: dict[str, Any] | None = None
     memory_action: dict[str, Any] | None = None
     memory_update: dict[str, Any] | None = None
     memory_recall: dict[str, Any] | None = None
@@ -129,6 +132,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
     app.include_router(attachment_router(attachments))
     app.include_router(correction_router(MemoryCorrection(memory)))
+    app.include_router(candidates_router(execution.candidates,settings))
     app.state.calls = model
     app.state.budget = budget
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])

@@ -25,7 +25,7 @@ class ChatService:
         self.documents = DocumentSummary(database, model, attachments)
 
     def send(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, attachment_ids: list[UUID] | None = None) -> None:
-        """先处理明确联网；普通资料先核验能力，全文逐段处理并保留暂停检查点。"""
+        """先处理当前授权与候选，再执行明确搜索或资料；普通资料先核验能力，全文保留分段检查点。"""
         self.attachments.validate(conversation_id, attachment_ids or [])
         user_id, answer_id = uuid4(), uuid4()
         with self.database.connect() as connection:
@@ -43,7 +43,7 @@ class ChatService:
         material = AttachmentContext()
         summary: SummaryPreparation | None = None
         try:
-            response = self.execution.prepare(conversation_id,user_id,content,operation,reserved)
+            response = self.execution.prepare(conversation_id,user_id,content,operation,reserved,settings)
             if response is None:
                 web_material = self.execution.search.prepare(conversation_id,user_id,content,settings,operation)
                 chat_reserved = self.execution.chat_reservation(content,reserved)
