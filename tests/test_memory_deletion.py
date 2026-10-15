@@ -316,3 +316,32 @@ def test_deleted_memory_cannot_return_through_late_summary_cache(database_url: s
         assert client.post(f"/api/conversations/{conversation}/messages/{stopped['id']}/retry").status_code==202
         complete=wait_message(client,conversation,'complete')
         assert streams==2 and '重新整理的资料' in complete['content'] and '我住在苏州' not in complete['content']
+
+
+def test_attachment_candidate_deletion_clears_derived_source_without_removing_sibling_or_file(database_url: str, tmp_path: Path) -> None:
+    """附件同源多候选仅忘记指定事实，清其人物/出处副本并拒绝旧确认，另一个候选与原文件仍可用。"""
+    from test_attachment_memory import attachment_provider
+    with TestClient(create_app(database_url,tmp_path,httpx.MockTransport(attachment_provider)),base_url='http://127.0.0.1:8000') as client:
+        conversation=configure_memory(client)
+        file=client.post(f'/api/conversations/{conversation}/attachments',files={'files':('朋友.txt','陈敏住在杭州。陈敏喜欢乌龙茶。'.encode())}).json()[0]
+        result=client.post(f'/api/conversations/{conversation}/messages',json={'content':'请从附件提取长期记忆','attachment_ids':[file['id']]}).json()['messages'][-1]
+        first=next(row for row in result['memory_candidates'] if row['fact']=='住在杭州')
+        second=next(row for row in result['memory_candidates'] if row['fact']=='喜欢乌龙茶')
+        assert client.put(f"/api/memory-candidates/{first['id']}/subject",json={'kind':'other','label':'陈敏（朋友）'}).status_code==200
+        assert client.post(f"/api/memory-candidates/{first['id']}/confirm").status_code==200
+        action=client.get('/api/memories').json()[0]
+        assert client.delete(f"/api/memories/{action['id']}").status_code==200
+        calls=len(client.get('/api/usage').json())
+        assert client.post(f"/api/memory-candidates/{first['id']}/confirm").status_code==409
+        assert client.put(f"/api/memory-candidates/{first['id']}/subject",json={'kind':'user'}).status_code==409
+        assert client.post(f"/api/conversations/{conversation}/messages/{result['reply_to']}/memory-candidates/retry").status_code==409
+        assert len(client.get('/api/usage').json())==calls
+        cards=client.get(f'/api/conversations/{conversation}').json()['messages'][-1]['memory_candidates']
+        removed=next(row for row in cards if row['id']==first['id'])
+        assert removed['status']=='expired' and removed['attachment_source'] is None and removed['fact']=='' and removed['source_quote']==''
+        sibling=next(row for row in cards if row['id']==second['id'])
+        assert sibling['attachment_source']['filename']=='朋友.txt'
+        assert client.put(f"/api/memory-candidates/{second['id']}/subject",json={'kind':'other','label':'陈敏（朋友）'}).status_code==200
+        assert client.post(f"/api/memory-candidates/{second['id']}/confirm").status_code==200
+        assert [row['fact'] for row in client.get('/api/memories').json()]==['人物：陈敏（朋友）。事实：喜欢乌龙茶']
+        assert client.get(f"/api/conversations/{conversation}/attachments/{file['id']}/file").status_code==200

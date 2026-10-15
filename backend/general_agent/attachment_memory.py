@@ -42,10 +42,12 @@ class AttachmentMemory:
         return [row['id'] for row in chosen]
 
     def prepare(self, conversation_id: UUID, message_id: UUID, settings: StoredSettings, operation: OperationContext) -> str:
-        """明确提取单独返回可见候选状态，已完成发现跨重试复用而不继续普通回答。"""
+        """明确提取先核验旧来源抑制，提交时再次检查；完成检查点复用且不继续普通回答。"""
         with self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(uuid5(message_id,'candidate-discovery').int % (2**63-1),))
+            if self.candidates.memory.source_suppressed(message_id):
+                raise ValueError('该来源的记忆已被忘记，不能用旧来源重新提取。')
             source=self.candidates.source(message_id,conversation_id)
             with self.database.connect() as connection:
                 connection.execute('INSERT INTO memory_discovery_operations(message_id,operation_id) VALUES(%s,%s) ON CONFLICT DO NOTHING',(message_id,operation.operation_id))
@@ -75,7 +77,8 @@ class AttachmentMemory:
                         raise ValueError('附件候选原文无法核验。')
                 with self.database.connect() as connection:
                     active=connection.execute('SELECT cancelled FROM cloud_operations WHERE id=%s FOR UPDATE',(operation.operation_id,)).fetchone()
-                    if active is None or active['cancelled']:
+                    suppressed=connection.execute('SELECT message_id FROM memory_source_suppressions WHERE message_id=%s',(message_id,)).fetchone()
+                    if active is None or active['cancelled'] or suppressed:
                         raise ValueError('附件提取已停止，未提交候选。')
                     for index,item in enumerate(items):
                         cited=allowed[item['source_key']]

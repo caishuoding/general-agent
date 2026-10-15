@@ -29,7 +29,7 @@
 
 - `memory_actions` 保留动作 ID、原来源 ID、操作 ID、版本及 `deleting/deleted` 状态，`fact=''`，完成后 `memory_id=NULL`。`memory_deletions` 是可恢复进度，无事实正文。
 - `memory_source_suppressions` 只保存旧用户消息 UUID，无正文且无消息 FK。原来源、全部更正来源及受影响候选来源不能再次自动提取。`MemoryService.source_suppressed` 只用于“发现”入口；不能全局阻止同源其他独立候选的确认。
-- 精确候选按 `target_id`、`memory_action_id` 及 `uuid5(candidate_id,'confirmed-memory')` 关联，覆盖确认的部分写入。清 `fact/source_quote/target_fact`、批准时间，置 `expired`；不删除同源其他正式条目或其他候选。`attachment_memory_candidates` 存在时只删除这些候选对应的派生来源行，不删附件本体。
+- 精确候选按 `target_id`、`memory_action_id` 及 `uuid5(candidate_id,'confirmed-memory')` 关联，覆盖确认的部分写入。清 `fact/source_quote/target_fact`、批准时间，置 `expired`；不删除同源其他正式条目或其他候选。`attachment_memory_candidates` 只删除这些候选对应的派生来源行，不删附件本体。14 已合入：`AttachmentMemory.prepare` 在外发前及提交事务内核验旧来源抑制；保留 `validate_source → session(before_write) → PgMemory/MeteredEmbedding` 的嵌入后、正式发布前来源守卫。
 - 全部 `memory_updates` 清 `fact/previous_fact/error` 并置 `deleted`，旧更新重试拒绝；不只处理最后一个更新或只处理当前 operation。
 - 操作闭包包含动作当前操作、原来源与更正来源的全部回答尝试、全部 update/candidate/discovery operations、包含动作的 recall checkpoints、引用动作的 search requests，以及依赖 document job 的所有回答尝试。
 - 对闭包操作设 `cancelled/invalidated=TRUE`（区别于普通停止），清 `result/response_status/approved/pause_id/reason`，撤销未开始调用；活跃回答停止并清预算暂停。真实已发生调用不删。`BudgetService.invalidate` 和 `invalidate_conversation` 同样清暂停挑战，供来源删除复用。
