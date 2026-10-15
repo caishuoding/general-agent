@@ -1,0 +1,42 @@
+import { test, expect } from '@playwright/test';
+
+// 在真实设置页预览范围、处理失败取消，再逐次批准目标探针与事实重建。
+test('索引重建明确预览，失败可取消，预算暂停刷新后可继续', async ({ page }) => {
+  const base = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18119'}/v1`;
+  await page.request.put('/api/settings', { data: { base_url: base, model: 'chat', api_key: 'test-only' } });
+  await page.request.put('/api/settings/embedding', { data: { base_url: base, model: 'embed', dimensions: 3, api_key: 'test-only' } });
+  await page.request.post('/api/settings/capabilities/embedding');
+  const conversation = await (await page.request.post('/api/conversations', { data: {} })).json();
+  await page.request.post(`/api/conversations/${conversation.id}/messages`, { data: { content: '请记住：我喜欢茶' } });
+  await page.goto('/');
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  await page.getByLabel('嵌入模型名称').fill('next-embed');
+  await page.getByLabel('嵌入维度').fill('4');
+  await page.getByRole('button', { name: '保存嵌入配置' }).click();
+  const preview = page.getByRole('dialog', { name: '嵌入索引重建影响' });
+  await expect(preview).toBeVisible({ timeout: 4000 });
+  await expect(preview).toContainText('1 条有效长期记忆');
+  await expect(preview).toContainText('历史消息本机文字检索');
+  await preview.getByRole('button', { name: '确认重建索引' }).click();
+  const progress = page.getByTestId('embedding-rebuild');
+  await expect(progress).toContainText('重建失败');
+  await progress.getByRole('button', { name: '取消重建' }).click();
+  await expect(progress).toContainText('已取消重建');
+  await page.getByLabel('嵌入维度').fill('3');
+  await page.request.put('/api/settings/budget', { data: { monthly_limit: '0' } });
+  await page.getByRole('button', { name: '保存嵌入配置' }).click();
+  await preview.getByRole('button', { name: '确认重建索引' }).click();
+  await expect(progress).toContainText('等待预算许可');
+  await page.reload();
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  await expect(progress).toContainText('等待预算许可');
+  await progress.getByRole('button', { name: '仅允许下一次嵌入调用' }).click();
+  await expect(progress).toContainText('等待预算许可');
+  await expect(progress.getByRole('button', { name: '仅允许下一次嵌入调用' })).toBeEnabled();
+  await progress.screenshot({ path: 'test-results/rebuild-paused.png' });
+  await progress.getByRole('button', { name: '仅允许下一次嵌入调用' }).click();
+  await expect(progress).toContainText('重建完成');
+  await expect(progress).toContainText('已完成 1 / 1');
+  await expect(page.getByLabel('嵌入模型名称')).toHaveValue('next-embed');
+  await progress.screenshot({ path: 'test-results/rebuild-complete.png' });
+});

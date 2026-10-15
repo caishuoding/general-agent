@@ -31,7 +31,7 @@ class SourceDeletion:
         ids={value for row in candidates for value in [row['memory_action_id'],uuid5(row['id'],'confirmed-memory')] if value}
         actions=connection.execute("SELECT * FROM memory_actions WHERE status<>'deleted' AND (id=ANY(%s) OR (%s AND (conversation_id=%s OR id IN (SELECT action_id FROM memory_updates WHERE source_conversation_id=%s)))) ORDER BY id FOR UPDATE",(list(ids),kind=='conversation',conversation_id,conversation_id)).fetchall()
         valid=set()
-        settings=self.memory.memory.embedding.store.read()
+        settings=self.memory.memory.embedding.spaces.local_settings()
         if settings and any(row['status']=='complete' and row['memory_id'] for row in actions):
             with self.memory.memory.session(settings) as sdk:
                 for row in actions:
@@ -44,8 +44,8 @@ class SourceDeletion:
         return {'kind':kind,'source_id':source_id,'conversation_id':conversation_id,'name':conversation['title'] if kind=='conversation' else files[0]['filename'],'revision':revision,'attachment_ids':file_ids,'message_ids':message_ids,'candidate_ids':[row['id'] for row in candidates],'action_ids':[row['id'] for row in actions],'memories':[{**row,'delete_by_default':True,'can_keep':row['id'] in valid} for row in actions]}
 
     def preview(self, kind: str, conversation_id: UUID, source_id: UUID) -> dict[str,Any]:
-        """只返回本次真实影响和版本，不改变来源或记忆状态。"""
-        with self.database.connect() as connection:
+        """先取空间租约再锁来源行核验活动 SDK，避免与发布形成反向锁序。"""
+        with self.memory.memory.embedding.spaces.lease(maintenance=True), self.database.connect() as connection:
             impact=self.impact(connection,kind,conversation_id,source_id)
         return {key:impact[key] for key in ['kind','source_id','name','revision','memories']}
 
@@ -58,8 +58,8 @@ class SourceDeletion:
         return row
 
     def accept(self, kind: str, conversation_id: UUID, source_id: UUID, revision: str, keep_ids: list[UUID]) -> dict[str,Any]:
-        """原子验证影响快照、记录用户保留选择并停用来源；相同重复请求沿原身份恢复。"""
-        with self.database.connect() as connection:
+        """空间租约内原子验证、保留与停用；墓碑先提交，再等待动作清理，不持来源行等待云请求。"""
+        with self.memory.memory.embedding.spaces.lease(maintenance=True), self.database.connect() as connection:
             connection.execute('SELECT pg_advisory_xact_lock(%s)',(source_id.int % (2**63-1),))
             existing=connection.execute('SELECT * FROM source_deletions WHERE kind=%s AND source_id=%s',(kind,source_id)).fetchone()
             if existing:

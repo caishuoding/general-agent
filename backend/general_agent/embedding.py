@@ -1,6 +1,7 @@
 """为嵌入配置与后续检索索引提供一致的向量空间约束。"""
 
 from general_agent.database import Database
+from general_agent.spaces import MemorySpaces, MemoryMaintenance
 from general_agent.settings import EmbeddingSettingsInput, EmbeddingSettingsStore, PublicEmbeddingSettings, StoredEmbeddingSettings, StoredSettings
 
 
@@ -14,6 +15,7 @@ class EmbeddingConfiguration:
     def __init__(self, database: Database, store: EmbeddingSettingsStore) -> None:
         """绑定真实索引登记与私有配置，所有写操作使用同一数据库锁。"""
         self.database, self.store = database, store
+        self.spaces = MemorySpaces(database)
 
     def public(self) -> PublicEmbeddingSettings:
         """返回无密钥配置与已有索引数量，供界面解释重建限制。"""
@@ -27,7 +29,7 @@ class EmbeddingConfiguration:
 
     def save(self, body: EmbeddingSettingsInput, chat: StoredSettings | None) -> PublicEmbeddingSettings:
         """拒绝与已登记索引不同的地址、模型或维度，允许轮换同空间凭据。"""
-        with self.database.connect() as connection:
+        with self.spaces.lease(exclusive=True), self.database.connect() as connection:
             connection.execute("SELECT pg_advisory_xact_lock(91402703)")
             with self.store.lock:
                 saved = self.store.prepare(body, chat)
@@ -36,12 +38,14 @@ class EmbeddingConfiguration:
                     (saved.base_url, saved.model, saved.dimensions),
                 ).fetchone()
                 if incompatible:
-                    raise EmbeddingIndexConflict("已有检索索引，更换嵌入服务、模型或维度需要重建索引。当前重建功能尚未启用，配置未修改。")
+                    raise EmbeddingIndexConflict("已有检索索引，更换嵌入服务、模型或维度需要重建索引。请预览影响并明确启动重建，配置未修改。")
                 self.store.write(saved)
         return self.public()
 
-    def verified(self) -> StoredEmbeddingSettings:
-        """向检索消费者提供当前已通过验证的配置，未配置或旧版本结果不得使用。"""
+    def verified(self, *, leased: bool = False) -> StoredEmbeddingSettings:
+        """返回当前已验证配置；未持业务租约的消费者在重建期间拒绝使用，旧结果不能混用。"""
+        if not leased and self.spaces.maintaining():
+            raise MemoryMaintenance('长期记忆索引正在重建，当前暂不使用长期记忆。')
         saved = self.store.read()
         if saved is None:
             raise ValueError("请先保存并验证嵌入配置。")
@@ -55,7 +59,7 @@ class EmbeddingConfiguration:
         """为新索引登记已验证的向量空间，拒绝过期配置或复用不同模型的已有索引名。"""
         with self.database.connect() as connection:
             connection.execute("SELECT pg_advisory_xact_lock(91402703)")
-            current = self.verified()
+            current = self.verified(leased=True)
             if current.revision != saved.revision:
                 raise EmbeddingIndexConflict("嵌入配置已更新，请重新获取已验证配置。")
             row = connection.execute("SELECT base_url, model, dimensions FROM embedding_indexes WHERE name = %s", (name,)).fetchone()

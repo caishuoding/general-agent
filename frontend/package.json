@@ -11,7 +11,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test && playwright test --config playwright.capabilities.config.ts && playwright test --config playwright.budget.config.ts && playwright test --config playwright.memory.config.ts && playwright test --config playwright.recall.config.ts && playwright test --config playwright.correction.config.ts && playwright test --config playwright.images.config.ts && playwright test --config playwright.candidates.config.ts && playwright test --config playwright.search.config.ts && playwright test --config playwright.deletion.config.ts && playwright test --config playwright.history.config.ts && playwright test --config playwright.attachment-memory.config.ts && playwright test --config playwright.source-deletion.config.ts",
+    "test:e2e": "playwright test && playwright test --config playwright.capabilities.config.ts && playwright test --config playwright.budget.config.ts && playwright test --config playwright.memory.config.ts && playwright test --config playwright.recall.config.ts && playwright test --config playwright.correction.config.ts && playwright test --config playwright.images.config.ts && playwright test --config playwright.candidates.config.ts && playwright test --config playwright.search.config.ts && playwright test --config playwright.deletion.config.ts && playwright test --config playwright.history.config.ts && playwright test --config playwright.attachment-memory.config.ts && playwright test --config playwright.source-deletion.config.ts && playwright test --config playwright.rebuild.config.ts",
     "test:budget": "playwright test --config playwright.budget.config.ts",
     "test:capabilities": "playwright test --config playwright.capabilities.config.ts",
     "test:memory": "playwright test --config playwright.memory.config.ts",
@@ -23,7 +23,8 @@
     "test:deletion": "playwright test --config playwright.deletion.config.ts",
     "test:history": "playwright test --config playwright.history.config.ts",
     "test:attachment-memory": "playwright test --config playwright.attachment-memory.config.ts",
-    "test:source-deletion": "playwright test --config playwright.source-deletion.config.ts"
+    "test:source-deletion": "playwright test --config playwright.source-deletion.config.ts",
+    "test:rebuild": "playwright test --config playwright.rebuild.config.ts"
   },
   "dependencies": {
     "react": "^19.2.0",

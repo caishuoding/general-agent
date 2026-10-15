@@ -8,6 +8,7 @@ from psycopg.types.json import Jsonb
 
 from general_agent.budget import BudgetPaused, OperationContext
 from general_agent.memory import MemoryService
+from general_agent.spaces import MemoryMaintenance
 from general_agent.provider import ModelFailure, ModelMessage
 
 THRESHOLD = 0.72
@@ -45,6 +46,15 @@ class MemoryRecall:
             connection.execute('INSERT INTO memory_recalls(operation_id,message_id,status,matches,match_count,detail,embedding_revision) VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(operation_id) DO UPDATE SET status=EXCLUDED.status,matches=EXCLUDED.matches,match_count=EXCLUDED.match_count,detail=EXCLUDED.detail,embedding_revision=EXCLUDED.embedding_revision,updated_at=CURRENT_TIMESTAMP',(operation.operation_id,user_id,status,Jsonb(hits),len(hits),detail,revision))
 
     def prepare(self, user_id: UUID, query: str, operation: OperationContext, reserved: UUID | None, skip: bool = False) -> list[ModelMessage]:
+        """空间租约覆盖召回检查点发布，维护期诚实降级而不把新向量用于旧表。"""
+        try:
+            with self.memory.embedding.spaces.lease():
+                return self.prepare_leased(user_id,query,operation,reserved,skip)
+        except MemoryMaintenance as error:
+            self.record(operation,user_id,'unavailable',str(error))
+            return self.failure_material(str(error))
+
+    def prepare_leased(self, user_id: UUID, query: str, operation: OperationContext, reserved: UUID | None, skip: bool = False) -> list[ModelMessage]:
         """召回或重读已完成标识；失败明确降级当前会话回答，预算暂停保留步骤。"""
         previous=self.checkpoint(operation)
         if previous and previous['status'] in ('failed','skipped','unavailable'):
@@ -60,7 +70,7 @@ class MemoryRecall:
             self.record(operation,user_id,'skipped','当前没有需要召回的已批准长期记忆。')
             return []
         try:
-            settings=self.memory.embedding.verified()
+            settings=self.memory.embedding.verified(leased=True)
         except ValueError:
             detail='长期记忆未读取：请在设置中保存并验证嵌入配置。本次仅按当前会话回答。'
             self.record(operation,user_id,'unavailable',detail)
