@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ChangeEvent } from "react";
 import { api, errorMessage, type Settings, type Usage } from "./api";
+import { EmbeddingRebuild, type PendingRebuild, type RebuildImpact } from "./EmbeddingRebuild";
 
 type EmbeddingSettings = Settings & { dimensions: number | null; index_count: number };
 type Capability = "text" | "image" | "tools" | "embedding";
@@ -23,6 +24,7 @@ export function ModelCapabilities({ settings, onUsageChanged }: Props) {
   const [busy, setBusy] = useState<Capability | "save" | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [pending, setPending] = useState<PendingRebuild | null>(null);
 
   // 每次聊天配置保存后重新读取当前版本，离开页面时忽略过期读取。
   useEffect(() => {
@@ -54,16 +56,32 @@ export function ModelCapabilities({ settings, onUsageChanged }: Props) {
     setReuse(event.currentTarget.checked);
   }
 
-  // 保存嵌入配置，成功后清空密钥并获取新版本对应的检查状态。
+  // 发布后刷新当前配置、能力和用量，不把旧表单显示为仍在使用。
+  async function rebuildPublished() {
+    setEmbedding(await api<EmbeddingSettings>("/settings/embedding"));
+    setResults(await api<Results>("/settings/capabilities"));
+    onUsageChanged(await api<Usage[]>("/usage"));
+  }
+
+  // 丢弃尚未提交的目标预览及其中的临时密钥。
+  function dismissRebuild() { setPending(null); }
+
+  // 先本地预览范围；变更空间必须明确确认，同空间凭据仍直接保存。
   async function saveEmbedding(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
     setBusy("save"); setError(""); setNotice("");
     try {
+      const body = { ...Object.fromEntries(data), dimensions: Number(data.get("dimensions")), reuse_chat_connection: reuse };
+      const impact = await api<RebuildImpact>("/settings/embedding/rebuild-impact", { method: "POST", body: JSON.stringify(body) });
+      if (impact.requires_rebuild) {
+        setPending({ body, impact, id: crypto.randomUUID() });
+        return;
+      }
       const saved = await api<EmbeddingSettings>("/settings/embedding", {
         method: "PUT",
-        body: JSON.stringify({ ...Object.fromEntries(data), dimensions: Number(data.get("dimensions")), reuse_chat_connection: reuse }),
+        body: JSON.stringify(body),
       });
       const key = form.elements.namedItem("api_key") as HTMLInputElement;
       key.value = "";
@@ -119,7 +137,7 @@ export function ModelCapabilities({ settings, onUsageChanged }: Props) {
   return <>
     <div className="settings-card">
       <div className="card-heading"><h3>嵌入连接</h3><span className="small-label">独立模型与维度</span></div>
-      <p className="field-help">嵌入服务用于后续长期记忆与资料检索；聊天模型不一定支持嵌入接口。</p>
+      <p className="field-help">嵌入服务用于已批准长期记忆；附件和历史消息采用本机文字检索。聊天模型不一定支持嵌入接口。</p>
       {embedding ? <form key={`${embedding.base_url}:${embedding.model}:${embedding.dimensions}`} onSubmit={saveEmbedding}>
         <label className="checkbox-field"><input type="checkbox" checked={reuse} onChange={changeReuse} disabled={!settings.api_key_configured || busy !== null} />复用已保存聊天服务的地址与密钥</label>
         <label htmlFor="embedding-base-url">嵌入 API 地址</label>
@@ -131,10 +149,11 @@ export function ModelCapabilities({ settings, onUsageChanged }: Props) {
         <label htmlFor="embedding-dimensions">嵌入维度</label>
         <input id="embedding-dimensions" name="dimensions" type="number" min={1} max={65536} step={1} defaultValue={embedding.dimensions ?? ""} required />
         <p className="field-help">填写服务商声明的向量维度，检查时会核对实际返回值。复用操作复制连接信息；后续修改聊天连接不会自动改动嵌入连接。</p>
-        {embedding.index_count > 0 && <p className="notice">已有 {embedding.index_count} 个检索索引。更换服务、模型或维度需要重建；当前重建功能尚未启用，变更会被阻止。</p>}
+        {embedding.index_count > 0 && <p className="notice">已有 {embedding.index_count} 个检索索引。更换服务、模型或维度需要重建；保存时先预览影响，由你明确确认。</p>}
         <div className="form-footer"><span>保存配置不会发出云端请求</span><button className="primary-button" disabled={busy !== null}>{busy === "save" ? "正在保存…" : "保存嵌入配置"}</button></div>
       </form> : <p className="field-help">正在读取嵌入配置…</p>}
     </div>
+    <EmbeddingRebuild pending={pending} onDismiss={dismissRebuild} onPublished={rebuildPublished} />
     <div className="settings-card">
       <div className="card-heading"><h3>能力检查</h3><span className="small-label">分别验证</span></div>
       <p className="field-help">每次检查都会发出可能计费的请求，并记录可获取的用量。检查只针对已保存配置，请先保存修改；更新配置后旧结果失效。</p>

@@ -3,6 +3,7 @@
 from collections.abc import Callable
 import logging
 import os
+import re
 from importlib.metadata import version
 from typing import Any
 from uuid import UUID, uuid4
@@ -113,17 +114,19 @@ class SimilarityPGVector(PGVector):
 class PgMemory(Memory):
     """锁定版本，仅接管生命周期；add/get/search/update/delete 复用真实 OSS SDK。"""
 
-    def __init__(self, database: Database, settings: StoredEmbeddingSettings, calls: BoundCalls | None = None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None) -> None:
-        """显式注入历史、计量和可选来源守卫，构造失败也关闭自建连接池。"""
+    def __init__(self, database: Database, settings: StoredEmbeddingSettings, calls: BoundCalls | None = None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None, collection: str = COLLECTION) -> None:
+        """显式注入受控集合、历史、计量和可选来源守卫，构造失败也关闭自建连接池。"""
+        if collection != COLLECTION and not re.fullmatch(r'memory_space_[0-9a-f]{32}',collection):
+            raise ValueError('不允许使用未受控的记忆集合名。')
         if version('mem0ai') != '1.0.11':
             raise RuntimeError('Mem0 版本不符，必须先重新验证 PostgreSQL 兼容层。')
-        self.config = MemoryConfig(vector_store={'provider': 'pgvector', 'config': {'connection_string': database.url, 'collection_name': COLLECTION, 'embedding_model_dims': settings.dimensions, 'hnsw': False}}, llm={'provider': 'openai', 'config': {'enable_vision': False}})
+        self.config = MemoryConfig(vector_store={'provider': 'pgvector', 'config': {'connection_string': database.url, 'collection_name': collection, 'embedding_model_dims': settings.dimensions, 'hnsw': False}}, llm={'provider': 'openai', 'config': {'enable_vision': False}})
         self.custom_fact_extraction_prompt = None
         self.custom_update_memory_prompt = None
         self.embedding_model = MeteredEmbedding(settings, calls, reserved,before_write)
         self.llm = DisabledInference()
         self.db = PgHistory(database)
-        self.collection_name = COLLECTION
+        self.collection_name = collection
         self.api_version = self.config.version
         self.reranker = None
         self.enable_graph = False
@@ -131,7 +134,7 @@ class PgMemory(Memory):
         self.pool = ConnectionPool(database.url, min_size=1, max_size=2, timeout=5, kwargs={'connect_timeout': 5}, open=True)
         try:
             # 固定集合名和已验证整数维度不允许外部 SQL 标识符注入。
-            self.vector_store = SimilarityPGVector(dbname=None, collection_name=COLLECTION, embedding_model_dims=settings.dimensions, user=None, password=None, host=None, port=None, diskann=False, hnsw=False, connection_pool=self.pool)
+            self.vector_store = SimilarityPGVector(dbname=None, collection_name=collection, embedding_model_dims=settings.dimensions, user=None, password=None, host=None, port=None, diskann=False, hnsw=False, connection_pool=self.pool)
         except BaseException:
             self.close()
             raise
@@ -147,6 +150,19 @@ class PgMemory(Memory):
             if existing.get(key) is not None:
                 merged[key] = existing[key]
         return super().update(memory_id,data,metadata=merged)
+
+    def write_rebuilt(self, memory_id: str, vector: list[float], payload: dict[str, Any]) -> None:
+        """保留正式 ID、正文与时间，仅写真实目标向量，不新增事实历史或触发模型。"""
+        existing=self.vector_store.get(memory_id)
+        if existing is not None:
+            if existing.payload.get('action_id')!=payload['action_id'] or existing.payload.get('user_id')!='local-person':
+                raise ValueError('目标空间身份冲突，未覆盖其他记忆。')
+            self.vector_store.update(memory_id,vector=vector,payload=payload)
+        else:
+            self.vector_store.insert(vectors=[vector],ids=[memory_id],payloads=[payload])
+        actual=self.vector_store.get(memory_id)
+        if actual is None or actual.payload!=payload:
+            raise ValueError('目标向量尚未完整持久化，请重试核对。')
 
     def reset(self) -> None:
         """重置向量与内部历史；应用业务动作必须由上层维护流程另行协调。"""

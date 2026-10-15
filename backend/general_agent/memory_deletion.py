@@ -73,11 +73,11 @@ class MemoryDeletion:
         return str(self.delete(identifier)['detail'])
 
     def delete(self, action_id: UUID) -> dict[str, Any]:
-        """先停用并清除业务正文，再按原身份删除向量和全部历史；失败保留可重试清理状态。"""
+        """先停用并清除业务正文，再取得空间及动作锁清所有登记集合和历史；失败保持可重试。"""
         with self.database.connect() as connection:
             if not self.begin(connection,action_id):
                 return self.result(action_id)
-        with self.database.connect() as lock:
+        with self.memory.embedding.spaces.lease(maintenance=True), self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(action_id.int % (2**63-1),))
             try:
@@ -113,6 +113,8 @@ class MemoryDeletion:
         affected=[row['id'] for row in candidates if row['target_id']==action_id or row['memory_action_id']==action_id or uuid5(row['id'],'confirmed-memory')==action_id]
         sources.update(row['source_message_id'] for row in candidates if row['id'] in affected)
         operations={action['operation_id']} | {row['operation_id'] for row in updates}
+        operations.update(row['operation_id'] for row in connection.execute('SELECT o.operation_id FROM embedding_rebuild_operations o JOIN embedding_rebuild_steps s ON s.id=o.step_id WHERE s.action_id=%s',(action_id,)).fetchall())
+        connection.execute("UPDATE embedding_rebuild_steps SET status='invalidated',fact_hash=NULL WHERE action_id=%s",(action_id,))
         for table,column,identifiers in [('memory_update_operations','update_id',[row['id'] for row in updates]),('memory_candidate_operations','candidate_id',affected),('memory_discovery_operations','message_id',list(sources))]:
             operations.update(row['operation_id'] for row in connection.execute(f'SELECT operation_id FROM {table} WHERE {column}=ANY(%s)',(identifiers,)).fetchall())
         operations.update(row['operation_id'] for row in connection.execute('SELECT operation_id FROM messages WHERE reply_to=ANY(%s) AND operation_id IS NOT NULL',(list(sources),)).fetchall())
@@ -141,29 +143,40 @@ class MemoryDeletion:
             connection.execute('DELETE FROM attachment_memory_candidates WHERE candidate_id=ANY(%s)',(affected,))
 
     def purge_sdk(self, action_id: UUID) -> None:
-        """使用持久化索引维度打开无云调用权限的 SDK，核对部分提交标识并逐条清除历史。"""
+        """逐一清活动、目标与退休登记空间及历史；任何副本未清完都不能报告成功。"""
         with self.database.connect() as connection:
-            index=connection.execute("SELECT base_url,model,dimensions FROM embedding_indexes WHERE name='personal_memories'").fetchone()
             progress=connection.execute('SELECT memory_ids FROM memory_deletions WHERE action_id=%s',(action_id,)).fetchone()
         assert progress is not None
-        if index is None:
-            if progress['memory_ids']:
-                raise ValueError('记忆索引身份无法核验。')
-            return
-        settings=StoredEmbeddingSettings(**index,api_key='')
-        with self.memory.session(settings) as sdk:
-            rows=sdk.vector_store.list(filters={'action_id':str(action_id),'user_id':'local-person'},limit=1000)[0]
-            identifiers=set(progress['memory_ids']) | {UUID(str(row.id)) for row in rows}
+        spaces=self.memory.embedding.spaces.registered()
+        identifiers=set(progress['memory_ids'])
+        if not spaces and identifiers:
+            raise ValueError('记忆索引身份无法核验。')
+        for space in spaces:
             with self.database.connect() as connection:
-                connection.execute('UPDATE memory_deletions SET memory_ids=%s WHERE action_id=%s',(list(identifiers),action_id))
-            for identifier in identifiers:
-                entry=sdk.get(str(identifier))
-                if entry is not None:
-                    if entry.get('user_id')!='local-person' or (entry.get('metadata') or {}).get('action_id')!=str(action_id):
-                        raise ValueError('记忆身份不符，未删除其他条目。')
-                    sdk.delete(str(identifier))
-                sdk.db.purge(str(identifier))
-                if sdk.get(str(identifier)) is not None or sdk.history(str(identifier)):
-                    raise ValueError('正式记忆或内部历史尚未清理。')
-            if sdk.vector_store.list(filters={'action_id':str(action_id),'user_id':'local-person'},limit=1)[0]:
-                raise ValueError('仍有待清理的同一动作实体，请继续重试。')
+                exists=connection.execute('SELECT to_regclass(%s) AS name',(space['collection_name'],)).fetchone()
+            if not exists or not exists['name']:
+                continue
+            settings=StoredEmbeddingSettings(base_url=space['base_url'],model=space['model'],dimensions=space['dimensions'],api_key='')
+            with self.memory.session(settings,collection=space['collection_name']) as sdk:
+                rows=sdk.vector_store.list(filters={'action_id':str(action_id),'user_id':'local-person'},limit=1000)[0]
+                identifiers.update(UUID(str(row.id)) for row in rows)
+                with self.database.connect() as connection:
+                    connection.execute('UPDATE memory_deletions SET memory_ids=%s WHERE action_id=%s',(list(identifiers),action_id))
+                for identifier in identifiers:
+                    entry=sdk.get(str(identifier))
+                    if entry is not None:
+                        if entry.get('user_id')!='local-person' or (entry.get('metadata') or {}).get('action_id')!=str(action_id):
+                            raise ValueError('记忆身份不符，未删除其他条目。')
+                        sdk.delete(str(identifier))
+                    sdk.db.purge(str(identifier))
+                    if sdk.get(str(identifier)) is not None or sdk.history(str(identifier)):
+                        raise ValueError('正式记忆或内部历史尚未清理。')
+                if sdk.vector_store.list(filters={'action_id':str(action_id),'user_id':'local-person'},limit=1)[0]:
+                    raise ValueError('仍有待清理的同一动作实体，请继续重试。')
+        # 所有空间已不存在时，历史依然按已持久的稳定标识独立清除。
+        from general_agent.mem0_adapter import PgHistory
+        history=PgHistory(self.database)
+        for identifier in identifiers:
+            history.purge(str(identifier))
+            if history.get_history(str(identifier)):
+                raise ValueError('内部历史尚未清理。')

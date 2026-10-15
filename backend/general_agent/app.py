@@ -34,6 +34,8 @@ from general_agent.memory_candidates_api import candidates_router
 from general_agent.memory_correction import MemoryCorrection
 from general_agent.memory_correction_api import correction_router
 from general_agent.database import Database
+from general_agent.rebuild import EmbeddingRebuild
+from general_agent.rebuild_api import rebuild_router
 from general_agent.embedding import EmbeddingConfiguration, EmbeddingIndexConflict
 from general_agent.provider import ModelClient, ModelFailure
 from general_agent.streaming import StreamingChat
@@ -122,21 +124,25 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     search = SearchService(database, model, search_settings, memory, attachments, model_transport)
     execution = ChatExecution(model, memory, search)
     source_deletion = SourceDeletion(execution.deletion)
+    rebuild = EmbeddingRebuild(memory)
     chat = ChatService(database, model, execution, attachments)
     capabilities = CapabilityService(database, model, settings, embedding_settings)
     streaming = StreamingChat(database, model, execution, attachments)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """启动时迁移并标记中断生成、资料和删除操作；来源保持停用，停机等待工作线程。"""
+        """迁移并恢复重建、生成与来源删除；不自动外发重建请求，停机等待工作线程。"""
         database.migrate()
+        rebuild.recover()
         streaming.recover()
         attachments.recover()
         source_deletion.recover()
         yield
         await asyncio.to_thread(streaming.close)
+        await asyncio.to_thread(rebuild.close)
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
+    app.include_router(rebuild_router(rebuild,settings))
     app.include_router(attachment_router(attachments))
     app.include_router(source_deletion_router(source_deletion))
     app.include_router(correction_router(MemoryCorrection(memory)))

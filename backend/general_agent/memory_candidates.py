@@ -121,8 +121,8 @@ class MemoryCandidates:
             self.discovery_state(message_id,operation,'failed',detail)
 
     def confirm(self, identifier: UUID, operation: OperationContext) -> dict[str, Any]:
-        """按候选身份、人物及消息/附件来源提交；删除失效优先，同源其他事实独立。"""
-        with self.database.connect() as lock:
+        """空间租约覆盖批准与正式发布，维护门槛在 saving 之前；来源与删除失效优先。"""
+        with self.memory.embedding.spaces.lease(), self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(identifier.int % (2**63-1),))
             row=self.get(identifier)

@@ -26,19 +26,21 @@ class MemoryService:
         self.database, self.embedding, self.calls, self.directory = database, embedding, calls, directory
 
     @contextmanager
-    def session(self, settings: StoredEmbeddingSettings, operation: OperationContext | None = None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None) -> Iterator['PgMemory']:
-        """按操作创建 SDK 并携带可选写入前来源核验；首次导入前关闭遥测和限定辅助目录。"""
+    def session(self, settings: StoredEmbeddingSettings, operation: OperationContext | None = None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None, collection: str | None = None) -> Iterator['PgMemory']:
+        """按受控空间打开 SDK，租约覆盖真实读写；业务写入另保持租约至发布结束。"""
         os.environ['MEM0_TELEMETRY'] = 'False'
         os.environ['MEM0_DIR'] = str(self.directory / 'mem0-runtime')
         from general_agent.mem0_adapter import PgMemory
-        with self.database.connect() as connection:
-            connection.autocommit = True
-            connection.execute('SELECT pg_advisory_lock(91402705)')
-            memory = PgMemory(self.database, settings, self.calls.bind(operation) if operation else None, reserved,before_write)
-        try:
-            yield memory
-        finally:
-            memory.close()
+        with self.embedding.spaces.lease(maintenance=True):
+            physical=collection or self.embedding.spaces.binding(settings)
+            with self.database.connect() as connection:
+                connection.autocommit = True
+                connection.execute('SELECT pg_advisory_lock(91402705)')
+                memory = PgMemory(self.database, settings, self.calls.bind(operation) if operation else None, reserved,before_write,physical)
+            try:
+                yield memory
+            finally:
+                memory.close()
 
     def action(self, message_id: UUID) -> dict[str, Any] | None:
         """只返回原用户明确保存动作，候选确认的多个独立身份不会混入回答重试。"""
@@ -55,7 +57,7 @@ class MemoryService:
                 row["updates"] = connection.execute("SELECT u.*,c.title AS conversation_title FROM memory_updates u LEFT JOIN conversations c ON c.id=u.source_conversation_id WHERE action_id=%s ORDER BY u.created_at,u.id",(row["id"],)).fetchall()
         if not rows or not any(row["status"] == "complete" for row in rows):
             return rows
-        settings = self.embedding.store.read()
+        settings = self.embedding.spaces.local_settings()
         if settings is None:
             return [{**row, 'error': '嵌入配置不可读，暂时无法核验正式记忆。'} for row in rows]
         with self.session(settings) as memory:
@@ -84,11 +86,11 @@ class MemoryService:
             raise ValueError('操作已停止或来源已删除，旧批准不能继续提交。')
 
     def save(self, conversation_id: UUID, message_id: UUID, fact: str, operation: OperationContext, reserved: UUID | None = None, action_id: UUID | None = None, validate_source: Callable[[], None] | None = None) -> dict[str, Any]:
-        """按稳定身份核对部分提交；注册与发布均串行核验来源，删除墓碑优先于迟到保存。"""
+        """按稳定身份核对部分提交；空间租约覆盖注册至发布，先拒绝维护期新写入，删除墓碑优先。"""
         if validate_source:
             validate_source()
         action_id = action_id or uuid5(message_id, 'explicit-memory:0')
-        with self.database.connect() as lock:
+        with self.embedding.spaces.lease(), self.database.connect() as lock:
             lock.autocommit = True
             lock.execute('SELECT pg_advisory_lock(%s)', (action_id.int % (2**63 - 1),))
             with lock.transaction():
@@ -104,7 +106,7 @@ class MemoryService:
                 return existing
             lock.execute("UPDATE memory_actions SET status='saving',error=NULL,operation_id=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status NOT IN ('deleting','deleted')", (operation.operation_id,action_id))
             try:
-                settings = self.embedding.verified()
+                settings = self.embedding.verified(leased=True)
                 self.embedding.bind_index('personal_memories', settings)
                 with self.session(settings, operation, reserved,validate_source) as memory:
                     rows = memory.vector_store.list(filters={'action_id': str(action_id), 'user_id': 'local-person'}, limit=2)[0]

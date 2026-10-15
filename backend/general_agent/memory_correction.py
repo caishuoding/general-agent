@@ -75,8 +75,8 @@ class MemoryCorrection:
         return '已更正长期记忆：'+str(result['fact'])
 
     def apply(self, action_id: UUID, fact: str, expected_version: int, identifier: UUID, operation: OperationContext, source_message_id: UUID | None = None, source_conversation_id: UUID | None = None) -> dict[str, Any]:
-        """先核验仍有效的批准来源再停用旧版本，发布前重验来源与删除墓碑。"""
-        with self.database.connect() as lock:
+        """先取得空间租约并拒绝维护期写入，再接受新版本；租约覆盖 SDK 与成功发布。"""
+        with self.memory.embedding.spaces.lease(), self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(action_id.int % (2**63-1),))
             existing=lock.execute('SELECT * FROM memory_updates WHERE id=%s',(identifier,)).fetchone()
@@ -105,7 +105,7 @@ class MemoryCorrection:
             try:
                 lock.execute("UPDATE memory_updates SET status='saving',operation_id=%s,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status<>'deleted'",(operation.operation_id,identifier))
                 lock.execute("UPDATE memory_actions SET status='saving',error='正在同步更正，旧事实已停止召回。' WHERE id=%s AND status NOT IN ('deleting','deleted')",(action_id,))
-                settings=self.memory.embedding.verified()
+                settings=self.memory.embedding.verified(leased=True)
                 with self.memory.session(settings,operation) as sdk:
                     current=sdk.get(str(entry['memory_id']))
                     if current is None or current.get('user_id')!='local-person':
