@@ -1,3 +1,4 @@
+import { DocumentProgress } from './DocumentProgress';
 import {
   useEffect,
   useRef,
@@ -362,7 +363,7 @@ export function App() {
     return <details className="file-citation" key={citation.key} open><summary>[{citation.key}] <a href={`/api/conversations/${conversation?.id}/attachments/${citation.attachment_id}/file`} download>{citation.filename} · {citation.location}</a></summary><blockquote>{citation.excerpt}</blockquote></details>;
   }
 
-  // 展示回答、搜索外发确认、记忆保存更正动作和可信出处，暂停及重试使用持久状态。
+  // 展示回答、搜索确认、记忆更正及全文资料进度，暂停和重试使用持久状态。
   function renderMessage(message: Message) {
     return (
       <article
@@ -380,6 +381,7 @@ export function App() {
           </time>
         </div>
         <div className="message-content">{message.content}</div>
+        {message.document_progress && <DocumentProgress progress={message.document_progress} status={message.status} />}
         {message.memory_recall && message.memory_recall.status !== "skipped" && <div data-testid="memory-recall" className={`memory-recall ${message.memory_recall.status}`} role="status">{message.memory_recall.detail}</div>}
         {message.memory_update && <div className={`memory-action ${message.memory_update.status}`} role="status">
           {message.memory_update.status === "complete" ? `已更正 · ${message.memory_update.fact}` : `记忆更正未完成 · ${message.memory_update.error || "正在同步；旧事实已停止召回。"}`}
@@ -388,7 +390,7 @@ export function App() {
           {message.memory_action.status === "complete" ? `已保存 · ${message.memory_action.fact}` : message.memory_action.status === "failed" ? `记忆保存未完成 · ${message.memory_action.error || "可以重试核对。"}` : "记忆正在处理，尚未确认保存。"}
         </div>}
         {message.status === "paused" && message.budget_pause && <section className="run-budget" aria-label="回答等待预算">
-          <strong>后续云端请求已暂停</strong><p>{message.budget_pause.detail}</p><p>已完成的记忆操作会保留。批准仅允许下一次调用。</p>
+          <strong>后续云端请求已暂停</strong><p>{message.budget_pause.detail}</p><p>已完成的记忆和资料处理会保留。批准仅允许下一次调用。</p>
           <button className="retry-button" data-action="resume" data-approve="true" data-message={message.id} onClick={changeRun} disabled={changingRun}>仅允许下一次云端调用并继续</button>
           <button className="retry-button" data-action="resume" data-message={message.id} onClick={changeRun} disabled={changingRun}>重新检查并继续</button>
           <button className="retry-button" data-action="stop" data-message={message.id} onClick={changeRun} disabled={changingRun}>取消本次回答</button>

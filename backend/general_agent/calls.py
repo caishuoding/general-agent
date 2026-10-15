@@ -46,9 +46,9 @@ class BoundCalls:
         else:
             budget.record(call_id, TokenUsage(), "complete")
 
-    def complete(self, settings: StoredSettings, messages: list[ModelMessage], reserved: UUID | None = None) -> Completion:
-        """复用可选首步预留，检查预算并记录同步文字或视觉请求的实际用量。"""
-        with self.call(settings, "chat_tokens", reserved) as call_id:
+    def complete(self, settings: StoredSettings, messages: list[ModelMessage], reserved: UUID | None = None, assistant_message_id: UUID | None = None) -> Completion:
+        """复用可选预留并关联回答尝试，检查预算及记录同步文字、视觉或分段请求的实际用量。"""
+        with self.call(settings, "chat_tokens", reserved, assistant_message_id) as call_id:
             result = self.gateway.provider.complete(settings, messages)
             self.gateway.budget.record(call_id, result.usage)
             return result

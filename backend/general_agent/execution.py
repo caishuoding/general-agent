@@ -11,6 +11,7 @@ from general_agent.memory_correction import MemoryCorrection, correction_intent
 from general_agent.recall import MemoryRecall
 from general_agent.provider import ModelMessage
 from general_agent.settings import StoredSettings
+from general_agent.summary import summary_mode
 from general_agent.search import SearchService, search_query
 
 
@@ -68,7 +69,7 @@ class ChatExecution:
         return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """更正先停用旧值；搜索在实际步骤检查预算，其余只预留下一条真实调用。"""
+        """更正先停用旧值，搜索和全文在具体步骤申请预算，其余只预留真实下一次调用。"""
         if correction_intent(content) is not None:
             # 更正先持久化目标版本并停用旧值，再在步骤内申请预算。
             return None
@@ -94,7 +95,7 @@ class ChatExecution:
             except ValueError:
                 return None
             return self.calls.budget.reserve(operation, embedding, 'embedding_tokens')
-        return self.calls.budget.reserve(operation, settings)
+        return None if summary_mode(content) else self.calls.budget.reserve(operation, settings)
 
     def prepare_answer(self, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None) -> list[ModelMessage]:
         """普通回答提供已批准相关记忆，兼容文字或视觉消息组合；明确保存维持独立回执。"""

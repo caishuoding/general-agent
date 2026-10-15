@@ -66,6 +66,7 @@ class Message(BaseModel):
     memory_update: dict[str, Any] | None = None
     memory_recall: dict[str, Any] | None = None
     budget_pause: dict[str, str] | None = None
+    document_progress: dict[str, Any] | None = None
     attachment_ids: list[UUID] = Field(default_factory=list)
     search_action: dict[str, Any] | None = None
     web_sources: list[dict[str, object]] = Field(default_factory=list)

@@ -10,8 +10,9 @@ from general_agent.budget import BudgetPaused, OperationContext
 from general_agent.execution import ChatExecution
 from psycopg.types.json import Jsonb
 from general_agent.calls import CallGateway
-from general_agent.provider import ModelFailure
+from general_agent.provider import ModelFailure, ModelMessage
 from general_agent.settings import StoredSettings
+from general_agent.summary import DocumentSummary, SummaryPreparation, summary_mode
 from general_agent.search import SearchAwaiting
 
 
@@ -24,12 +25,17 @@ class StreamingChat:
         self.model = model
         self.execution = execution
         self.attachments = attachments
+        self.documents = DocumentSummary(database, model, attachments)
         self.threads: set[Thread] = set()
         self.lock = Lock()
 
     def recover(self) -> None:
-        """撤销中断尝试的搜索与后续动作，保留待确认和预算暂停步骤，不把中断报为成功。"""
+        """撤销中断的搜索和回答，保留暂停；核对保存更正，仅释放中断回答关联文档步骤。"""
         with self.database.connect() as connection:
+            interrupted = connection.execute("SELECT id,document_job_id FROM messages WHERE status IN ('generating','stopped') AND document_job_id IS NOT NULL").fetchall()
+            for message in interrupted:
+                connection.execute("UPDATE document_steps SET status='failed' WHERE job_id=%s AND status='running' AND call_id IN (SELECT id FROM model_calls WHERE assistant_message_id=%s)",(message['document_job_id'],message['id']))
+                connection.execute('UPDATE document_jobs SET final_call_id=NULL WHERE id=%s AND final_content IS NULL AND final_call_id IN (SELECT id FROM model_calls WHERE assistant_message_id=%s)',(message['document_job_id'],message['id']))
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE,approved=FALSE WHERE id IN (SELECT operation_id FROM messages WHERE status='generating')")
             connection.execute("UPDATE search_requests SET status='failed',error='应用重启中断了搜索，请重新发起。' WHERE operation_id IN (SELECT operation_id FROM messages WHERE status='generating') AND status IN ('planning','approved')")
             connection.execute("UPDATE messages SET status = 'failed', error = '应用重启中断了回答，可以重试。' WHERE status = 'generating'")
@@ -91,8 +97,9 @@ class StreamingChat:
         return new_id
 
     def execute(self, conversation_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
-        """完成可信动作后执行明确搜索或资料回答；预算暂停重用已完成步骤并重核出处。"""
+        """先处理明确联网；普通资料先核验能力，全文恢复重核来源并跳过完成分段。"""
         material = AttachmentContext()
+        summary: SummaryPreparation | None = None
         failure: str | None = None
         try:
             with self.database.connect() as connection:
@@ -102,17 +109,33 @@ class StreamingChat:
                 with self.database.connect() as connection:
                     connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (local,message_id))
             else:
-                web_material = self.execution.search.prepare(conversation_id,user_id,str(rows[-1]['content']),settings,operation)
+                content = str(rows[-1]['content'])
+                web_material = self.execution.search.prepare(conversation_id,user_id,content,settings,operation)
+                chat_reserved = self.execution.chat_reservation(content,call_id)
                 if web_material is None:
-                    material = self.attachments.prepare(conversation_id, user_id, str(rows[-1]['content']), settings=settings)
-                    memory_material = self.execution.prepare_answer(user_id,str(rows[-1]["content"]),operation,call_id)
+                    material = self.attachments.prepare(conversation_id,user_id,content,settings=settings) if summary_mode(content) is None else AttachmentContext()
+                    memory_material = self.execution.prepare_answer(user_id,content,operation,call_id)
+                    summary = self.documents.prepare(conversation_id,user_id,message_id,content,settings,operation,chat_reserved,memory_material)
+                    if summary:
+                        material = summary.material
                 else:
                     memory_material = web_material
-                reserved = self.execution.chat_reservation(str(rows[-1]["content"]), call_id) or self.model.budget.reserve(operation, settings)
-                for chunk in self.model.bind(operation).stream(settings, memory_material + material.messages + [{"role": str(row["role"]), "content": str(row["content"])} for row in rows], reserved, message_id):
-                    if chunk.content:
+                if summary and summary.cached_answer is not None:
+                    with self.database.connect() as connection:
+                        connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (summary.cached_answer,message_id))
+                else:
+                    reserved = self.documents.reserve_final(summary,settings,operation) if summary else (chat_reserved or self.model.budget.reserve(operation,settings))
+                    history: list[ModelMessage] = [{"role":str(row["role"]),"content":str(row["content"])} for row in (rows[-1:] if summary else rows)]
+                    answer = ''
+                    for chunk in self.model.bind(operation).stream(settings,memory_material + material.messages + history,reserved,message_id):
+                        answer += chunk.content
+                        if chunk.content:
+                            with self.database.connect() as connection:
+                                connection.execute("UPDATE messages SET content=content || %s WHERE id=%s AND status='generating'", (chunk.content,message_id))
+                    if summary:
+                        answer = self.documents.finish(summary,answer)
                         with self.database.connect() as connection:
-                            connection.execute("UPDATE messages SET content = content || %s WHERE id = %s AND status = 'generating'", (chunk.content, message_id))
+                            connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (answer,message_id))
         except (BudgetPaused,SearchAwaiting) as paused:
             with self.database.connect() as connection:
                 connection.execute("UPDATE messages SET status='paused',budget_pause=%s WHERE id=%s AND status='generating'", (Jsonb(paused.public()) if isinstance(paused,BudgetPaused) else None,message_id))
@@ -125,6 +148,8 @@ class StreamingChat:
             failure = "回答执行中断，已保留部分内容，可以重试。"
         if failure:
             self.execution.search.fail(operation,failure)
+        if failure and summary:
+            self.documents.failed_final(summary)
         self.attachments.save_citations(message_id, conversation_id, material)
         self.execution.search.save_sources(message_id, operation)
         with self.database.connect() as connection:

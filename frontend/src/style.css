@@ -871,6 +871,13 @@ td {
 .attachment-image-info { color: var(--text-muted, #777); flex-basis: 100%; padding-left: 24px; }
 .attachment-image-help { margin: 6px 0; color: #777; font-size: 11px; line-height: 1.5; }
 
+.document-progress { margin-top: 14px; padding: 12px; border: 1px solid #dce2d6; background: #f1f4ed; border-radius: 8px; font-size: 12px; color: #55634f; }
+.document-progress progress { width: 100%; margin-top: 8px; accent-color: #788e6b; height: 5px; }
+.document-progress details { margin-top: 6px; }
+.document-progress ul { padding-left: 18px; }
+.document-progress li { margin: 9px 0; }
+.document-progress p { margin: 4px 0; line-height: 1.5; }
+
 .search-confirm { border: 1px solid #c6d4bc; background: #f3f6ee; border-radius: 10px; padding: 16px; margin: 12px 0; font-size: 13px; }
 .search-confirm p { line-height: 1.6; color: #5d6656; }
 .search-confirm label { display: grid; gap: 6px; }
