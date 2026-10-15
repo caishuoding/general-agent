@@ -1,0 +1,108 @@
+"""以真实数据库和受控外部 HTTP 响应验证文字对话。"""
+
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from general_agent.app import create_app
+
+
+def test_reply_and_usage_survive_restart(database_url: str, tmp_path: Path) -> None:
+    """模型回答、消息归属及服务返回用量在重启后仍可通过接口读取。"""
+    def provider(request: httpx.Request) -> httpx.Response:
+        """在外部模型边界校验请求，返回固定回答与已知用量。"""
+        assert request.url == "https://model.example/v1/chat/completions"
+        assert request.headers["authorization"] == "Bearer fixture-key"
+        payload = json.loads(request.content)
+        assert payload["model"] == "chat-model"
+        assert payload["messages"] == [{"role": "user", "content": "你好"}]
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "你好，今天想聊什么？"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
+        })
+
+    transport = httpx.MockTransport(provider)
+    with TestClient(create_app(database_url, tmp_path, transport), base_url="http://127.0.0.1:8000") as client:
+        client.put("/api/settings", json={"base_url": "https://model.example/v1", "model": "chat-model", "api_key": "fixture-key"})
+        conversation_id = client.post("/api/conversations", json={}).json()["id"]
+        reply = client.post(f"/api/conversations/{conversation_id}/messages", json={"content": "你好"})
+        assert reply.status_code == 200
+    with TestClient(create_app(database_url, tmp_path, transport), base_url="http://127.0.0.1:8000") as restarted:
+        detail = restarted.get(f"/api/conversations/{conversation_id}").json()
+        assert [(message["role"], message["content"], message["status"]) for message in detail["messages"]] == [
+            ("user", "你好", "complete"), ("assistant", "你好，今天想聊什么？", "complete"),
+        ]
+        usage = restarted.get("/api/usage").json()
+        assert len(usage) == 1
+        assert (usage[0]["prompt_tokens"], usage[0]["completion_tokens"], usage[0]["total_tokens"]) == (10, 8, 18)
+        assert usage[0]["status"] == "complete"
+
+
+def test_provider_failure_is_persisted_without_secret(database_url: str, tmp_path: Path) -> None:
+    """认证失败应保留用户输入和失败状态，但不回传服务错误中的凭据。"""
+    def provider(request: httpx.Request) -> httpx.Response:
+        """模拟会在错误正文中回显凭据的外部服务。"""
+        return httpx.Response(401, json={"error": "bad fixture-secret-do-not-expose"})
+
+    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000", raise_server_exceptions=False) as client:
+        client.put("/api/settings", json={"base_url": "https://model.example/v1", "model": "chat-model", "api_key": "fixture-secret-do-not-expose"})
+        conversation_id = client.post("/api/conversations", json={}).json()["id"]
+        response = client.post(f"/api/conversations/{conversation_id}/messages", json={"content": "请帮我写一段开场白"})
+        assert response.status_code == 502
+        assert "fixture-secret-do-not-expose" not in response.text
+        messages = client.get(f"/api/conversations/{conversation_id}").json()["messages"]
+        assert messages[0]["content"] == "请帮我写一段开场白"
+        assert messages[1]["status"] == "failed"
+        assert "认证失败" in messages[1]["content"]
+        call = client.get("/api/usage").json()[0]
+        assert call["status"] == "failed"
+        assert call["prompt_tokens"] is None
+
+
+def test_conversations_keep_separate_model_context(database_url: str, tmp_path: Path) -> None:
+    """往返两个会话时，模型只收到当前会话按顺序保存的消息。"""
+    expected = [
+        [{"role": "user", "content": "我喜欢茶"}],
+        [{"role": "user", "content": "今天下雨吗"}],
+        [{"role": "user", "content": "我喜欢茶"}, {"role": "assistant", "content": "已了解本会话的信息。"}, {"role": "user", "content": "继续"}],
+    ]
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """依据独立的预期上下文检查外部请求，而不检查内部对象或数据库。"""
+        assert json.loads(request.content)["messages"] == expected.pop(0)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "已了解本会话的信息。"}}]})
+
+    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
+        client.put("/api/settings", json={"base_url": "https://model.example/v1", "model": "chat", "api_key": "test-key"})
+        first = client.post("/api/conversations", json={}).json()["id"]
+        second = client.post("/api/conversations", json={}).json()["id"]
+        for conversation_id, content in [(first, "我喜欢茶"), (second, "今天下雨吗"), (first, "继续")]:
+            assert client.post(f"/api/conversations/{conversation_id}/messages", json={"content": content}).status_code == 200
+        assert len(client.get(f"/api/conversations/{first}").json()["messages"]) == 4
+        assert len(client.get(f"/api/conversations/{second}").json()["messages"]) == 2
+        assert client.get("/api/usage").json()[0]["total_tokens"] is None
+
+
+@pytest.mark.parametrize("mode", ["timeout", "bad-json", "no-text"])
+def test_unusable_response_is_not_a_success(database_url: str, tmp_path: Path, mode: str) -> None:
+    """超时或没有有效文字的响应应记为失败，已经返回的用量仍需保留。"""
+    def provider(request: httpx.Request) -> httpx.Response:
+        """模拟外部服务超时、非 JSON 正文和缺失回答的情况。"""
+        if mode == "timeout":
+            raise httpx.ReadTimeout("contains-secret", request=request)
+        if mode == "bad-json":
+            return httpx.Response(200, text="contains-secret")
+        return httpx.Response(200, json={"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 0, "total_tokens": 9}})
+
+    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
+        client.put("/api/settings", json={"base_url": "https://model.example/v1", "model": "chat", "api_key": "test-key"})
+        conversation_id = client.post("/api/conversations", json={}).json()["id"]
+        response = client.post(f"/api/conversations/{conversation_id}/messages", json={"content": "你好"})
+        assert response.status_code == 502
+        assert "contains-secret" not in response.text
+        call = client.get("/api/usage").json()[0]
+        assert call["status"] == "failed"
+        assert call["prompt_tokens"] == (9 if mode == "no-text" else None)

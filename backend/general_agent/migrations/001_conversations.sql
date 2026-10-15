@@ -1,0 +1,5 @@
+CREATE TABLE conversations (
+    id UUID PRIMARY KEY,
+    title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 120),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
