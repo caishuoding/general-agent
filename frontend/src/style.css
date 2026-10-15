@@ -860,5 +860,7 @@ td {
 .file-citation a, .attachment-item a { color: #435d49; }
 .file-citation blockquote { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; margin: 8px 0 0; color: #616b5f; }
 
+.document-coverage { width: 100%; padding: 7px 10px; border-radius: 5px; background: #f7f3e9; }
+.attachment-item .document-coverage p { margin: 3px 0; color: #796b43; line-height: 1.55; }
 .attachment-image-info { color: var(--text-muted, #777); flex-basis: 100%; padding-left: 24px; }
 .attachment-image-help { margin: 6px 0; color: #777; font-size: 11px; line-height: 1.5; }
