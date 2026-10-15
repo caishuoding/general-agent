@@ -16,6 +16,7 @@ import {
   type Settings,
   type Usage,
 } from "./api";
+import { BudgetPrompt } from "./BudgetPrompt";
 import { SettingsPanel } from "./SettingsPanel";
 
 type Screen = "chat" | "settings" | "memory";
@@ -412,6 +413,7 @@ export function App() {
             {error}
           </div>
         )}
+        <BudgetPrompt onConfigure={openSettings} />
         {screen === "settings" ? (
           <div className="page-scroll">
             <SettingsPanel

@@ -68,6 +68,7 @@ export function ModelCapabilities({ settings, onUsageChanged }: Props) {
       const key = form.elements.namedItem("api_key") as HTMLInputElement;
       key.value = "";
       setEmbedding(saved);
+      onUsageChanged(await api<Usage[]>("/usage"));
       setReuse(false);
       setResults(await api<Results>("/settings/capabilities"));
       setNotice("嵌入配置已保存；新配置需要单独检查。");

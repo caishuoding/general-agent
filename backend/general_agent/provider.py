@@ -16,6 +16,13 @@ class TokenUsage(BaseModel):
     total_tokens: StrictInt | None = Field(default=None, ge=0)
 
 
+    @classmethod
+    def from_payload(cls, payload: object) -> "TokenUsage":
+        """逐字段保留非负整数用量，一个缺失或畸形字段不抹掉其余真实数值。"""
+        data = payload if isinstance(payload, dict) else {}
+        return cls.model_validate({key: value for key, value in data.items() if key in cls.model_fields and type(value) is int and 0 <= value <= 2147483647})
+
+
 RED_IMAGE = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/Afnh+ngAAAAASUVORK5CYII="
 
 
@@ -78,7 +85,7 @@ class ModelClient:
         usage = TokenUsage()
         try:
             payload = response.json()
-            usage = TokenUsage.model_validate(payload.get("usage") or {})
+            usage = TokenUsage.from_payload(payload.get("usage"))
         except (ValueError, AttributeError):
             pass
         if response.status_code in (401, 403):
@@ -109,7 +116,7 @@ class ModelClient:
                     if not response.is_success:
                         response.read()
                         try:
-                            usage = TokenUsage.model_validate(response.json().get("usage") or {})
+                            usage = TokenUsage.from_payload(response.json().get("usage"))
                         except (ValueError, AttributeError):
                             pass
                         if response.status_code in (401, 403):
@@ -134,7 +141,7 @@ class ModelClient:
                         if not isinstance(payload, dict):
                             raise ModelFailure("模型流式回答失败，请稍后重试。", usage)
                         if payload.get("usage") is not None:
-                            usage = TokenUsage.model_validate(payload["usage"])
+                            usage = TokenUsage.from_payload(payload["usage"])
                             yield StreamChunk(usage=usage)
                         if payload.get("error"):
                             raise ModelFailure("模型流式回答失败，请稍后重试。", usage)
@@ -173,7 +180,7 @@ class ModelClient:
         payload = None
         try:
             payload = response.json()
-            usage = TokenUsage.model_validate(payload.get("usage") or {})
+            usage = TokenUsage.from_payload(payload.get("usage"))
         except (ValueError, AttributeError):
             pass
         if response.status_code in (401, 403):

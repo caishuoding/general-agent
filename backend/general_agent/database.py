@@ -56,4 +56,4 @@ class Database:
     def list_usage(self) -> list[dict[str, Any]]:
         """返回最近的调用记录，未取得的用量保留为空值。"""
         with self.connect() as connection:
-            return connection.execute("SELECT * FROM model_calls ORDER BY created_at DESC, id LIMIT 100").fetchall()
+            return connection.execute("SELECT * FROM model_calls WHERE status NOT IN ('reserved','cancelled') ORDER BY created_at DESC, id LIMIT 100").fetchall()
