@@ -57,6 +57,7 @@ class Message(BaseModel):
     reply_to: UUID | None = None
     error: str | None = None
     memory_action: dict[str, Any] | None = None
+    memory_recall: dict[str, Any] | None = None
     budget_pause: dict[str, str] | None = None
 
 

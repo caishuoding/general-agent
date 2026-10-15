@@ -35,7 +35,8 @@ class ChatService:
         try:
             response = self.execution.prepare(conversation_id,user_id,content,operation,reserved)
             if response is None:
-                response = self.model.bind(operation).complete(settings,[{'role':str(row['role']),'content':str(row['content'])} for row in rows],self.execution.chat_reservation(content,reserved)).content
+                material = self.execution.prepare_answer(user_id,content,operation,reserved)
+                response = self.model.bind(operation).complete(settings,material+[{'role':str(row['role']),'content':str(row['content'])} for row in rows],self.execution.chat_reservation(content,reserved)).content
         except BudgetPaused as paused:
             with self.database.connect() as connection:
                 connection.execute("UPDATE messages SET status='paused',budget_pause=%s WHERE id=%s AND status='generating'", (Jsonb(paused.public()),answer_id))

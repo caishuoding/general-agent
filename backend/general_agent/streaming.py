@@ -94,8 +94,9 @@ class StreamingChat:
                 with self.database.connect() as connection:
                     connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (local,message_id))
             else:
+                material = self.execution.prepare_answer(user_id,str(rows[-1]["content"]),operation,call_id)
                 reserved = self.execution.chat_reservation(str(rows[-1]["content"]), call_id) or self.model.budget.reserve(operation, settings)
-                for chunk in self.model.bind(operation).stream(settings, [{"role": str(row["role"]), "content": str(row["content"])} for row in rows], reserved, message_id):
+                for chunk in self.model.bind(operation).stream(settings, material + [{"role": str(row["role"]), "content": str(row["content"])} for row in rows], reserved, message_id):
                     if chunk.content:
                         with self.database.connect() as connection:
                             connection.execute("UPDATE messages SET content = content || %s WHERE id = %s AND status = 'generating'", (chunk.content, message_id))
@@ -120,7 +121,7 @@ class StreamingChat:
             if row is None or row['status'] != 'paused':
                 raise ValueError('该回答没有等待预算，不能重复恢复。')
             original = connection.execute('SELECT content FROM messages WHERE id=%s',(row['reply_to'],)).fetchone()
-            if row['model_revision'] != settings.revision or original is None or row['embedding_revision'] != self.execution.embedding_revision(original['content']):
+            if row['model_revision'] != settings.revision or original is None or not self.execution.same_embedding_revision(row['embedding_revision']):
                 raise ValueError('模型或嵌入配置已变更，请停止当前回答后重试。')
             operation = OperationContext(row['operation_id'],row['purpose'],conversation_id)
             connection.execute("UPDATE messages SET status='generating',budget_pause=NULL,error=NULL WHERE id=%s", (message_id,))
