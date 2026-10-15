@@ -1,0 +1,1 @@
+ALTER TABLE attachments ADD COLUMN parse_info JSONB NOT NULL DEFAULT '{}';

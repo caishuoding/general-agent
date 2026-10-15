@@ -176,7 +176,7 @@ def test_decoding_failure_and_unsupported_types_are_truthful(database_url: str, 
             assert row['status'] == 'failed'
             assert row['error']
             assert client.post(f'/api/conversations/{conversation}/runs', json={'content': '请阅读', 'attachment_ids': [identifier]}).status_code == 409
-        for name in ('fake.pdf', 'sheet.xlsx', 'audio.mp3', 'video.mp4', 'unknown.exe'):
+        for name in ('sheet.xlsx', 'audio.mp3', 'video.mp4', 'unknown.exe'):
             result = client.post(f'/api/conversations/{conversation}/attachments', files={'files': (name, b'plain text')})
             assert result.status_code == 422
             assert '暂未启用' in result.json()['detail']
