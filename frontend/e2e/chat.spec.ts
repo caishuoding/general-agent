@@ -3,7 +3,7 @@ import { test, expect } from "@playwright/test";
 const modelUrl = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18081"}/v1`;
 const appUrl = `http://127.0.0.1:${process.env.TEST_APP_PORT || "18080"}`;
 
-// 从浏览器验证首次配置、发送消息、刷新持久化和会话切换。
+// 从浏览器验证首次配置、发送消息、刷新持久化、会话切换和空记忆入口。
 test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
   await page.goto("/");
   await expect(
@@ -39,7 +39,7 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
   ).toBeVisible();
   await page.getByRole("button", { name: "长期记忆", exact: true }).click();
   await expect(
-    page.getByText("长期记忆尚未启用", { exact: true }),
+    page.getByRole("heading", { name: "已批准的长期记忆" }),
   ).toBeVisible();
 });
 

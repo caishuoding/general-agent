@@ -18,6 +18,7 @@ import {
 } from "./api";
 import { BudgetPrompt } from "./BudgetPrompt";
 import { SettingsPanel } from "./SettingsPanel";
+import { MemoryPanel } from "./MemoryPanel";
 
 type Screen = "chat" | "settings" | "memory";
 
@@ -44,6 +45,7 @@ export function App() {
     id: string;
     content: string;
   } | null>(null);
+  const [sourceMessage, setSourceMessage] = useState<string | null>(null);
   const activeId = useRef<string | null>(null);
   const selection = useRef(0);
   const bottom = useRef<HTMLDivElement>(null);
@@ -54,6 +56,11 @@ export function App() {
     // 从持久化消息状态确定需要订阅的回答。
     (message) => message.status === "generating",
   );
+  const paused = conversation?.messages.find(
+    // 暂停尝试仍占用执行位置，用户恢复或取消前不能发送新的消息。
+    (message) => message.status === "paused",
+  );
+  const activeRun = generating || paused;
   const generatingId = generating?.id;
   const conversationId = conversation?.id;
 
@@ -90,6 +97,22 @@ export function App() {
     },
     [generatingId, conversationId],
   );
+
+  useEffect(
+    // 来源会话加载后定位原消息，直接滚动并标示该条来源。
+    () => {
+      if (sourceMessage && conversation?.messages.some(
+        // 只定位当前已加载会话确实包含的消息标识。
+        (message) => message.id === sourceMessage,
+      )) document.getElementById(`message-${sourceMessage}`)?.scrollIntoView({ block: "center" });
+    }, [sourceMessage, conversation],
+  );
+
+  // 打开后端登记的原消息，后续渲染负责定位，不依赖延时猜测。
+  function openMemorySource(id: string, messageId: string) {
+    setSourceMessage(messageId);
+    void selectConversation(id);
+  }
 
   // 切换会话时递增请求序号，阻止较慢的旧请求覆盖当前会话。
   async function selectConversation(id: string) {
@@ -193,7 +216,7 @@ export function App() {
     }
   }
 
-  // 记忆入口只说明当前能力，避免将尚未实现的功能呈现为可用。
+  // 打开记忆管理页，由页面重新核对正式事实与原消息来源。
   function openMemory() {
     setScreen("memory");
     setError("");
@@ -223,7 +246,7 @@ export function App() {
     if (
       !content ||
       pending ||
-      generating ||
+      activeRun ||
       changingRun ||
       creating ||
       loading ||
@@ -274,10 +297,14 @@ export function App() {
     const id = activeId.current;
     const messageId = event.currentTarget.dataset.message;
     const action = event.currentTarget.dataset.action;
+    const approve = event.currentTarget.dataset.approve === "true";
     if (!id || !messageId || !action || changingRun) return;
     setChangingRun(true);
     setError("");
     try {
+      if (approve && paused?.budget_pause) {
+        await api(`/budget/operations/${paused.budget_pause.operation_id}/approve`, { method: "POST", body: JSON.stringify({ pause_id: paused.budget_pause.pause_id }) });
+      }
       const result = await api<ConversationDetail>(`/conversations/${id}/messages/${messageId}/${action}`, { method: "POST" });
       if (activeId.current === id) {
         selection.current += 1;
@@ -313,7 +340,8 @@ export function App() {
     return (
       <article
         key={message.id}
-        className={`message ${message.role} ${message.status}`}
+        id={`message-${message.id}`}
+        className={`message ${message.role} ${message.status} ${sourceMessage === message.id ? "source-highlight" : ""}`}
       >
         <div className="message-label">
           {message.role === "user" ? "你" : "助手"}
@@ -325,6 +353,15 @@ export function App() {
           </time>
         </div>
         <div className="message-content">{message.content}</div>
+        {message.memory_action && <div className={`memory-action ${message.memory_action.status}`} role="status">
+          {message.memory_action.status === "complete" ? `已保存 · ${message.memory_action.fact}` : message.memory_action.status === "failed" ? `记忆保存未完成 · ${message.memory_action.error || "可以重试核对。"}` : "记忆正在处理，尚未确认保存。"}
+        </div>}
+        {message.status === "paused" && message.budget_pause && <section className="run-budget" aria-label="回答等待预算">
+          <strong>后续云端请求已暂停</strong><p>{message.budget_pause.detail}</p><p>已完成的记忆操作会保留。批准仅允许下一次调用。</p>
+          <button className="retry-button" data-action="resume" data-approve="true" data-message={message.id} onClick={changeRun} disabled={changingRun}>仅允许下一次云端调用并继续</button>
+          <button className="retry-button" data-action="resume" data-message={message.id} onClick={changeRun} disabled={changingRun}>重新检查并继续</button>
+          <button className="retry-button" data-action="stop" data-message={message.id} onClick={changeRun} disabled={changingRun}>取消本次回答</button>
+        </section>}
         {message.status === "generating" && <div className="message-progress" role="status">正在生成…</div>}
         {message.status === "failed" && (
           <div className="message-error" role="alert">回答未完成 · {message.error || "可以重试或检查设置。"}</div>
@@ -423,18 +460,7 @@ export function App() {
             />
           </div>
         ) : screen === "memory" ? (
-          <section className="memory-page">
-            <div className="memory-symbol" aria-hidden="true">
-              ◇
-            </div>
-            <div className="eyebrow">关于你的长期记忆</div>
-            <h2>长期记忆尚未启用</h2>
-            <p>
-              当前对话只使用本会话中的消息。
-              <br />
-              跨会话记忆将在后续版本提供。
-            </p>
-          </section>
+          <MemoryPanel onSource={openMemorySource} />
         ) : (
           <div className="chat-layout">
             <div className="chat-scroll">
@@ -509,8 +535,8 @@ export function App() {
                   <span>
                     文字对话 <i>·</i> Shift + Enter 换行
                   </span>
-                  {generating ? (
-                    <button type="button" className="stop-button" data-action="stop" data-message={generating.id} onClick={changeRun} disabled={changingRun}>
+                  {activeRun ? (
+                    <button type="button" className="stop-button" data-action="stop" data-message={activeRun.id} onClick={changeRun} disabled={changingRun}>
                       停止生成
                     </button>
                   ) : <button
