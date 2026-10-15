@@ -9,6 +9,7 @@ from general_agent.calls import CallGateway
 from general_agent.memory import MemoryService
 from general_agent.memory_correction import MemoryCorrection, correction_intent
 from general_agent.recall import MemoryRecall
+from general_agent.provider import ModelMessage
 from general_agent.settings import StoredSettings
 
 
@@ -90,8 +91,8 @@ class ChatExecution:
             return self.calls.budget.reserve(operation, embedding, 'embedding_tokens')
         return self.calls.budget.reserve(operation, settings)
 
-    def prepare_answer(self, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None) -> list[dict[str, str]]:
-        """普通回答先使用已批准相关记忆；明确保存分支维持其独立动作与回执。"""
+    def prepare_answer(self, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None) -> list[ModelMessage]:
+        """普通回答提供已批准相关记忆，兼容文字或视觉消息组合；明确保存维持独立回执。"""
         if explicit_intent(content).fact:
             return []
         with self.memory.database.connect() as connection:

@@ -866,3 +866,5 @@ td {
 .memory-update-source { display: flex; gap: 12px; flex-wrap: wrap; justify-content: space-between; color: #6e7968; font-size: 13px; margin: 10px 0; }
 .memory-update-source button { color: #426348; text-decoration: underline; }
 .memory-identity { font-size: 11px; color: #879082; margin: 10px 0 6px; overflow-wrap: anywhere; }
+.attachment-image-info { color: var(--text-muted, #777); flex-basis: 100%; padding-left: 24px; }
+.attachment-image-help { margin: 6px 0; color: #777; font-size: 11px; line-height: 1.5; }
