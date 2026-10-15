@@ -27,7 +27,7 @@ def history_query(content: str) -> str | None:
 
 
 def query_terms(query: str) -> list[str]:
-    """按显式关键词做有限词法匹配，转义 LIKE 符号，不生成云端查询或语义向量。"""
+    """提取有限的原文关键词；不生成云端查询或语义向量。"""
     return list(dict.fromkeys(re.findall(r'[\w\u4e00-\u9fff]{2,80}', query.lower())))[:12]
 
 
