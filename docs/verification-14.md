@@ -19,7 +19,7 @@ TXT/Markdown、文本 PDF、DOCX 使用现有可信文字片段与位置；PDF �
 - `validate_attachment_source(database, directory, candidate, require_person=True)` 要求候选未拒绝/过期、附件 `status='ready'`、原会话相同、上传版本相同、请求消息之前已实际绑定、原文件存在、文字原文仍匹配可信片段，且人物已澄清。文件仍在磁盘但附件开始删除、状态不再 `ready` 时立即失效。任务 15 应先把来源设为不可用，再清派生数据；不能仅在最后 unlink 文件。
 - `MemoryService.save(..., validate_source=...)` 在登记前、`MeteredEmbedding.embed` 实际嵌入返回并记账后（SDK 写入前）以及正式动作发布前调用该守卫。`MemoryService.session(..., before_write=...)` / `PgMemory(..., before_write=...)` 传递此回调；直接保存、更正、召回等不受附件守卫影响。失效抛出 ValueError，不能把失败标成已保存。未来重建已确认且明确保留的记忆不应重新要求已删除原文件存在。
 - 来源删除还须协调所有发现/确认云操作和并发发布，取消对应 `memory_discovery_operations`、`memory_candidate_operations`、`memory_action_operations` 并采用任务 09 的动作墓碑与条件发布。来源检查不是代替删除锁/墓碑的全局互斥；任务 15 需要以来源失效和取消协调检查到正式写入之间的竞态，并清理已产生但未发布的 Mem0 向量与历史。
-- 清理范围包括 `memory_candidates` 的 fact/source_quote/target_fact、上述附件来源表、发现/确认/正式动作相关 `cloud_operations.scope` / result、受影响消息内容、Mem0 正文/向量/历史以及任务 13 的分段与汇总缓存。保留需要防止复活的最小 UUID/状态关系。仅删除附件且用户明确保留的已确认有效记忆，应由任务 15 脱离已删除来源后继续有效，并可由任务 18 重建。
+- 清理范围包括 `memory_candidates` 的 fact/source_quote/target_fact、上述附件来源表、发现/确认/正式动作相关 `cloud_operations.result` 与许可、受影响消息内容、Mem0 正文/向量/历史以及任务 13 的分段与汇总缓存。`scope_hash` 不含正文，保留其操作身份用途；不存在 `scope` 列。保留需要防止复活的最小 UUID/状态关系。仅删除附件且用户明确保留的已确认有效记忆，应由任务 15 脱离已删除来源后继续有效，并可由任务 18 重建。
 - `AttachmentService.prepare(..., only_attachment_ids=...)` 是额外的获准范围过滤，不另造检索/执行引擎。附件正文从不作为当前用户输入传给任务 08 自动候选发现。
 
 ## 验证
