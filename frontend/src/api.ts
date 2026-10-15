@@ -17,6 +17,8 @@ export type Message = {
   content: string;
   status: "generating" | "paused" | "complete" | "stopped" | "failed";
   search_action: { id: string; query: string; status: string; revision: string; purpose: string; sources: { id: string; label: string }[]; error: string | null } | null;
+  history_search: { status: "complete" | "empty" | "unavailable"; count: number; detail: string } | null;
+  history_sources: { key: string; conversation_id: string; conversation_title: string; message_id: string; role: "user" | "assistant"; created_at: string; excerpt: string }[];
   web_sources: { key: string; title: string; url: string; excerpt: string }[];
   memory_action: MemoryAction | null;
   memory_update: MemoryUpdate | null;

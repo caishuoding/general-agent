@@ -1,3 +1,4 @@
+import { HistorySources } from "./HistorySources";
 import { DocumentProgress } from './DocumentProgress';
 import {
   useEffect,
@@ -27,7 +28,7 @@ import { MemoryPanel } from "./MemoryPanel";
 
 type Screen = "chat" | "settings" | "memory";
 
-// 展示会话、记忆候选与正式动作、资料出处及预算状态，并隔离过期异步响应。
+// 展示会话、记忆、资料和历史出处及预算状态，并隔离过期异步响应。
 export function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(
@@ -114,14 +115,14 @@ export function App() {
     }, [sourceMessage, conversation],
   );
 
-  // 打开后端登记的原消息，后续渲染负责定位，不依赖延时猜测。
+  // 打开记忆或历史来源并重新验证消息存在；后续渲染负责定位原处。
   function openMemorySource(id: string, messageId: string) {
     setSourceMessage(messageId);
-    void selectConversation(id);
+    void selectConversation(id, messageId);
   }
 
-  // 切换时清空附件选择并递增请求序号，阻止旧资料或回答覆盖新会话。
-  async function selectConversation(id: string) {
+  // 切换时隔离旧响应与附件；来源跳转额外核验原消息，失效则明确提示。
+  async function selectConversation(id: string, expectedMessage?: string) {
     const current = ++selection.current;
     activeId.current = id;
     localStorage.setItem("active-conversation", id);
@@ -132,7 +133,13 @@ export function App() {
     setError("");
     try {
       const result = await api<ConversationDetail>(`/conversations/${id}`);
-      if (current === selection.current) setConversation(result);
+      if (current === selection.current) {
+        setConversation(result);
+        if (expectedMessage && !result.messages.some(
+          // 来源消息必须仍在当前会话中，不能把仅存在会话当成有效出处。
+          (message) => message.id === expectedMessage,
+        )) setError("原消息已不可用，无法定位这条历史出处。");
+      }
     } catch (failure) {
       if (current === selection.current) setError(errorMessage(failure));
     }
@@ -372,7 +379,7 @@ export function App() {
     return <details className="file-citation" key={citation.key} open><summary>[{citation.key}] <a href={`/api/conversations/${conversation?.id}/attachments/${citation.attachment_id}/file`} download>{citation.filename} · {citation.location}</a></summary><blockquote>{citation.excerpt}</blockquote></details>;
   }
 
-  // 展示回答、候选与搜索外发确认、正式记忆及全文进度，保留出处、暂停和重试入口。
+  // 展示回答、历史与资料出处、记忆和搜索动作，保留暂停及重试入口。
   function renderMessage(message: Message) {
     return (
       <article
@@ -407,6 +414,7 @@ export function App() {
         </section>}
         {!!message.attachment_ids?.length && <div className="message-progress">已附 {message.attachment_ids.length} 个会话文件</div>}
         {message.search_action && conversation && <SearchCard message={message} conversationId={conversation.id} onUpdated={applySearchUpdate} />}
+        <HistorySources state={message.history_search} sources={message.history_sources || []} onSource={openMemorySource} />
         {message.web_sources?.map(renderWebSource)}
         {message.citations?.map(renderCitation)}
         {message.status === "generating" && <div className="message-progress" role="status">正在生成…</div>}

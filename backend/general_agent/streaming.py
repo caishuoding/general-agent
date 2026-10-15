@@ -8,6 +8,7 @@ from general_agent.attachments import AttachmentContext, AttachmentService
 from general_agent.database import Database
 from general_agent.budget import BudgetPaused, OperationContext
 from general_agent.execution import ChatExecution
+from general_agent.history import HistoryContext
 from psycopg.types.json import Jsonb
 from general_agent.calls import CallGateway
 from general_agent.provider import ModelFailure, ModelMessage
@@ -101,9 +102,10 @@ class StreamingChat:
         return new_id
 
     def execute(self, conversation_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
-        """执行当前授权与候选后处理明确搜索或资料；先核验普通资料能力，全文暂停复用完成分段。"""
+        """共同动作后明确历史只读消息；其他资料与全文按原预算、恢复和来源规则执行。"""
         material = AttachmentContext()
         summary: SummaryPreparation | None = None
+        history_material: HistoryContext | None = None
         failure: str | None = None
         try:
             with self.database.connect() as connection:
@@ -114,7 +116,8 @@ class StreamingChat:
                     connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (local,message_id))
             else:
                 content = str(rows[-1]['content'])
-                web_material = self.execution.search.prepare(conversation_id,user_id,content,settings,operation)
+                history_material = self.execution.history.prepare(conversation_id,user_id,content,operation)
+                web_material = history_material.messages if history_material else self.execution.search.prepare(conversation_id,user_id,content,settings,operation)
                 chat_reserved = self.execution.chat_reservation(content,call_id)
                 if web_material is None:
                     material = self.attachments.prepare(conversation_id,user_id,content,settings=settings) if summary_mode(content) is None else AttachmentContext()
@@ -124,16 +127,19 @@ class StreamingChat:
                         material = summary.material
                 else:
                     memory_material = web_material
-                if summary and summary.cached_answer is not None:
+                if history_material and history_material.local_answer is not None:
+                    with self.database.connect() as connection:
+                        connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (history_material.local_answer,message_id))
+                elif summary and summary.cached_answer is not None:
                     with self.database.connect() as connection:
                         connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (summary.cached_answer,message_id))
                 else:
                     reserved = self.documents.reserve_final(summary,settings,operation) if summary else (chat_reserved or self.model.budget.reserve(operation,settings))
-                    history: list[ModelMessage] = [{"role":str(row["role"]),"content":str(row["content"])} for row in (rows[-1:] if summary else rows)]
+                    history: list[ModelMessage] = [{"role":str(row["role"]),"content":str(row["content"])} for row in (rows[-1:] if summary or history_material else rows)]
                     answer = ''
                     for chunk in self.model.bind(operation).stream(settings,memory_material + material.messages + history,reserved,message_id):
                         answer += chunk.content
-                        if chunk.content:
+                        if chunk.content and (not history_material or self.execution.history.available(operation)):
                             with self.database.connect() as connection:
                                 connection.execute("UPDATE messages SET content=content || %s WHERE id=%s AND status='generating'", (chunk.content,message_id))
                     if summary:
@@ -154,6 +160,11 @@ class StreamingChat:
             self.execution.search.fail(operation,failure)
         if failure and summary:
             self.documents.failed_final(summary)
+        with self.database.connect() as connection:
+            row = connection.execute('SELECT content FROM messages WHERE id=%s',(message_id,)).fetchone()
+            if row:
+                resolved = self.execution.history.resolve(operation,row['content'], bool(history_material and history_material.messages))
+                connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'",(resolved,message_id))
         self.attachments.save_citations(message_id, conversation_id, material)
         self.execution.search.save_sources(message_id, operation)
         with self.database.connect() as connection:

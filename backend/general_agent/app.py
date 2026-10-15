@@ -73,6 +73,8 @@ class Message(BaseModel):
     document_progress: dict[str, Any] | None = None
     attachment_ids: list[UUID] = Field(default_factory=list)
     search_action: dict[str, Any] | None = None
+    history_search: dict[str, Any] | None = None
+    history_sources: list[dict[str, Any]] = Field(default_factory=list)
     web_sources: list[dict[str, object]] = Field(default_factory=list)
     citations: list[dict[str, object]] = Field(default_factory=list)
 

@@ -893,3 +893,5 @@ td {
 .search-confirm textarea { width: 100%; min-height: 90px; padding: 10px; border: 1px solid #bac5b4; border-radius: 6px; resize: vertical; font: inherit; }
 .search-confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .search-status { margin: 8px 0; font-size: 12px; color: #64765b; }
+
+.history-sources .source-button { color: #426348; text-decoration: underline; text-align: left; overflow-wrap: anywhere; padding-top: 6px; }

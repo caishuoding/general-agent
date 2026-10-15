@@ -14,6 +14,7 @@ from general_agent.recall import MemoryRecall
 from general_agent.provider import ModelMessage
 from general_agent.settings import StoredSettings
 from general_agent.summary import summary_mode
+from general_agent.history import HistorySearch, history_query
 from general_agent.search import SearchService, search_query
 
 
@@ -49,17 +50,18 @@ class ChatExecution:
     """共用批准动作和回答准备；传输、线程及答案尝试留给聊天入口。"""
 
     def __init__(self, calls: CallGateway, memory: MemoryService, search: SearchService) -> None:
-        """绑定本地动作、明确搜索及唯一云端调用边界。"""
+        """绑定本地记忆、明确历史与联网检索，以及唯一云端调用边界。"""
         self.calls, self.memory = calls, memory
         self.recall = MemoryRecall(memory)
         self.search = search
+        self.history = HistorySearch(memory.database)
         self.correction = MemoryCorrection(memory)
         self.candidates = MemoryCandidates(memory)
         self.deletion = MemoryDeletion(memory)
 
     def embedding_revision(self, content: str) -> str | None:
-        """本地删除不绑定嵌入；其余保存、更正或召回按原配置版本约束暂停恢复。"""
-        if deletion_intent(content) is not None:
+        """本地删除与只读历史不绑定嵌入，其余记忆动作按配置版本约束暂停恢复。"""
+        if history_query(content) is not None or deletion_intent(content) is not None:
             return None
         embedding = self.memory.embedding.store.read() if explicit_intent(content).fact or correction_intent(content) is not None or self.recall.available() else None
         return embedding.revision if embedding else None
@@ -75,8 +77,8 @@ class ChatExecution:
         return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """本地删除不申请预算；其余动作在真实云端调用前逐步检查预算。"""
-        if deletion_intent(content) is not None:
+        """本地删除不申请预算，历史先本机检索，其余动作预留实际首步。"""
+        if history_query(content) is not None or deletion_intent(content) is not None:
             return None
         if correction_intent(content) is not None:
             # 更正先持久化目标版本并停用旧值，再在步骤内申请预算。
@@ -125,7 +127,9 @@ class ChatExecution:
         return reserved if row and row['unit']=='chat_tokens' and row['status']=='reserved' else None
 
     def prepare(self, conversation_id: UUID, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None, settings: StoredSettings | None = None) -> str | None:
-        """执行当前明确删除、保存或更正；普通个人事实先候选后回答。"""
+        """历史保持只读；执行当前明确删除、保存或更正，普通个人事实先候选后回答。"""
+        if history_query(content) is not None:
+            return None
         if deletion_intent(content) is not None:
             return self.deletion.chat(content,user_id)
         if correction_intent(content) is not None:

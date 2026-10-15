@@ -27,7 +27,7 @@ class ControlledModel(BaseHTTPRequestHandler):
     attempts: dict[str, int] = {}
 
     def do_POST(self) -> None:
-        """返回分段SSE及实际资料出处，支持全文分段与最终汇总，并可模拟慢速回答和断流。"""
+        """返回真实历史/资料标记及分段 SSE，支持全文、历史查询与可控慢速和断流。"""
         payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
         prompt = payload["messages"][-1]["content"]
         self.attempts[prompt] = self.attempts.get(prompt, 0) + 1
@@ -55,6 +55,10 @@ class ControlledModel(BaseHTTPRequestHandler):
         second = "，第二段。" if slow else "模型的测试回答。"
         if document_reply is not None:
             first, second = document_reply, ""
+        for item in payload['messages']:
+            if isinstance(item.get('content'), str) and item['content'].startswith('实际历史聊天结果\n'):
+                historical = json.loads(item['content'].split('\n', 1)[1])[0]
+                first, second = '旧聊天有对应讨论。', f"[{historical['key']}]"
         for item in ([] if document_reply is not None else payload["messages"]):
             content = item.get("content", "")
             if isinstance(content, str) and '"attachment_id"' in content:

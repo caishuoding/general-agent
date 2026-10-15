@@ -9,6 +9,7 @@ from general_agent.database import Database
 from general_agent.budget import BudgetPaused, OperationContext
 from general_agent.calls import CallGateway
 from general_agent.execution import ChatExecution
+from general_agent.history import HistoryContext
 from general_agent.provider import ModelFailure, ModelMessage
 from general_agent.settings import StoredSettings
 from general_agent.summary import DocumentSummary, SummaryPreparation, summary_mode
@@ -25,7 +26,7 @@ class ChatService:
         self.documents = DocumentSummary(database, model, attachments)
 
     def send(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, attachment_ids: list[UUID] | None = None) -> None:
-        """先处理当前授权与候选，再执行明确搜索或资料；普通资料先核验能力，全文保留分段检查点。"""
+        """沿共同执行器处理当前授权，明确历史只读旧消息，其他资料保持既有能力和预算边界。"""
         self.attachments.validate(conversation_id, attachment_ids or [])
         user_id, answer_id = uuid4(), uuid4()
         with self.database.connect() as connection:
@@ -42,10 +43,12 @@ class ChatService:
         failure: ModelFailure | None = None
         material = AttachmentContext()
         summary: SummaryPreparation | None = None
+        history_material: HistoryContext | None = None
         try:
             response = self.execution.prepare(conversation_id,user_id,content,operation,reserved,settings)
             if response is None:
-                web_material = self.execution.search.prepare(conversation_id,user_id,content,settings,operation)
+                history_material = self.execution.history.prepare(conversation_id,user_id,content,operation)
+                web_material = history_material.messages if history_material else self.execution.search.prepare(conversation_id,user_id,content,settings,operation)
                 chat_reserved = self.execution.chat_reservation(content,reserved)
                 if web_material is None:
                     material = self.attachments.prepare(conversation_id,user_id,content,settings=settings) if summary_mode(content) is None else AttachmentContext()
@@ -55,8 +58,8 @@ class ChatService:
                         material = summary.material
                 else:
                     memory_material = web_material
-                history: list[ModelMessage] = [{'role':str(row['role']),'content':str(row['content'])} for row in (rows[-1:] if summary else rows)]
-                response = summary.cached_answer if summary and summary.cached_answer else self.model.bind(operation).complete(settings,memory_material + material.messages + history,self.documents.reserve_final(summary,settings,operation) if summary else chat_reserved,answer_id).content
+                history: list[ModelMessage] = [{'role':str(row['role']),'content':str(row['content'])} for row in (rows[-1:] if summary or history_material else rows)]
+                response = history_material.local_answer if history_material and history_material.local_answer else summary.cached_answer if summary and summary.cached_answer else self.model.bind(operation).complete(settings,memory_material + material.messages + history,self.documents.reserve_final(summary,settings,operation) if summary else chat_reserved,answer_id).content
                 if summary and summary.cached_answer is None:
                     response = self.documents.finish(summary,response)
         except (BudgetPaused,SearchAwaiting) as paused:
@@ -69,6 +72,7 @@ class ChatService:
             self.execution.search.fail(operation,response)
         if failure and summary:
             self.documents.failed_final(summary)
+        response = self.execution.history.resolve(operation,response, bool(history_material and history_material.messages))
         response, web_sources = self.execution.search.resolve(operation,response)
         response, citations = self.attachments.resolve(conversation_id, response, material)
         with self.database.connect() as connection:
