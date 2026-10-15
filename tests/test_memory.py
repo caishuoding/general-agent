@@ -104,6 +104,7 @@ def test_partial_mem0_history_failure_reconciles_without_duplicate_or_second_emb
         conversation_id = configure_memory(client)
         # 在数据库边界安排持久化故障，不替换 Mem0 或应用内部模块。
         with psycopg.connect(database_url) as connection:
+            # 拒绝真实 Mem0 历史插入，验证部分保存恢复不会重复向量或再次嵌入。
             connection.execute("CREATE FUNCTION reject_history() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'history unavailable'; END $$")
             connection.execute('CREATE TRIGGER reject_history BEFORE INSERT ON mem0_history FOR EACH ROW EXECUTE FUNCTION reject_history()')
         assert client.post(f'/api/conversations/{conversation_id}/runs',json={'content':'请记住：我喜欢茶'}).status_code == 202
