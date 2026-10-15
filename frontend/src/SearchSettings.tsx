@@ -44,7 +44,7 @@ export function SearchSettings({ onSaved }: Props) {
   }
   return <div className="settings-card">
     <div className="card-heading"><h3>联网搜索</h3><span className="small-label">Tavily · 独立配置</span></div>
-    <p className="field-help">明确说“联网搜索：…”才会联网。涉及记忆或附件的查询先展示完整外发文本，确认后发送给 Tavily。未配置不会妨碍其他功能。</p>
+    <p className="field-help">明确说“联网搜索：…”才会联网。涉及记忆或附件的查询先由你配置的模型读取相关材料、拟定文字，再展示完整外发文本，确认后发送给 Tavily。未配置不会妨碍其他功能。</p>
     {settings && <form key={settings.base_url} onSubmit={save}>
       <label>Tavily API 地址<input name="base_url" type="url" defaultValue={settings.base_url} required maxLength={2048} /></label>
       <label>Tavily API 密钥<input name="api_key" type="password" autoComplete="off" placeholder={settings.api_key_configured ? '已配置 · 同地址留空保留' : '填写独立 Tavily 密钥'} /></label>

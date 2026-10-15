@@ -53,6 +53,7 @@ export function SearchCard({ message, conversationId, onUpdated }: Props) {
   return <section className="search-confirm" aria-label="搜索内容外发确认">
     <strong>发送这些内容到搜索服务？</strong>
     <p>{action.purpose}</p>
+    <p>查询已由你配置的模型根据相关资料生成。请核对并删去不需要发送的细节。</p>
     <p>来源：{action.sources.map(
       // 展示参与查询的来源名称，正文以完整查询框中的文本为准。
       (source) => source.label,

@@ -92,8 +92,9 @@ class SearchService:
             elif len(query)>2000:
                 raise ValueError('搜索查询最多 2000 字符，请缩短后重试。')
             with self.database.connect() as connection:
-                row=connection.execute("UPDATE search_requests SET query=%s,sources=%s,status=%s,expires_at=%s WHERE id=%s RETURNING *",(query,Jsonb(sources),'pending' if sources else 'approved',time.time()+1800,row['id'])).fetchone()
-            assert row is not None
+                row=connection.execute("UPDATE search_requests SET query=%s,sources=%s,status=%s,expires_at=%s WHERE id=%s AND status='planning' RETURNING *",(query,Jsonb(sources),'pending' if sources else 'approved',time.time()+1800,row['id'])).fetchone()
+            if row is None:
+                raise ValueError('搜索规划已停止或失效，迟到的查询不会重新生效。')
         if row['status'] in ('pending','approved') and row['sources'] and time.time()>row['expires_at']:
             self.expire(row,'外发确认已超过 30 分钟，请重新发起搜索。')
         if row['status'] in ('pending','approved','complete') and not self.valid_sources(row):
@@ -204,7 +205,7 @@ class SearchService:
     def fail(self, operation: OperationContext, detail: str) -> None:
         """查询规划或配置检查失败时结束未发出的步骤，避免界面仍显示正在准备。"""
         with self.database.connect() as connection:
-            connection.execute("UPDATE search_requests SET status='failed',error=%s WHERE operation_id=%s AND status IN ('planning','approved')",(detail,operation.operation_id))
+            connection.execute("UPDATE search_requests SET status='failed',error=%s WHERE operation_id=%s AND status IN ('planning','pending','approved')",(detail,operation.operation_id))
 
     def cancel(self, operation_id: UUID) -> None:
         """停止执行时撤销尚未使用的搜索许可，不能用旧确认恢复已取消操作。"""
@@ -256,11 +257,13 @@ class SearchService:
             return results
 
     def resolve(self, operation: OperationContext, answer: str) -> tuple[str,list[dict[str, Any]]]:
-        """只把本次实际返回的安全网页链接显示为可核验来源。"""
+        """只显示本次实际安全来源；漏引时仍提供核对链接，空结果不得伪称已经查证。"""
         with self.database.connect() as connection:
             row = connection.execute("SELECT results FROM search_requests WHERE operation_id=%s AND status='complete'", (operation.operation_id,)).fetchone()
         if row is None:
             return answer, []
+        if not row['results']:
+            return ('本次搜索未找到可核验的网页结果，无法基于网络来源回答。请调整关键词后重试。' if answer else answer), []
         allowed = {item['key']: item for item in row['results']}
         used = []
 
@@ -276,6 +279,7 @@ class SearchService:
         cleaned = re.sub(r'\[(W\d+)\]', replace, answer)
         if answer and allowed and not used:
             cleaned += '\n\n联网提示：此回答缺少可核验的网页引用，请核对搜索来源。'
+            used = list(allowed.values())
         return cleaned, used
 
     def save_sources(self, message_id: UUID, operation: OperationContext) -> None:

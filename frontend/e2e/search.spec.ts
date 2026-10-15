@@ -20,6 +20,7 @@ test('联网确认卡片允许编辑、拒绝和单次批准并提供来源链�
   await page.getByRole('button', { name: '发送消息' }).click();
   const card = page.getByRole('region', { name: '搜索内容外发确认' });
   await expect(card.getByLabel('将发送给 Tavily 的完整查询')).toHaveValue('上海市青松路 88 号附近咖啡店');
+  await card.getByRole('button', { name: '允许发送以上内容并搜索', exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: '/private/tmp/general-agent-implementation/search-confirm-17.png', fullPage: true });
   await page.reload();
   await expect(card.getByLabel('将发送给 Tavily 的完整查询')).toHaveValue('上海市青松路 88 号附近咖啡店');
