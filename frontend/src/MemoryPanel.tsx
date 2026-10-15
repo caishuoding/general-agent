@@ -78,10 +78,10 @@ export function MemoryPanel({ onSource }: Props) {
     } catch (failure) { setError(errorMessage(failure)); }
     finally { setBusy(null); reload(); }
   }
-  // 展示每次更正的批准来源，管理页操作与聊天消息分别标记。
+  // 展示每次更正的批准来源与正文清理状态，管理页操作和聊天来源分别标记。
   function renderUpdate(update: MemoryUpdate) {
     return <div className="memory-update-source" key={update.id}>
-      <span>{update.source_kind === "management" ? "管理页更正" : `聊天更正：${update.conversation_title || "原会话"}`} · {update.status === "complete" ? "已完成" : "未完成"}</span>
+      <span>{update.source_kind === "management" ? "管理页更正" : `聊天更正：${update.conversation_title || "原会话"}`} · {update.status === "deleted" ? "正文已清除" : update.status === "complete" ? "已完成" : "未完成"}</span>
       {update.source_message_id && update.source_conversation_id && <button onClick={openSource} data-conversation={update.source_conversation_id} data-message={update.source_message_id}>查看更正消息</button>}
     </div>;
   }

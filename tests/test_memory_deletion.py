@@ -345,3 +345,44 @@ def test_attachment_candidate_deletion_clears_derived_source_without_removing_si
         assert client.post(f"/api/memory-candidates/{second['id']}/confirm").status_code==200
         assert [row['fact'] for row in client.get('/api/memories').json()]==['人物：陈敏（朋友）。事实：喜欢乌龙茶']
         assert client.get(f"/api/conversations/{conversation}/attachments/{file['id']}/file").status_code==200
+
+
+def test_delete_during_attachment_confirmation_preserves_source_guard_and_tombstone(database_url: str, tmp_path: Path) -> None:
+    """附件确认嵌入在途时删除同一动作，来源守卫和删除墓碑共同阻止迟到保存与卡片复活。"""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from time import monotonic,sleep
+    from test_attachment_memory import attachment_provider
+    entered,release=Event(),Event()
+    def provider(request: httpx.Request) -> httpx.Response:
+        """只阻塞已澄清候选的正式嵌入，发现阶段继续使用真实附件候选协议。"""
+        if request.url.path.endswith('/embeddings') and '人物：陈敏' in request.content.decode():
+            entered.set()
+            assert release.wait(10)
+        return attachment_provider(request)
+    with TestClient(create_app(database_url,tmp_path,httpx.MockTransport(provider)),base_url='http://127.0.0.1:8000') as client:
+        conversation=configure_memory(client)
+        file=client.post(f'/api/conversations/{conversation}/attachments',files={'files':('朋友.txt','陈敏住在杭州。陈敏喜欢乌龙茶。'.encode())}).json()[0]
+        result=client.post(f'/api/conversations/{conversation}/messages',json={'content':'请从附件提取长期记忆','attachment_ids':[file['id']]}).json()['messages'][-1]
+        card=next(row for row in result['memory_candidates'] if row['fact']=='住在杭州')
+        client.put(f"/api/memory-candidates/{card['id']}/subject",json={'kind':'other','label':'陈敏（朋友）'})
+        with ThreadPoolExecutor() as pool:
+            confirmation=pool.submit(client.post,f"/api/memory-candidates/{card['id']}/confirm")
+            assert entered.wait(5)
+            entry=client.get('/api/memories').json()[0]
+            deletion=pool.submit(client.delete,f"/api/memories/{entry['id']}")
+            try:
+                deadline=monotonic()+5
+                while monotonic()<deadline:
+                    rows=client.get('/api/memories').json()
+                    if rows[0]['status']=='deleting':
+                        break
+                    sleep(.02)
+                assert rows[0]['status']=='deleting'
+            finally:
+                release.set()
+            assert confirmation.result(timeout=10).status_code==409
+            assert deletion.result(timeout=10).status_code==200
+        removed=next(row for row in client.get(f'/api/conversations/{conversation}').json()['messages'][-1]['memory_candidates'] if row['id']==card['id'])
+        assert removed['status']=='expired' and removed['fact']=='' and removed['attachment_source'] is None
+        assert client.get('/api/memories').json()==[]
