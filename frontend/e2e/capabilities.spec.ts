@@ -4,7 +4,7 @@ import { test, expect } from "@playwright/test";
 test("设置分别检查四项能力并使旧结果失效", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  await page.getByLabel("API 地址", { exact: true }).fill("http://127.0.0.1:18085/v1");
+  await page.getByLabel("API 地址", { exact: true }).fill(`http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18085"}/v1`);
   await page.getByLabel("模型名称", { exact: true }).fill("controlled-model");
   await page.getByLabel("API 密钥", { exact: true }).fill("browser-test-key");
   await page.getByRole("button", { name: "保存配置", exact: true }).click();

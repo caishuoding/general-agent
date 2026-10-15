@@ -1,6 +1,6 @@
 # 个人对话智能体
 
-当前已实现任务 01 与 03：本机 Web 文字对话、独立聊天与嵌入配置、分项能力验证、会话持久化和调用用量记录。长期记忆、附件、流式回答、搜索和预算控制仍按后续任务实现；记忆页面会明确显示尚未启用。
+当前已实现任务 01、02、03：本机 Web 文字对话、独立聊天与嵌入配置、分项能力验证、会话持久化、流式回答、停止与失败重试，以及逐次调用用量记录。长期记忆、附件、搜索和预算控制仍按后续任务实现；记忆页面会明确显示尚未启用。
 
 ## 启动
 
@@ -16,7 +16,11 @@ bash scripts/start.sh
 
 在设置中输入服务商提供的 API 基础地址（通常以 `/v1` 结尾）、文字模型名称和 API 密钥，然后新建会话并发送消息。接口使用 OpenAI 兼容的 Chat Completions；保存配置仅表示已保存，不代表服务能力已验证。云端地址使用 HTTPS，本机服务允许回环 HTTP。更换服务地址需重新填写密钥；同一地址留空密钥会保留原密钥。
 
-此版本一次性返回完整文字回答。设置页展示最近调用的 token 用量，缺失值显示为未知；尚未估算费用或执行预算暂停。真实调用按你的服务商规则计费。
+回答会逐段显示，页面和 PostgreSQL 都保留生成中、完成、已停止或失败状态。点击“停止生成”会冻结当前回答，不再追加后续文字；已经发出的模型请求会继续接收可返回的用量，因此停止不保证撤销服务商费用。浏览器断开或切换会话不会自动停止后端生成，重新进入后会恢复进度。
+
+最新失败或停止的回答可点击“重试回答”；重试保留旧尝试及部分内容，创建新的调用记录，不重复插入用户消息。模型断流、输出长度限制和不支持流式接口都会明确显示为未完成。服务必须支持 Chat Completions 的 SSE 流式响应、结束标记与 stream_options.include_usage；本版本不会自动重发请求或回退成另一次调用。
+
+设置页展示每次实际调用的状态和服务返回 token，用量缺失显示为未知；尚未估算费用或执行预算暂停。重试按新的实际调用计费。真实调用按你的服务商规则计费。
 
 按 Ctrl+C 停止应用。停止数据库可执行 `docker compose stop`；再次启动后数据仍保留。数据库默认仅监听 `127.0.0.1:15432`，应用仅监听 `127.0.0.1:8000`。
 
@@ -33,7 +37,7 @@ bash scripts/start.sh
 
 可用环境变量：`DATABASE_URL` 指定 PostgreSQL；`APP_DATA_DIR` 指定本机配置目录；`POSTGRES_PORT` 修改 Compose 的宿主端口。修改数据库端口时，同步设置 `DATABASE_URL`。Compose 内的密码仅用于这个本机开发实例。
 
-数据库结构在应用启动时按版本迁移，已应用的迁移不会重复执行。请保留数据库卷；`docker compose down -v` 会删除其数据。
+数据库结构在应用启动时按版本迁移，已应用的迁移不会重复执行。应用使用单个后端进程运行；启动时会将上次进程中断的生成记录标为失败并保留已提交的内容与用量，请勿用多个 worker 共用同一业务库。请保留数据库卷；`docker compose down -v` 会删除其数据。
 
 ## 开发与检查
 
@@ -48,13 +52,15 @@ pnpm --dir frontend exec playwright install chromium
 pnpm --dir frontend test:e2e
 ```
 
-完整 Python 测试使用 `uv run pytest -q`。默认测试连接本机 PostgreSQL 的管理库，每个测试创建随机命名的独立数据库，结束后只删除它创建的数据库；可用 `TEST_DATABASE_URL` 指定专用测试实例。浏览器测试使用临时配置、独立数据库和本机受控模型，不读取你的模型密钥，不调用付费服务。
+完整 Python 测试使用 `uv run pytest -q`。默认测试连接本机 PostgreSQL 的管理库，每个测试创建随机命名的独立数据库，结束后只删除它创建的数据库；可用 `TEST_DATABASE_URL` 指定专用测试实例。浏览器测试使用临时配置、独立数据库和本机受控模型，不读取你的模型密钥，不调用付费服务。可用 TEST_APP_PORT、TEST_MODEL_PORT 修改默认的 18080/18081 测试端口，用 TEST_PYTHON 指定测试服务的 Python。
 
 开发热更新可分别运行 `uv run uvicorn general_agent.app:create_app --factory --app-dir backend --host 127.0.0.1 --port 8000 --reload` 和 `pnpm --dir frontend dev`，浏览器访问 Vite 提供的本机地址。
 
 测试遵循应用对外接口边界，使用真实 PostgreSQL；测试用模型替身只替换外部 HTTP 响应。实际服务兼容性需填写自己的模型配置后验证，替身通过不等同于真实接口已验收。
 
 2026-10-15 已使用 DeepSeek 官方接口完成一次真实文字调用：API 地址为 `https://api.deepseek.com`，模型为 `deepseek-flash`，返回“连接成功”并记录服务用量。实际验证范围、自动化检查和审查修复见 [任务 01 验收记录](docs/verification-01.md)。密钥不包含在文档或代码中。
+
+任务 02 已通过真实 PostgreSQL、受控流式模型、浏览器及实际后端进程强制终止/重启检查；真实云端流式兼容性尚未验收，详见 [任务 02 验收记录](docs/verification-02.md)。任务 01 的真实非流式调用不替代本项验收。
 
 参考：[FastAPI 外部依赖测试](https://fastapi.tiangolo.com/advanced/testing-dependencies/)、[Psycopg 事务管理](https://www.psycopg.org/psycopg3/docs/basic/transactions.html)、[Vite 使用说明](https://vite.dev/guide/)、[pnpm 构建脚本配置](https://pnpm.io/settings/build#allowbuilds)。
 

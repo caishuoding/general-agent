@@ -8,7 +8,9 @@ export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  status: "complete" | "failed";
+  status: "generating" | "complete" | "stopped" | "failed";
+  reply_to: string | null;
+  error: string | null;
   created_at: string;
 };
 export type ConversationDetail = Conversation & { messages: Message[] };

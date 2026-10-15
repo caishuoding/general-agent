@@ -1,5 +1,8 @@
 import { test, expect } from "@playwright/test";
 
+const modelUrl = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18081"}/v1`;
+const appUrl = `http://127.0.0.1:${process.env.TEST_APP_PORT || "18080"}`;
+
 // 从浏览器验证首次配置、发送消息、刷新持久化和会话切换。
 test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
   await page.goto("/");
@@ -7,7 +10,7 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
     page.getByRole("heading", { name: "个人对话空间" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  await page.getByLabel("API 地址", { exact: true }).fill("http://127.0.0.1:18081/v1");
+  await page.getByLabel("API 地址", { exact: true }).fill(modelUrl);
   await page.getByLabel("模型名称", { exact: true }).fill("controlled-model");
   await page.getByLabel("API 密钥", { exact: true }).fill("browser-test-key");
   await page.getByRole("button", { name: "保存配置" }).click();
@@ -44,7 +47,7 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
 test("较慢的会话读取不会覆盖刚收到的回答", async ({ page, request }) => {
   await request.put("/api/settings", {
     data: {
-      base_url: "http://127.0.0.1:18081/v1",
+      base_url: modelUrl,
       model: "controlled-model",
       api_key: "browser-test-key",
     },
@@ -57,7 +60,7 @@ test("较慢的会话读取不会覆盖刚收到的回答", async ({ page, reque
   await expect(
     page.getByRole("textbox", { name: "消息", exact: true }),
   ).toBeEnabled();
-  const url = `http://127.0.0.1:18080/api/conversations/${conversation.id}`;
+  const url = `${appUrl}/api/conversations/${conversation.id}`;
   let releaseResponse!: () => void;
   // 保存释放开关，只延迟真实响应，不伪造应用接口结果。
   const delayed = new Promise<void>((resolve) => {

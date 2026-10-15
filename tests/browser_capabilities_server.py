@@ -42,17 +42,17 @@ class ControlledCapabilities(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    """启动临时能力验收站点，退出时只删除本进程创建的数据库。"""
+    """按测试端口启动临时能力站点，退出时只删除本进程创建的数据库。"""
     admin = os.environ.get("TEST_DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/postgres")
     name = "general_agent_capabilities_browser_" + uuid4().hex
     with psycopg.connect(admin, autocommit=True) as connection:
         connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
-    model = ThreadingHTTPServer(("127.0.0.1", 18085), ControlledCapabilities)
+    model = ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("TEST_MODEL_PORT", "18085"))), ControlledCapabilities)
     Thread(target=model.serve_forever, daemon=True).start()
     try:
         with TemporaryDirectory() as directory:
             app = create_app(make_conninfo(admin, dbname=name), Path(directory))
-            uvicorn.run(app, host="127.0.0.1", port=18084, log_level="warning")
+            uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("TEST_APP_PORT", "18084")), log_level="warning")
     finally:
         model.shutdown()
         model.server_close()

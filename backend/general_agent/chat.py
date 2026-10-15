@@ -16,12 +16,14 @@ class ChatService:
         self.model = model
 
     def send(self, conversation_id: UUID, content: str, settings: StoredSettings) -> None:
-        """串行执行同一会话请求；服务失败先保存真实状态，再向调用方报告。"""
+        """串行执行同一会话请求并拒绝已有流式生成；失败先保存真实状态。"""
         failure: ModelFailure | None = None
         with self.database.connect() as connection:
             conversation = connection.execute("SELECT id FROM conversations WHERE id = %s FOR UPDATE", (conversation_id,)).fetchone()
             if conversation is None:
                 raise LookupError("会话不存在。")
+            if connection.execute("SELECT id FROM messages WHERE conversation_id = %s AND status = 'generating'", (conversation_id,)).fetchone():
+                raise ValueError("本会话正在生成回答，请先停止或等待完成。")
             rows = connection.execute(
                 "SELECT role, content FROM messages WHERE conversation_id = %s AND status = 'complete' ORDER BY position",
                 (conversation_id,),
