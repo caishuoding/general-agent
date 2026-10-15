@@ -1,8 +1,8 @@
 import { useEffect, useState, type ChangeEvent, type FormEvent, type MouseEvent } from "react";
-import { api, errorMessage, type MemoryAction, type MemoryUpdate } from "./api";
+import { api, errorMessage, type AttachmentMemorySource, type MemoryAction, type MemoryUpdate } from "./api";
 
 type Props = { onSource: (conversationId: string, messageId: string) => void };
-type Entry = MemoryAction & { conversation_title: string; version: number; updates: MemoryUpdate[] };
+type Entry = MemoryAction & { conversation_title: string; version: number; updates: MemoryUpdate[]; attachment_sources: AttachmentMemorySource[] };
 
 // 读取真实记忆和更正状态，支持按条目编辑、显式重试并查看原始及更正来源。
 export function MemoryPanel({ onSource }: Props) {
@@ -75,6 +75,10 @@ export function MemoryPanel({ onSource }: Props) {
   }
   // 每个条目展示真实有效性；未完成更正展示目标正文而不把旧值冒充当前事实。
   function renderEntry(entry: Entry) {
+    // 文件下载同时核验原会话，人物沿用用户批准的精确预览。
+    function renderAttachmentSource(source: AttachmentMemorySource) {
+      return <p key={source.attachment_id}>附件来源：<a href={`/api/conversations/${entry.conversation_id}/attachments/${source.attachment_id}/file`}>{source.filename}</a> · {source.location} · {source.subject_label}</p>;
+    }
     const update = entry.updates.at(-1);
     const changing = busy === entry.id;
     const unfinished = update && update.status !== "complete";
@@ -90,6 +94,7 @@ export function MemoryPanel({ onSource }: Props) {
         {unfinished && update.status !== "saving" && <button className="retry-button" onClick={retryUpdate} data-update={update.id} data-entry={entry.id} disabled={!!busy}>重试更正</button>}
       </div>}
       <div className="memory-source"><span>原来源：{entry.conversation_title}</span><button onClick={openSource} data-conversation={entry.conversation_id} data-message={entry.message_id}>查看原消息</button></div>
+      {entry.attachment_sources.map(renderAttachmentSource)}
       {entry.updates.map(renderUpdate)}
       <div className="memory-identity">记忆标识：{entry.id}</div>
       <time>{new Date(entry.created_at).toLocaleString("zh-CN")}</time>

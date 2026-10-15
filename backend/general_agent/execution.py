@@ -7,6 +7,7 @@ from uuid import UUID
 from general_agent.budget import OperationContext
 from general_agent.calls import CallGateway
 from general_agent.memory import MemoryService
+from general_agent.attachment_memory import AttachmentMemory, attachment_memory_intent
 from general_agent.memory_candidates import MemoryCandidates, candidate_eligible
 from general_agent.memory_correction import MemoryCorrection, correction_intent
 from general_agent.recall import MemoryRecall
@@ -49,13 +50,14 @@ class ChatExecution:
     """共用批准动作和回答准备；传输、线程及答案尝试留给聊天入口。"""
 
     def __init__(self, calls: CallGateway, memory: MemoryService, search: SearchService) -> None:
-        """绑定本地记忆、明确历史与联网检索，以及唯一云端调用边界。"""
+        """绑定本地保存、附件候选、明确历史和联网检索，以及唯一云端调用边界。"""
         self.calls, self.memory = calls, memory
         self.recall = MemoryRecall(memory)
         self.search = search
         self.history = HistorySearch(memory.database)
         self.correction = MemoryCorrection(memory)
         self.candidates = MemoryCandidates(memory)
+        self.attachment_memory = AttachmentMemory(self.candidates, search.attachments)
 
     def embedding_revision(self, content: str) -> str | None:
         """只读历史不涉及嵌入；保存、更正或召回绑定本次配置版本。"""
@@ -75,8 +77,8 @@ class ChatExecution:
         return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """历史本机检索先落状态；其他动作预留实际首步并遵守预算。"""
-        if history_query(content) is not None:
+        """只读历史与附件候选先登记状态，其他动作预留实际首步并遵守预算。"""
+        if history_query(content) is not None or attachment_memory_intent(content):
             return None
         if correction_intent(content) is not None:
             # 更正先持久化目标版本并停用旧值，再在步骤内申请预算。
@@ -125,9 +127,11 @@ class ChatExecution:
         return reserved if row and row['unit']=='chat_tokens' and row['status']=='reserved' else None
 
     def prepare(self, conversation_id: UUID, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None, settings: StoredSettings | None = None) -> str | None:
-        """历史请求保持只读；其他当前明确动作及普通个人事实沿既有规则执行。"""
+        """历史请求优先保持只读；明确附件先预览，其他保存与个人事实沿既有规则。"""
         if history_query(content) is not None:
             return None
+        if attachment_memory_intent(content) and settings is not None:
+            return self.attachment_memory.prepare(conversation_id,user_id,settings,operation)
         if correction_intent(content) is not None:
             return self.correction.chat(content,user_id,conversation_id,operation)
         intent = explicit_intent(content)
