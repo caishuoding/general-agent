@@ -40,12 +40,16 @@ def test_delete_memory_preserves_chat_and_other_entries_without_cloud_calls(data
         response=client.post(f'/api/conversations/{conversation}/messages',json={'content':'按我的偏好回答'})
         assert '我喜欢简洁的中文回答' not in response.json()['messages'][-1]['content']
         assert client.delete(f"/api/memories/{target['id']}").json()['status']=='complete'
+        history=client.post(f'/api/conversations/{conversation}/messages',json={'content':'查找旧聊天：简洁的中文回答'}).json()['messages'][-1]
+        assert any('我喜欢简洁的中文回答' in item['excerpt'] for item in history['history_sources'])
+        assert len(client.get('/api/memories').json())==1
 
 
 def test_deleted_candidate_and_old_source_cannot_restore_but_sibling_can_confirm(database_url: str, tmp_path: Path) -> None:
     """删除同源候选之一后，旧卡与旧发现失效，另一个独立候选仍可明确确认。"""
     import json
     from test_memory_candidates import candidate_provider
+    from uuid import uuid4
     def provider(request: httpx.Request) -> httpx.Response:
         """仅在外部模型边界为同一当前消息提出两个独立事实。"""
         payload=json.loads(request.content)
@@ -60,9 +64,11 @@ def test_deleted_candidate_and_old_source_cannot_restore_but_sibling_can_confirm
         second=next(row for row in answer['memory_candidates'] if row['fact']=='我住在苏州')
         assert client.post(f"/api/memory-candidates/{first['id']}/confirm").status_code==200
         entry=client.get('/api/memories').json()[0]
-        update=client.put(f"/api/memories/{entry['id']}",json={'fact':'我喜欢简洁的中文回答','expected_version':1}).json()
+        headers={'X-Operation-ID':str(uuid4())}
+        update=client.put(f"/api/memories/{entry['id']}",json={'fact':'我喜欢简洁的中文回答','expected_version':1},headers=headers).json()
         assert client.delete(f"/api/memories/{entry['id']}").status_code==200
         count=len(client.get('/api/usage').json())
+        assert client.put(f"/api/memories/{entry['id']}",json={'fact':'我喜欢简洁的中文回答','expected_version':1},headers=headers).status_code==409
         assert client.post(f"/api/memory-candidates/{first['id']}/confirm").status_code==409
         assert client.post(f"/api/conversations/{source}/messages/{answer['reply_to']}/memory-candidates/retry").status_code==409
         assert client.post(f"/api/memory-updates/{update['id']}/retry").status_code in (404,409)
@@ -262,3 +268,51 @@ def test_delete_clears_search_approval_and_summary_cache_without_erasing_origina
             assert steps and steps[0]>0
             private=connection.execute("SELECT count(*) FROM cloud_operations WHERE result::text LIKE '%苏州%' OR approved OR pause_id IS NOT NULL").fetchone()
             assert private and private[0]==0
+
+
+def test_deleted_memory_cannot_return_through_late_summary_cache(database_url: str, tmp_path: Path) -> None:
+    """删除时已发出的最终总结可以收尾计量，但晚到完整正文不得缓存给下一次明确重试。"""
+    import json
+    from threading import Event
+    from time import monotonic, sleep
+    from test_summary import summary_response
+    from test_streaming import wait_message
+    entered,release=Event(),Event()
+    streams=0
+    def provider(request: httpx.Request) -> httpx.Response:
+        """阻塞含旧记忆的最终回答；重试模型明确返回不含旧事实的不同答案以检测缓存复用。"""
+        nonlocal streams
+        payload=json.loads(request.content)
+        if request.url.path.endswith('/embeddings'):
+            return recall_provider(request)
+        if payload.get('stream'):
+            streams+=1
+            if streams==1:
+                assert '我住在苏州' in json.dumps(payload,ensure_ascii=False)
+                entered.set()
+                assert release.wait(10)
+                content='我住在苏州 [A1]'
+            else:
+                assert '我住在苏州' not in json.dumps(payload,ensure_ascii=False)
+                content='重新整理的资料 [A1]'
+            return httpx.Response(200,text='data: '+json.dumps({'choices':[{'delta':{'content':content},'finish_reason':'stop'}],'usage':{'prompt_tokens':10,'completion_tokens':5,'total_tokens':15}})+'\n\ndata: [DONE]\n\n')
+        return summary_response(request)
+    with TestClient(create_app(database_url,tmp_path,httpx.MockTransport(provider)),base_url='http://127.0.0.1:8000') as client:
+        source=configure_memory(client)
+        client.post(f'/api/conversations/{source}/messages',json={'content':'请记住：我住在苏州'})
+        entry=client.get('/api/memories').json()[0]
+        conversation=client.post('/api/conversations',json={}).json()['id']
+        file=client.post(f'/api/conversations/{conversation}/attachments',files={'files':('报告.txt','周五完成发布。'.encode())}).json()[0]
+        client.post(f'/api/conversations/{conversation}/runs',json={'content':'请完整总结这份资料','attachment_ids':[file['id']]})
+        assert entered.wait(5)
+        try:
+            assert client.delete(f"/api/memories/{entry['id']}").status_code==200
+            stopped=wait_message(client,conversation,'stopped')
+        finally:
+            release.set()
+        deadline=monotonic()+5
+        while client.get('/api/usage/summary').json()['pending_calls'] and monotonic()<deadline:
+            sleep(.02)
+        assert client.post(f"/api/conversations/{conversation}/messages/{stopped['id']}/retry").status_code==202
+        complete=wait_message(client,conversation,'complete')
+        assert streams==2 and '重新整理的资料' in complete['content'] and '我住在苏州' not in complete['content']
