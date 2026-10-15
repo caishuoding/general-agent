@@ -37,14 +37,14 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
     }
   }
 
-  // 按服务实际返回值显示 token，未取得的用量始终标为未知。
+  // 按实际生成状态与服务返回值显示调用，未取得的用量始终标为未知。
   function renderUsage(call: Usage) {
     return (
       <tr key={call.id}>
         <td>{call.model}</td>
         <td>
           <span className={`usage-state ${call.status}`}>
-            {call.status === "complete" ? "已完成" : "失败"}
+            {({ complete: "已完成", failed: "失败", stopped: "已停止", generating: "生成中" } as Record<string, string>)[call.status] || call.status}
           </span>
         </td>
         <td>{call.prompt_tokens ?? "未知"}</td>

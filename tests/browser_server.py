@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Thread
+from time import sleep
 from uuid import uuid4
 
 import psycopg
@@ -22,15 +23,40 @@ from general_agent.app import create_app
 class ControlledModel(BaseHTTPRequestHandler):
     """只在测试进程中运行的模型替身，不用于产品演示或真实验收。"""
 
+    attempts: dict[str, int] = {}
+
     def do_POST(self) -> None:
-        """消费模型请求并返回固定的文字响应。"""
-        self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        body = json.dumps({"choices": [{"message": {"content": "这是受控模型的测试回答。"}}], "usage": {"prompt_tokens": 12, "completion_tokens": 10, "total_tokens": 22}}).encode()
+        """按外部请求返回真实分段 SSE，指定测试输入可模拟慢速回答与断流。"""
+        payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        prompt = payload["messages"][-1]["content"]
+        self.attempts[prompt] = self.attempts.get(prompt, 0) + 1
+        if not payload.get("stream"):
+            body = json.dumps({"choices": [{"message": {"content": "这是受控模型的测试回答。"}}], "usage": {"prompt_tokens": 12, "completion_tokens": 10, "total_tokens": 22}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
-        self.wfile.write(body)
+        slow = "分段" in prompt or "停止" in prompt or "断流" in prompt
+        first = "第一段" if slow else "这是受控"
+        second = "，第二段。" if slow else "模型的测试回答。"
+        self.write_event({"choices": [{"delta": {"content": first}}]})
+        sleep(2 if slow else 0.05)
+        self.write_event({"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 10, "total_tokens": 22}})
+        if "断流" in prompt and self.attempts[prompt] == 1:
+            return
+        self.write_event({"choices": [{"delta": {"content": second}, "finish_reason": "stop"}]})
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
+    def write_event(self, payload: dict[str, object]) -> None:
+        """写入并刷新单个模型事件，让浏览器能在下一段之前观察界面。"""
+        self.wfile.write(("data: " + json.dumps(payload) + "\n\n").encode())
+        self.wfile.flush()
 
     def log_message(self, format: str, *args: object) -> None:
         """测试替身不打印模型请求或凭据。"""
@@ -43,12 +69,12 @@ def main() -> None:
     name = "general_agent_browser_" + uuid4().hex
     with psycopg.connect(admin, autocommit=True) as connection:
         connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
-    model = ThreadingHTTPServer(("127.0.0.1", 18081), ControlledModel)
+    model = ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("TEST_MODEL_PORT", "18081"))), ControlledModel)
     Thread(target=model.serve_forever, daemon=True).start()
     try:
         with TemporaryDirectory() as directory:
             app = create_app(make_conninfo(admin, dbname=name), Path(directory))
-            uvicorn.run(app, host="127.0.0.1", port=18080, log_level="warning")
+            uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("TEST_APP_PORT", "18080")), log_level="warning")
     finally:
         model.shutdown()
         model.server_close()

@@ -793,3 +793,11 @@ td {
     animation: none !important;
   }
 }
+
+.message-progress { margin-top: 12px; color: var(--muted, #777); font-size: 13px; }
+.retry-button, .stop-button { border: 1px solid #d3ccc2; border-radius: 9px; padding: 8px 12px; background: #faf7f2; color: #4c5148; cursor: pointer; }
+.retry-button { margin-top: 12px; }
+.retry-button:disabled, .stop-button:disabled { opacity: .5; cursor: wait; }
+.stream-notice { font-size: 13px; color: #855b34; }
+.usage-state.generating { color: #596b47; }
+.usage-state.stopped { color: #855b34; }

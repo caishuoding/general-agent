@@ -1,5 +1,6 @@
 """应用对外接口。"""
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -10,7 +11,7 @@ from uuid import UUID
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.base import RequestResponseEndpoint
@@ -20,6 +21,7 @@ from starlette.responses import Response
 from general_agent.chat import ChatService
 from general_agent.database import Database
 from general_agent.provider import ModelClient, ModelFailure
+from general_agent.streaming import StreamingChat
 from general_agent.settings import PublicSettings, SettingsInput, SettingsStore
 
 
@@ -45,6 +47,8 @@ class Message(BaseModel):
     content: str
     status: str
     created_at: datetime
+    reply_to: UUID | None = None
+    error: str | None = None
 
 
 class ConversationDetail(Conversation):
@@ -69,12 +73,15 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     ))
     settings = SettingsStore(data_dir or Path(os.environ.get("APP_DATA_DIR", ".local")))
     chat = ChatService(database, ModelClient(model_transport))
+    streaming = StreamingChat(database, ModelClient(model_transport))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """启动时迁移数据库；所有请求连接均自行释放。"""
+        """启动时迁移并恢复遗留执行；停机时标记未完成回答并短暂等待工作线程。"""
         database.migrate()
+        streaming.recover()
         yield
+        await asyncio.to_thread(streaming.close)
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
@@ -135,7 +142,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.post("/api/conversations/{conversation_id}/messages", response_model=ConversationDetail)
     def send_message(conversation_id: UUID, body: MessageInput) -> ConversationDetail:
-        """完成并持久化一次对话；失败返回可公开的说明，详情保留失败状态。"""
+        """兼容同步对话并拒绝已有流式生成；失败保留记录并返回公开说明。"""
         saved = settings.read()
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
@@ -145,7 +152,69 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
             raise HTTPException(404, "会话不存在。") from None
         except ModelFailure as error:
             raise HTTPException(502, str(error)) from None
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
         return get_conversation(conversation_id)
+
+    @app.post("/api/conversations/{conversation_id}/runs", status_code=202, response_model=ConversationDetail)
+    def start_stream(conversation_id: UUID, body: MessageInput) -> ConversationDetail:
+        """启动持久化的流式回答，客户端可订阅事件或重新读取会话。"""
+        saved = settings.read()
+        if saved is None:
+            raise HTTPException(409, "请先在设置中配置模型。")
+        try:
+            streaming.start(conversation_id, body.content, saved)
+        except LookupError as error:
+            raise HTTPException(404, str(error)) from None
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
+        return get_conversation(conversation_id)
+
+    @app.post("/api/conversations/{conversation_id}/messages/{message_id}/retry", status_code=202, response_model=ConversationDetail)
+    def retry_stream(conversation_id: UUID, message_id: UUID) -> ConversationDetail:
+        """重试最新失败或停止的回答，产生新的实际调用而不重复用户消息。"""
+        saved = settings.read()
+        if saved is None:
+            raise HTTPException(409, "请先在设置中配置模型。")
+        try:
+            streaming.retry(conversation_id, message_id, saved)
+        except LookupError as error:
+            raise HTTPException(404, str(error)) from None
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
+        return get_conversation(conversation_id)
+
+    @app.post("/api/conversations/{conversation_id}/messages/{message_id}/stop", response_model=ConversationDetail)
+    def stop_stream(conversation_id: UUID, message_id: UUID) -> ConversationDetail:
+        """停止该次回答后续内容更新，已发出请求的用量仍可能继续取得。"""
+        try:
+            streaming.stop(conversation_id, message_id)
+        except LookupError as error:
+            raise HTTPException(404, str(error)) from None
+        return get_conversation(conversation_id)
+
+    @app.get("/api/conversations/{conversation_id}/messages/{message_id}/events")
+    def stream_events(conversation_id: UUID, message_id: UUID) -> StreamingResponse:
+        """订阅已提交的回答快照；浏览器重连时从持久化记录恢复。"""
+        try:
+            streaming.message(conversation_id, message_id)
+        except LookupError as error:
+            raise HTTPException(404, str(error)) from None
+
+        async def events() -> AsyncIterator[str]:
+            """只在内容或状态变化时发送快照，并在终态关闭事件流。"""
+            previous = ""
+            while True:
+                row = await asyncio.to_thread(streaming.message, conversation_id, message_id)
+                message = Message.model_validate(row)
+                current = message.model_dump_json()
+                if current != previous:
+                    yield "data: " + current + "\n\n"
+                    previous = current
+                if message.status != "generating":
+                    return
+                await asyncio.sleep(0.1)
+        return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/api/usage", response_model=list[UsageRecord])
     def get_usage() -> list[UsageRecord]:

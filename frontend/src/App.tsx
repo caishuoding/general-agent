@@ -20,7 +20,7 @@ import { SettingsPanel } from "./SettingsPanel";
 
 type Screen = "chat" | "settings" | "memory";
 
-// 展示会话、文字对话、配置与当前能力边界，并隔离异步切换带来的过期响应。
+// 展示会话、流式回答、停止重试与配置，并隔离异步切换带来的过期响应。
 export function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(
@@ -37,6 +37,8 @@ export function App() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [streamNotice, setStreamNotice] = useState("");
+  const [changingRun, setChangingRun] = useState(false);
   const [pending, setPending] = useState<{
     id: string;
     content: string;
@@ -45,6 +47,48 @@ export function App() {
   const selection = useRef(0);
   const bottom = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLFormElement>(null);
+
+  // 当前会话最多有一条正在生成的回答。
+  const generating = conversation?.messages.find(
+    // 从持久化消息状态确定需要订阅的回答。
+    (message) => message.status === "generating",
+  );
+  const generatingId = generating?.id;
+  const conversationId = conversation?.id;
+
+  useEffect(
+    // 订阅持久化回答快照，重新进入会话时自动恢复当前进度。
+    function subscribeToAnswer() {
+      setStreamNotice("");
+      if (!generatingId || !conversationId) return;
+      const source = new EventSource(`/api/conversations/${conversationId}/messages/${generatingId}/events`);
+      // 用服务器快照替换对应回答，不重复拼接重连后再次收到的内容。
+      source.onmessage = (event: MessageEvent<string>) => {
+        const message = JSON.parse(event.data) as Message;
+        if (activeId.current !== conversationId) return;
+        setStreamNotice("");
+        setConversation(
+          // 只更新本次订阅所属会话，防止切换后的旧事件覆盖新会话。
+          (current) => current?.id === conversationId ? {
+            ...current,
+            messages: current.messages.map(
+              // 用同一回答标识替换持久化快照。
+              (item) => item.id === message.id ? message : item,
+            ),
+          } : current,
+        );
+        if (message.status !== "generating") source.close();
+      };
+      // 网络断开时保留内容并允许浏览器自动重连，不伪造模型失败或完成。
+      source.onerror = () => {
+        if (activeId.current === conversationId)
+          setStreamNotice("进度连接中断，正在重新连接；后端回答状态将在连接恢复后同步。");
+      };
+      // 离开会话只取消界面订阅，停止生成由明确的停止按钮触发。
+      return () => source.close();
+    },
+    [generatingId, conversationId],
+  );
 
   // 切换会话时递增请求序号，阻止较慢的旧请求覆盖当前会话。
   async function selectConversation(id: string) {
@@ -171,13 +215,15 @@ export function App() {
     }
   }
 
-  // 发送当前会话的一条消息，隔离其他会话结果，并使此前读取的旧消息失效。
+  // 启动当前会话的一次流式生成，隔离其他会话结果并使旧读取失效。
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
     if (
       !content ||
       pending ||
+      generating ||
+      changingRun ||
       creating ||
       loading ||
       !settings.api_key_configured
@@ -192,7 +238,7 @@ export function App() {
     setError("");
     try {
       const result = await api<ConversationDetail>(
-        `/conversations/${targetId}/messages`,
+        `/conversations/${targetId}/runs`,
         { method: "POST", body: JSON.stringify({ content }) },
       );
       if (activeId.current === targetId) {
@@ -222,6 +268,27 @@ export function App() {
     }
   }
 
+  // 对当前回答发送停止或重试操作，并重新应用后端保存的真实状态。
+  async function changeRun(event: MouseEvent<HTMLButtonElement>) {
+    const id = activeId.current;
+    const messageId = event.currentTarget.dataset.message;
+    const action = event.currentTarget.dataset.action;
+    if (!id || !messageId || !action || changingRun) return;
+    setChangingRun(true);
+    setError("");
+    try {
+      const result = await api<ConversationDetail>(`/conversations/${id}/messages/${messageId}/${action}`, { method: "POST" });
+      if (activeId.current === id) {
+        selection.current += 1;
+        setConversation(result);
+      }
+    } catch (failure) {
+      if (activeId.current === id) setError(errorMessage(failure));
+    } finally {
+      setChangingRun(false);
+    }
+  }
+
   // 将每个会话渲染为可访问的切换按钮。
   function renderConversation(item: Conversation) {
     return (
@@ -240,7 +307,7 @@ export function App() {
     );
   }
 
-  // 以纯文本展示消息，保留换行并明确区分失败状态，避免执行模型返回的 HTML。
+  // 以纯文本展示逐步回答和真实状态，最新失败或停止的尝试可以独立重试。
   function renderMessage(message: Message) {
     return (
       <article
@@ -257,8 +324,15 @@ export function App() {
           </time>
         </div>
         <div className="message-content">{message.content}</div>
+        {message.status === "generating" && <div className="message-progress" role="status">正在生成…</div>}
         {message.status === "failed" && (
-          <div className="message-error">回答未完成 · 可检查设置后重新发送</div>
+          <div className="message-error" role="alert">回答未完成 · {message.error || "可以重试或检查设置。"}</div>
+        )}
+        {message.status === "stopped" && <div className="message-progress">已停止 · 已保留部分内容</div>}
+        {(message.status === "failed" || message.status === "stopped") && conversation?.messages.at(-1)?.id === message.id && (
+          <button className="retry-button" data-action="retry" data-message={message.id} onClick={changeRun} disabled={changingRun || !!pending}>
+            重试回答
+          </button>
         )}
       </article>
     );
@@ -413,6 +487,7 @@ export function App() {
               </div>
             </div>
             <div className="composer-wrap">
+              {streamNotice && <p className="stream-notice" role="status">{streamNotice}</p>}
               <form className="composer" ref={composer} onSubmit={send}>
                 <textarea
                   aria-label="消息"
@@ -425,14 +500,18 @@ export function App() {
                   onChange={editDraft}
                   onKeyDown={composeKey}
                   maxLength={32000}
-                  disabled={!settings.api_key_configured || loading}
+                  disabled={!settings.api_key_configured || loading || creating}
                   rows={2}
                 />
                 <div className="composer-bottom">
                   <span>
                     文字对话 <i>·</i> Shift + Enter 换行
                   </span>
-                  <button
+                  {generating ? (
+                    <button type="button" className="stop-button" data-action="stop" data-message={generating.id} onClick={changeRun} disabled={changingRun}>
+                      停止生成
+                    </button>
+                  ) : <button
                     className="send-button"
                     aria-label="发送消息"
                     disabled={
@@ -444,10 +523,10 @@ export function App() {
                     }
                   >
                     <span aria-hidden="true">↑</span>
-                  </button>
+                  </button>}
                 </div>
               </form>
-              <p className="composer-note">回答可能有误，请核对重要信息。</p>
+              <p className="composer-note">回答可能有误，请核对重要信息。停止不一定撤销服务商费用；已返回用量仍会记录。</p>
             </div>
           </div>
         )}
