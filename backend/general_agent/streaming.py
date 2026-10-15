@@ -10,8 +10,9 @@ from general_agent.budget import BudgetPaused, OperationContext
 from general_agent.execution import ChatExecution
 from psycopg.types.json import Jsonb
 from general_agent.calls import CallGateway
-from general_agent.provider import ModelFailure
+from general_agent.provider import ModelFailure, ModelMessage
 from general_agent.settings import StoredSettings
+from general_agent.summary import DocumentSummary, SummaryPreparation
 
 
 class StreamingChat:
@@ -23,12 +24,17 @@ class StreamingChat:
         self.model = model
         self.execution = execution
         self.attachments = attachments
+        self.documents = DocumentSummary(database, model, attachments)
         self.threads: set[Thread] = set()
         self.lock = Lock()
 
     def recover(self) -> None:
-        """撤销中断尝试的后续动作，保留暂停步骤，并将不确定保存标为可重试核对。"""
+        """撤销中断尝试，保留暂停及已完成资料；仅释放确实中断回答关联的未确认文档步骤。"""
         with self.database.connect() as connection:
+            interrupted = connection.execute("SELECT id,document_job_id FROM messages WHERE status IN ('generating','stopped') AND document_job_id IS NOT NULL").fetchall()
+            for message in interrupted:
+                connection.execute("UPDATE document_steps SET status='failed' WHERE job_id=%s AND status='running' AND call_id IN (SELECT id FROM model_calls WHERE assistant_message_id=%s)",(message['document_job_id'],message['id']))
+                connection.execute('UPDATE document_jobs SET final_call_id=NULL WHERE id=%s AND final_content IS NULL AND final_call_id IN (SELECT id FROM model_calls WHERE assistant_message_id=%s)',(message['document_job_id'],message['id']))
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE,approved=FALSE WHERE id IN (SELECT operation_id FROM messages WHERE status='generating')")
             connection.execute("UPDATE messages SET status = 'failed', error = '应用重启中断了回答，可以重试。' WHERE status = 'generating'")
             connection.execute("UPDATE model_calls SET status = 'failed',finished_at=CURRENT_TIMESTAMP WHERE status = 'generating'")
@@ -88,8 +94,9 @@ class StreamingChat:
         return new_id
 
     def execute(self, conversation_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
-        """完成当前可信动作后核验实际读图、准备记忆及资料；暂停重用记忆检查点并重核出处。"""
+        """完成可信动作、记忆及全文检查点后流式回答，预算恢复重核来源并跳过已完成分段。"""
         material = AttachmentContext()
+        summary: SummaryPreparation | None = None
         failure: str | None = None
         try:
             with self.database.connect() as connection:
@@ -99,13 +106,27 @@ class StreamingChat:
                 with self.database.connect() as connection:
                     connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (local,message_id))
             else:
-                material = self.attachments.prepare(conversation_id, user_id, str(rows[-1]['content']), settings=settings)
-                memory_material = self.execution.prepare_answer(user_id,str(rows[-1]["content"]),operation,call_id)
-                reserved = self.execution.chat_reservation(str(rows[-1]["content"]), call_id) or self.model.budget.reserve(operation, settings)
-                for chunk in self.model.bind(operation).stream(settings, memory_material + material.messages + [{"role": str(row["role"]), "content": str(row["content"])} for row in rows], reserved, message_id):
-                    if chunk.content:
+                content = str(rows[-1]['content'])
+                memory_material = self.execution.prepare_answer(user_id,content,operation,call_id)
+                chat_reserved = self.execution.chat_reservation(content,call_id)
+                summary = self.documents.prepare(conversation_id,user_id,message_id,content,settings,operation,chat_reserved)
+                material = summary.material if summary else self.attachments.prepare(conversation_id,user_id,content,settings=settings)
+                if summary and summary.cached_answer is not None:
+                    with self.database.connect() as connection:
+                        connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (summary.cached_answer,message_id))
+                else:
+                    reserved = self.documents.reserve_final(summary,settings,operation) if summary else (chat_reserved or self.model.budget.reserve(operation,settings))
+                    history: list[ModelMessage] = [{"role":str(row["role"]),"content":str(row["content"])} for row in (rows[-1:] if summary else rows)]
+                    answer = ''
+                    for chunk in self.model.bind(operation).stream(settings,memory_material + material.messages + history,reserved,message_id):
+                        answer += chunk.content
+                        if chunk.content:
+                            with self.database.connect() as connection:
+                                connection.execute("UPDATE messages SET content=content || %s WHERE id=%s AND status='generating'", (chunk.content,message_id))
+                    if summary:
+                        answer = self.documents.finish(summary,answer)
                         with self.database.connect() as connection:
-                            connection.execute("UPDATE messages SET content = content || %s WHERE id = %s AND status = 'generating'", (chunk.content, message_id))
+                            connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (answer,message_id))
         except BudgetPaused as paused:
             with self.database.connect() as connection:
                 connection.execute("UPDATE messages SET status='paused',budget_pause=%s WHERE id=%s AND status='generating'", (Jsonb(paused.public()),message_id))
@@ -116,6 +137,8 @@ class StreamingChat:
             failure = str(error)
         except Exception:
             failure = "回答执行中断，已保留部分内容，可以重试。"
+        if failure and summary:
+            self.documents.failed_final(summary)
         self.attachments.save_citations(message_id, conversation_id, material)
         with self.database.connect() as connection:
             connection.execute("UPDATE messages SET status = %s, error = %s WHERE id = %s AND status = 'generating'", ("failed" if failure else "complete", failure, message_id))

@@ -10,6 +10,7 @@ from general_agent.memory import MemoryService
 from general_agent.recall import MemoryRecall
 from general_agent.provider import ModelMessage
 from general_agent.settings import StoredSettings
+from general_agent.summary import summary_mode
 
 
 @dataclass(frozen=True)
@@ -63,7 +64,7 @@ class ChatExecution:
         return [content, settings.revision, self.embedding_revision(content)]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """只预留下一条真实调用，保存或召回均不提前占用最终聊天预算。"""
+        """只预留下一条真实调用；全文任务先落范围和进度，再由其检查点预留分段预算。"""
         intent = explicit_intent(content)
         if intent.clarification:
             return None
@@ -84,7 +85,7 @@ class ChatExecution:
             except ValueError:
                 return None
             return self.calls.budget.reserve(operation, embedding, 'embedding_tokens')
-        return self.calls.budget.reserve(operation, settings)
+        return None if summary_mode(content) else self.calls.budget.reserve(operation, settings)
 
     def prepare_answer(self, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None) -> list[ModelMessage]:
         """普通回答提供已批准相关记忆，兼容文字或视觉消息组合；明确保存维持独立回执。"""
