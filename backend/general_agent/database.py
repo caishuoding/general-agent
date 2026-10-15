@@ -46,7 +46,7 @@ class Database:
             return connection.execute("SELECT * FROM conversations ORDER BY created_at DESC, id").fetchall()
 
     def get_conversation(self, conversation_id: UUID) -> dict[str, Any] | None:
-        """读取单个会话及其有序消息，不存在时返回空值。"""
+        """读取会话有序消息、记忆状态、已发送附件与可信出处，不存在时返回空值。"""
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM conversations WHERE id = %s", (conversation_id,)).fetchone()
             if row is not None:
@@ -54,7 +54,9 @@ class Database:
             return row
 
     def decorate_message(self, row: dict[str, Any]) -> dict[str, Any]:
-        """把真实记忆动作附在助手快照，答案停止或失败不会抹去已完成的保存。"""
+        """补齐消息的附件身份与真实记忆动作，停止或失败不会抹去已完成保存。"""
+        with self.connect() as connection:
+            row['attachment_ids'] = [item['attachment_id'] for item in connection.execute('SELECT attachment_id FROM message_attachments WHERE message_id=%s ORDER BY attachment_id', (row['id'],)).fetchall()]
         if row['role'] == 'assistant' and row.get('reply_to'):
             with self.connect() as connection:
                 row['memory_action'] = connection.execute('SELECT * FROM memory_actions WHERE message_id=%s', (row['reply_to'],)).fetchone()

@@ -5,6 +5,8 @@ export type Settings = {
 };
 export type Conversation = { id: string; title: string; created_at: string };
 export type MemoryAction = { id: string; fact: string; status: "pending" | "saving" | "complete" | "failed"; memory_id: string | null; message_id: string; conversation_id: string; error: string | null; created_at: string };
+export type Attachment = { id: string; filename: string; size: number; status: "processing" | "ready" | "failed"; error: string | null };
+export type FileCitation = { key: string; attachment_id: string; filename: string; location: string; excerpt: string };
 export type Message = {
   id: string;
   role: "user" | "assistant";
@@ -12,6 +14,8 @@ export type Message = {
   status: "generating" | "paused" | "complete" | "stopped" | "failed";
   memory_action: MemoryAction | null;
   budget_pause: { detail: string; operation_id: string; pause_id: string } | null;
+  attachment_ids: string[];
+  citations: FileCitation[];
   reply_to: string | null;
   error: string | null;
   created_at: string;
@@ -30,13 +34,13 @@ export type Usage = {
   created_at: string;
 };
 
-// 访问同源应用接口；预算暂停交给统一提示，恢复时复用原操作标识和请求正文。
+// 访问同源 JSON 或文件上传接口；预算暂停恢复复用原操作标识和请求正文。
 export async function api<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
   const headers = new Headers(options.headers);
-  headers.set("Content-Type", "application/json");
+  if (!(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
   if (options.method === "POST" && !headers.has("X-Operation-ID")) headers.set("X-Operation-ID", crypto.randomUUID());
   let response: Response;
   try {

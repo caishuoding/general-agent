@@ -13,16 +13,18 @@ import {
   type Conversation,
   type ConversationDetail,
   type Message,
+  type FileCitation,
   type Settings,
   type Usage,
 } from "./api";
+import { AttachmentPanel } from "./AttachmentPanel";
 import { BudgetPrompt } from "./BudgetPrompt";
 import { SettingsPanel } from "./SettingsPanel";
 import { MemoryPanel } from "./MemoryPanel";
 
 type Screen = "chat" | "settings" | "memory";
 
-// 展示会话、流式回答、停止重试与配置，并隔离异步切换带来的过期响应。
+// 展示会话、记忆动作、资料出处及预算执行状态，并隔离过期异步响应。
 export function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(
@@ -36,6 +38,7 @@ export function App() {
   const [usage, setUsage] = useState<Usage[]>([]);
   const [screen, setScreen] = useState<Screen>("chat");
   const [draft, setDraft] = useState("");
+  const [selectedAttachments, setSelectedAttachments] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -114,7 +117,7 @@ export function App() {
     void selectConversation(id);
   }
 
-  // 切换会话时递增请求序号，阻止较慢的旧请求覆盖当前会话。
+  // 切换时清空附件选择并递增请求序号，阻止旧资料或回答覆盖新会话。
   async function selectConversation(id: string) {
     const current = ++selection.current;
     activeId.current = id;
@@ -122,6 +125,7 @@ export function App() {
     setScreen("chat");
     setConversation(null);
     setDraft("");
+    setSelectedAttachments([]);
     setError("");
     try {
       const result = await api<ConversationDetail>(`/conversations/${id}`);
@@ -239,7 +243,7 @@ export function App() {
     }
   }
 
-  // 启动当前会话的一次流式生成，隔离其他会话结果并使旧读取失效。
+  // 将附件绑定到本条消息后启动流式生成，失败保留附件选择和未被新输入覆盖的草稿。
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
@@ -263,14 +267,21 @@ export function App() {
     try {
       const result = await api<ConversationDetail>(
         `/conversations/${targetId}/runs`,
-        { method: "POST", body: JSON.stringify({ content }) },
+        { method: "POST", body: JSON.stringify({ content, attachment_ids: selectedAttachments }) },
       );
       if (activeId.current === targetId) {
         selection.current += 1;
         setConversation(result);
+        setSelectedAttachments([]);
       }
     } catch (failure) {
-      if (activeId.current === targetId) setError(errorMessage(failure));
+      if (activeId.current === targetId) {
+        setError(errorMessage(failure));
+        setDraft(
+          // 失败时恢复已提交问题，但不覆盖用户在等待期间输入的新草稿。
+          (current) => current || content,
+        );
+      }
       try {
         const result = await api<ConversationDetail>(
           `/conversations/${targetId}`,
@@ -335,7 +346,12 @@ export function App() {
     );
   }
 
-  // 以纯文本展示逐步回答和真实状态，最新失败或停止的尝试可以独立重试。
+  // 展示后端核验的文件位置与原文摘录，所有正文均按纯文本渲染。
+  function renderCitation(citation: FileCitation) {
+    return <details className="file-citation" key={citation.key} open><summary>[{citation.key}] <a href={`/api/conversations/${conversation?.id}/attachments/${citation.attachment_id}/file`} download>{citation.filename} · {citation.location}</a></summary><blockquote>{citation.excerpt}</blockquote></details>;
+  }
+
+  // 展示纯文本回答、记忆状态、预算暂停和可信出处，保留停止及重试入口。
   function renderMessage(message: Message) {
     return (
       <article
@@ -362,6 +378,8 @@ export function App() {
           <button className="retry-button" data-action="resume" data-message={message.id} onClick={changeRun} disabled={changingRun}>重新检查并继续</button>
           <button className="retry-button" data-action="stop" data-message={message.id} onClick={changeRun} disabled={changingRun}>取消本次回答</button>
         </section>}
+        {!!message.attachment_ids?.length && <div className="message-progress">已附 {message.attachment_ids.length} 个会话文件</div>}
+        {message.citations?.map(renderCitation)}
         {message.status === "generating" && <div className="message-progress" role="status">正在生成…</div>}
         {message.status === "failed" && (
           <div className="message-error" role="alert">回答未完成 · {message.error || "可以重试或检查设置。"}</div>
@@ -515,6 +533,7 @@ export function App() {
               </div>
             </div>
             <div className="composer-wrap">
+              <AttachmentPanel conversationId={activeId.current} selected={selectedAttachments} onSelect={setSelectedAttachments} disabled={!!pending || !!generating || changingRun || creating || loading} />
               {streamNotice && <p className="stream-notice" role="status">{streamNotice}</p>}
               <form className="composer" ref={composer} onSubmit={send}>
                 <textarea
