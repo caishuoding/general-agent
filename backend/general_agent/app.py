@@ -19,6 +19,8 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 
+from general_agent.attachment_api import attachment_router
+from general_agent.attachments import AttachmentService
 from general_agent.budget import BudgetInput, BudgetPaused, BudgetService, OperationContext
 from general_agent.calls import CallGateway
 from general_agent.capabilities import Capability, CapabilityResult, CapabilityService
@@ -46,6 +48,7 @@ class Conversation(BaseModel):
 class MessageInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
     content: str = Field(min_length=1, max_length=32000)
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=5)
 
 
 class Message(BaseModel):
@@ -59,6 +62,8 @@ class Message(BaseModel):
     memory_action: dict[str, Any] | None = None
     memory_recall: dict[str, Any] | None = None
     budget_pause: dict[str, str] | None = None
+    attachment_ids: list[UUID] = Field(default_factory=list)
+    citations: list[dict[str, object]] = Field(default_factory=list)
 
 
 class ConversationDetail(Conversation):
@@ -87,7 +92,7 @@ class UsageRecord(BaseModel):
 
 
 def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None) -> FastAPI:
-    """创建聊天及能力配置应用，测试可指定真实数据库、配置目录和外部 HTTP 替身。"""
+    """创建聊天、会话资料及能力配置应用，测试可指定数据库、目录和外部 HTTP 替身。"""
     database = Database(database_url or os.environ.get(
         "DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/general_agent"
     ))
@@ -98,19 +103,22 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     model = CallGateway(budget, ModelClient(model_transport))
     memory = MemoryService(database, embedding_configuration, model, settings.directory)
     execution = ChatExecution(model, memory)
-    chat = ChatService(database, model, execution)
+    attachments = AttachmentService(database, settings.directory)
+    chat = ChatService(database, model, execution, attachments)
     capabilities = CapabilityService(database, model, settings, embedding_settings)
-    streaming = StreamingChat(database, model, execution)
+    streaming = StreamingChat(database, model, execution, attachments)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """启动时迁移并恢复遗留执行；停机时标记未完成回答并短暂等待工作线程。"""
+        """启动时迁移并恢复遗留生成及资料处理；停机时标记未完成回答并等待工作线程。"""
         database.migrate()
         streaming.recover()
+        attachments.recover()
         yield
         await asyncio.to_thread(streaming.close)
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
+    app.include_router(attachment_router(attachments))
     app.state.calls = model
     app.state.budget = budget
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
@@ -133,7 +141,9 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, error: RequestValidationError) -> JSONResponse:
-        """仅返回字段名和通用提示，避免验证错误回显密钥或完整请求体。"""
+        """返回字段或附件数量提示，避免验证错误回显密钥及完整请求体。"""
+        if any("attachment_ids" in item["loc"] and item["type"] == "too_long" for item in error.errors()):
+            return JSONResponse(status_code=422, content={"detail": "每条消息最多五个附件，请分成多条消息发送。"})
         fields = sorted({str(item["loc"][-1]) for item in error.errors()})
         return JSONResponse(status_code=422, content={"detail": "请检查输入字段：" + "、".join(fields)})
 
@@ -285,27 +295,27 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.post("/api/conversations/{conversation_id}/messages")
     def send_message(conversation_id: UUID, body: MessageInput, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
-        """同步入口执行共同动作并读取真实结果；重复提交只读取原尝试。"""
+        """同步入口执行当前授权与已选附件回答；重复提交只读取原尝试。"""
         saved = settings.read()
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
 
         def send(operation: OperationContext) -> None:
-            """在同一操作中完成同步回答及公开会话读取。"""
-            chat.send(conversation_id, body.content, saved, operation)
-        return perform_run("chat", execution.scope(body.content,saved), operation_id, conversation_id, send, 200)
+            """把本次附件与当前输入交给共同动作及资料执行流程。"""
+            chat.send(conversation_id, body.content, saved, operation, body.attachment_ids)
+        return perform_run("chat", [*execution.scope(body.content,saved), [str(item) for item in body.attachment_ids]], operation_id, conversation_id, send, 200)
 
     @app.post("/api/conversations/{conversation_id}/runs", status_code=202)
     def start_stream(conversation_id: UUID, body: MessageInput, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
-        """只预留本次执行的真实首步，后续步骤暂停通过持久化答案快照恢复。"""
+        """将附件身份绑定本次操作，只预留真实首步并由持久化快照恢复后续暂停。"""
         saved = settings.read()
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
 
         def start(operation: OperationContext) -> None:
-            """把显式操作传给后台线程，使停止和用量收尾仍属于同一执行。"""
-            streaming.start(conversation_id, body.content, saved, operation)
-        return perform_run("chat_stream", execution.scope(body.content,saved), operation_id, conversation_id, start)
+            """把操作与当前附件交给后台流程，使停止、恢复和用量仍属于同一执行。"""
+            streaming.start(conversation_id, body.content, saved, operation, body.attachment_ids)
+        return perform_run("chat_stream", [*execution.scope(body.content,saved), [str(item) for item in body.attachment_ids]], operation_id, conversation_id, start)
 
     @app.post("/api/conversations/{conversation_id}/messages/{message_id}/retry", status_code=202)
     def retry_stream(conversation_id: UUID, message_id: UUID, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
