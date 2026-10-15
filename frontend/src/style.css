@@ -859,3 +859,10 @@ td {
 .file-citation { font-size: 12px; margin-top: 10px; padding: 8px 12px; border-left: 2px solid #c1cfbd; background: #f1f4ee; border-radius: 5px; }
 .file-citation a, .attachment-item a { color: #435d49; }
 .file-citation blockquote { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; margin: 8px 0 0; color: #616b5f; }
+
+.memory-edit textarea { display: block; width: 100%; min-height: 90px; margin: 8px 0 12px; padding: 12px; border: 1px solid #cbd5c4; border-radius: 8px; resize: vertical; font: inherit; }
+.memory-edit-actions { margin-top: 12px; }
+.memory-edit button { margin-right: 14px; }
+.memory-update-source { display: flex; gap: 12px; flex-wrap: wrap; justify-content: space-between; color: #6e7968; font-size: 13px; margin: 10px 0; }
+.memory-update-source button { color: #426348; text-decoration: underline; }
+.memory-identity { font-size: 11px; color: #879082; margin: 10px 0 6px; overflow-wrap: anywhere; }
