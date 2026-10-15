@@ -1,4 +1,5 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import { ModelCapabilities } from "./ModelCapabilities";
 import { api, errorMessage, type Settings, type Usage } from "./api";
 
 type Props = {
@@ -7,11 +8,15 @@ type Props = {
   onSaved: (value: Settings) => void;
 };
 
-// 管理模型连接与近期用量；保存配置不被描述为已验证服务能力。
+// 管理聊天连接、独立嵌入能力与近期用量；保存配置不代表验证通过。
 export function SettingsPanel({ settings, usage, onSaved }: Props) {
+  const [recentUsage, setRecentUsage] = useState(usage);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+
+  // 同步页面首次进入后加载的用量，能力检查也可更新本地列表。
+  useEffect(() => { setRecentUsage(usage); }, [usage]);
 
   // 从表单读取连接信息，成功后清空密钥输入并更新公开配置状态。
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -29,7 +34,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
       onSaved(next);
       const keyInput = form.elements.namedItem("api_key") as HTMLInputElement;
       keyInput.value = "";
-      setNotice("配置已保存。发送一条消息即可使用这个模型。");
+      setNotice("配置已保存。修改后的连接请重新检查能力。");
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -129,6 +134,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
           </div>
         </form>
       </div>
+      <ModelCapabilities settings={settings} onUsageChanged={setRecentUsage} />
       <div className="settings-card usage-card">
         <div className="card-heading">
           <h3>最近调用</h3>
@@ -137,7 +143,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
         <p className="field-help">
           展示服务返回的 token 用量。此版本尚未启用费用估算和预算限制。
         </p>
-        {usage.length ? (
+        {recentUsage.length ? (
           <div className="table-scroll">
             <table>
               <thead>
@@ -149,7 +155,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
                   <th>时间</th>
                 </tr>
               </thead>
-              <tbody>{usage.map(renderUsage)}</tbody>
+              <tbody>{recentUsage.map(renderUsage)}</tbody>
             </table>
           </div>
         ) : (
