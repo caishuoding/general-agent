@@ -842,6 +842,9 @@ td {
 .run-budget { margin-top: 16px; padding: 16px; border: 1px solid #d7caa7; border-radius: 10px; background: #faf5e8; }
 .run-budget .retry-button { margin-right: 10px; }
 .source-highlight { outline: 2px solid #bdcdb6; outline-offset: 8px; border-radius: 10px; }
+
+.memory-recall { margin-top: 12px; font-size: 12px; color: #647660; }
+.memory-recall.failed, .memory-recall.unavailable { color: #976a40; }
 .attachment-panel { width: 100%; margin: 0 0 10px; color: #656960; font-size: 12px; max-height: 180px; overflow: auto; }
 .attachment-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .upload-label { position: relative; display: inline-block; padding: 7px 10px; background: #edf0e9; border-radius: 7px; cursor: pointer; color: #3d5342; }
