@@ -12,6 +12,7 @@ dependencies = [
   "python-multipart==0.0.32",
   "pypdf==6.20.1",
   "python-docx==1.2.0",
+  "pillow==12.3.0",
 ]
 
 [dependency-groups]

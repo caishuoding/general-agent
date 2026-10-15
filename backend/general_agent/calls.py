@@ -6,7 +6,7 @@ from typing import Literal
 from uuid import UUID
 
 from general_agent.budget import BudgetService, OperationContext, Unit
-from general_agent.provider import Completion, Embedding, ModelClient, ModelFailure, StreamChunk, TokenUsage
+from general_agent.provider import Completion, Embedding, ModelClient, ModelMessage, ModelFailure, StreamChunk, TokenUsage
 from general_agent.settings import StoredEmbeddingSettings, StoredSettings
 
 
@@ -46,8 +46,8 @@ class BoundCalls:
         else:
             budget.record(call_id, TokenUsage(), "complete")
 
-    def complete(self, settings: StoredSettings, messages: list[dict[str, str]], reserved: UUID | None = None) -> Completion:
-        """复用可选首步预留，检查预算并记录同步文字请求的实际用量。"""
+    def complete(self, settings: StoredSettings, messages: list[ModelMessage], reserved: UUID | None = None) -> Completion:
+        """复用可选首步预留，检查预算并记录同步文字或视觉请求的实际用量。"""
         with self.call(settings, "chat_tokens", reserved) as call_id:
             result = self.gateway.provider.complete(settings, messages)
             self.gateway.budget.record(call_id, result.usage)
@@ -67,8 +67,8 @@ class BoundCalls:
             self.gateway.budget.record(call_id, result.usage)
             return result
 
-    def stream(self, settings: StoredSettings, messages: list[dict[str, str]], reserved: UUID, assistant_message_id: UUID) -> Iterator[StreamChunk]:
-        """消费已预留的流式调用，先记录用量尾帧再交给界面更新。"""
+    def stream(self, settings: StoredSettings, messages: list[ModelMessage], reserved: UUID, assistant_message_id: UUID) -> Iterator[StreamChunk]:
+        """消费已预留的文字或视觉流式调用，先记录用量尾帧再交给界面更新。"""
         with self.call(settings, "chat_tokens", reserved, assistant_message_id) as call_id:
             for chunk in self.gateway.provider.stream(settings, messages):
                 if chunk.usage is not None:

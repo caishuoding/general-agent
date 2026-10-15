@@ -45,7 +45,7 @@ export function MemoryPanel({ onSource }: Props) {
   }
   return <section className="memory-management page-scroll">
     <div className="eyebrow">关于你的长期记忆</div><h2>已批准的长期记忆</h2>
-    <p className="memory-intro">在聊天中明确说“请记住：具体事实”即可保存。普通聊天内容不会直接写入。</p>
+    <p className="memory-intro">在聊天中明确说“请记住：具体事实”即可保存。普通聊天内容不会直接写入；相关的已批准事实可用于新会话回答。</p>
     <button className="retry-button" onClick={reload} disabled={loading}>刷新记忆</button>
     {loading && <p role="status">正在读取记忆…</p>}
     {error && <p role="alert">{error}</p>}

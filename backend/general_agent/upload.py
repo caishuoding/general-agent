@@ -83,8 +83,8 @@ class FileReceiver:
         filename = filename.replace('\\', '/').rsplit('/', 1)[-1]
         if not filename or len(filename) > 240 or any(ord(char) < 32 for char in filename):
             raise HTTPException(422, '附件文件名无效或过长。')
-        if Path(filename).suffix.lower() not in {'.txt', '.md', '.markdown', '.pdf', '.docx'}:
-            raise HTTPException(422, '当前支持 TXT、Markdown、文本 PDF、DOCX；其他格式暂未启用。')
+        if Path(filename).suffix.lower() not in {'.txt', '.md', '.markdown', '.pdf', '.docx', '.png', '.jpg', '.jpeg'}:
+            raise HTTPException(422, '当前支持 TXT、Markdown、文本 PDF、DOCX、PNG、JPEG；其他格式暂未启用。')
         path = self.directory / (uuid4().hex + '.upload')
         self.handle = path.open('xb')
         path.chmod(0o600)

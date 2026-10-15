@@ -6,7 +6,7 @@ export type Settings = {
 export type Conversation = { id: string; title: string; created_at: string };
 export type MemoryAction = { id: string; fact: string; status: "pending" | "saving" | "complete" | "failed"; memory_id: string | null; message_id: string; conversation_id: string; error: string | null; created_at: string };
 export type DocumentParseInfo = { format?: string; total_units?: number; readable_units?: number; coverage?: string; missing_units?: string[]; limitations?: string[] };
-export type Attachment = { id: string; filename: string; size: number; status: "processing" | "ready" | "failed"; error: string | null; parse_info?: DocumentParseInfo };
+export type Attachment = { id: string; filename: string; size: number; status: "processing" | "ready" | "failed"; error: string | null; parse_info?: DocumentParseInfo; image_metadata: { format: string; mime: string; width: number; height: number } | null };
 export type FileCitation = { key: string; attachment_id: string; filename: string; location: string; excerpt: string };
 export type Message = {
   id: string;
@@ -14,6 +14,7 @@ export type Message = {
   content: string;
   status: "generating" | "paused" | "complete" | "stopped" | "failed";
   memory_action: MemoryAction | null;
+  memory_recall: { status: "pending" | "complete" | "failed" | "skipped" | "unavailable"; count: number; detail: string } | null;
   budget_pause: { detail: string; operation_id: string; pause_id: string } | null;
   attachment_ids: string[];
   citations: FileCitation[];

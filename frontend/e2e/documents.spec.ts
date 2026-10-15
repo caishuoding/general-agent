@@ -15,6 +15,8 @@ test('PDF部分可读范围与页码在上传和刷新后可见', async ({ page,
   await page.getByRole('button', { name: '发送消息' }).click();
   await expect(page.getByRole('link', { name: 'partial.pdf · 第 1 页', exact: true })).toBeVisible();
   await page.reload();
+  await expect(page.getByRole('link', { name: 'partial.pdf · 第 1 页', exact: true })).toBeVisible();
   await expect(page.getByText('文字提取：1 / 2 页', { exact: true })).toBeVisible();
+  await page.getByText('仅提取文字；复杂图表、内嵌图片和特殊排版未被理解，需要将相关图像单独上传。', { exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: '/private/tmp/general-agent-implementation/documents-11.png', fullPage: true });
 });
