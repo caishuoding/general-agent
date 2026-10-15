@@ -12,7 +12,7 @@ from psycopg.types.json import Jsonb
 from general_agent.calls import CallGateway
 from general_agent.provider import ModelFailure, ModelMessage
 from general_agent.settings import StoredSettings
-from general_agent.summary import DocumentSummary, SummaryPreparation
+from general_agent.summary import DocumentSummary, SummaryPreparation, summary_mode
 
 
 class StreamingChat:
@@ -95,7 +95,7 @@ class StreamingChat:
         return new_id
 
     def execute(self, conversation_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
-        """完成可信动作、记忆及全文检查点后流式回答，预算恢复重核来源并跳过已完成分段。"""
+        """先核验普通资料再召回记忆并流式回答；全文预算恢复重核来源并跳过完成分段。"""
         material = AttachmentContext()
         summary: SummaryPreparation | None = None
         failure: str | None = None
@@ -108,10 +108,12 @@ class StreamingChat:
                     connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (local,message_id))
             else:
                 content = str(rows[-1]['content'])
+                material = self.attachments.prepare(conversation_id,user_id,content,settings=settings) if summary_mode(content) is None else AttachmentContext()
                 memory_material = self.execution.prepare_answer(user_id,content,operation,call_id)
                 chat_reserved = self.execution.chat_reservation(content,call_id)
-                summary = self.documents.prepare(conversation_id,user_id,message_id,content,settings,operation,chat_reserved)
-                material = summary.material if summary else self.attachments.prepare(conversation_id,user_id,content,settings=settings)
+                summary = self.documents.prepare(conversation_id,user_id,message_id,content,settings,operation,chat_reserved,memory_material)
+                if summary:
+                    material = summary.material
                 if summary and summary.cached_answer is not None:
                     with self.database.connect() as connection:
                         connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (summary.cached_answer,message_id))

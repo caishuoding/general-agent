@@ -68,8 +68,8 @@ class DocumentSummary:
             files.append({'attachment_id':str(row['id']),'filename':row['filename'],'chunks':count,'missing':missing,'limitations':info.get('limitations',[]),'coverage':'partial' if missing else 'complete'})
         return sources, files
 
-    def prepare(self, conversation_id: UUID, user_id: UUID, message_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, reserved: UUID | None) -> SummaryPreparation | None:
-        """处理所有原文分块并逐层压缩成有界最终上下文，复用原请求的持久化检查点。"""
+    def prepare(self, conversation_id: UUID, user_id: UUID, message_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, reserved: UUID | None, memory_context: list[ModelMessage] | None = None) -> SummaryPreparation | None:
+        """处理全部原文并复用完成检查点；召回上下文改变时仅使最终回答缓存失效。"""
         mode = summary_mode(content)
         if mode is None:
             return None
@@ -77,15 +77,23 @@ class DocumentSummary:
         if not sources:
             raise ValueError('当前范围没有可处理的文字资料；请先发送可读文档。图片本身不能作为已提取文字做全文总结。')
         digest = hashlib.sha256(json.dumps([sources,files],ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+        context_hash = hashlib.sha256(json.dumps(memory_context or [],ensure_ascii=False,sort_keys=True).encode()).hexdigest()
         counts = [(len(sources) + 3) // 4]
         while counts[-1] > 4:
             counts.append((counts[-1] + 3) // 4)
         with self.database.connect() as connection:
-            connection.execute('INSERT INTO document_jobs(id,user_message_id,conversation_id,model_revision,mode,source_hash,attachment_ids,files,total_steps) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(user_message_id,model_revision) DO NOTHING', (uuid4(),user_id,conversation_id,settings.revision,mode,digest,[UUID(row['attachment_id']) for row in files],Jsonb(files),sum(counts)+1))
+            connection.execute('INSERT INTO document_jobs(id,user_message_id,conversation_id,model_revision,mode,source_hash,context_hash,attachment_ids,files,total_steps) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(user_message_id,model_revision) DO NOTHING', (uuid4(),user_id,conversation_id,settings.revision,mode,digest,context_hash,[UUID(row['attachment_id']) for row in files],Jsonb(files),sum(counts)+1))
             job = connection.execute('SELECT * FROM document_jobs WHERE user_message_id=%s AND model_revision=%s', (user_id,settings.revision)).fetchone()
             assert job is not None
             if job['source_hash'] != digest:
                 raise ValueError('全文处理的原资料已变化或移除；旧检查点已失效，请重新选择资料发起新请求。')
+            if job['context_hash'] != context_hash:
+                if job['final_call_id'] and job['final_content'] is None:
+                    active = connection.execute('SELECT finished_at,status FROM model_calls WHERE id=%s',(job['final_call_id'],)).fetchone()
+                    if active and (active['finished_at'] is None or active['status'] != 'failed'):
+                        raise ValueError('上一尝试的最终汇总仍在等待服务返回；请等待用量收尾后再重试，避免重复调用。')
+                connection.execute('UPDATE document_jobs SET context_hash=%s,final_content=NULL,final_call_id=NULL WHERE id=%s',(context_hash,job['id']))
+                job['final_content'],job['final_call_id'] = None,None
             connection.execute('UPDATE messages SET document_job_id=%s WHERE id=%s', (job['id'],message_id))
         preparation = SummaryPreparation(job['id'],message_id,AttachmentContext(citations=sources),job['final_content'])
         if job['final_content'] is not None:

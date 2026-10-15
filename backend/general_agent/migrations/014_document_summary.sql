@@ -5,6 +5,7 @@ CREATE TABLE document_jobs (
     model_revision TEXT NOT NULL,
     mode TEXT NOT NULL,
     source_hash TEXT NOT NULL,
+    context_hash TEXT NOT NULL,
     attachment_ids UUID[] NOT NULL,
     files JSONB NOT NULL,
     total_steps INTEGER NOT NULL,

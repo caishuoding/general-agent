@@ -11,7 +11,7 @@ from general_agent.calls import CallGateway
 from general_agent.execution import ChatExecution
 from general_agent.provider import ModelFailure, ModelMessage
 from general_agent.settings import StoredSettings
-from general_agent.summary import DocumentSummary, SummaryPreparation
+from general_agent.summary import DocumentSummary, SummaryPreparation, summary_mode
 
 
 class ChatService:
@@ -24,7 +24,7 @@ class ChatService:
         self.documents = DocumentSummary(database, model, attachments)
 
     def send(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, attachment_ids: list[UUID] | None = None) -> None:
-        """绑定当前授权、记忆及资料；全文请求逐段处理，暂停保留稳定身份及已完成检查点。"""
+        """先核验普通资料能力再召回记忆；全文请求逐段处理，暂停保留身份及完成检查点。"""
         self.attachments.validate(conversation_id, attachment_ids or [])
         user_id, answer_id = uuid4(), uuid4()
         with self.database.connect() as connection:
@@ -44,10 +44,12 @@ class ChatService:
         try:
             response = self.execution.prepare(conversation_id,user_id,content,operation,reserved)
             if response is None:
+                material = self.attachments.prepare(conversation_id,user_id,content,settings=settings) if summary_mode(content) is None else AttachmentContext()
                 memory_material = self.execution.prepare_answer(user_id,content,operation,reserved)
                 chat_reserved = self.execution.chat_reservation(content,reserved)
-                summary = self.documents.prepare(conversation_id,user_id,answer_id,content,settings,operation,chat_reserved)
-                material = summary.material if summary else self.attachments.prepare(conversation_id,user_id,content,settings=settings)
+                summary = self.documents.prepare(conversation_id,user_id,answer_id,content,settings,operation,chat_reserved,memory_material)
+                if summary:
+                    material = summary.material
                 history: list[ModelMessage] = [{'role':str(row['role']),'content':str(row['content'])} for row in (rows[-1:] if summary else rows)]
                 response = summary.cached_answer if summary and summary.cached_answer else self.model.bind(operation).complete(settings,memory_material + material.messages + history,self.documents.reserve_final(summary,settings,operation) if summary else chat_reserved,answer_id).content
                 if summary and summary.cached_answer is None:

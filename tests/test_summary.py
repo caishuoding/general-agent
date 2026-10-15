@@ -269,3 +269,62 @@ def test_stopped_final_stream_is_cached_and_not_billed_again_on_retry(database_u
         assert streams == 1 and len(client.get('/api/usage').json()) == 2
         stopped = next(item for item in client.get(f'/api/conversations/{conversation}').json()['messages'] if item['id']==running['id'])
         assert stopped['content']=='first [A1]' and stopped['document_progress']['status']!='complete'
+
+
+def test_retry_after_memory_edit_rebuilds_only_final_answer(database_url: str, tmp_path: Path) -> None:
+    """已完成文档分段继续复用，但记忆更正后不能重放包含旧事实的最终回答缓存。"""
+    from collections.abc import Iterator
+    from threading import Event
+    from time import monotonic, sleep
+    from test_memory import configure_memory
+    from test_memory_recall import recall_provider
+
+    waiting,release=Event(),Event()
+    leaves,finals=0,0
+
+    class WaitingAnswer(httpx.SyncByteStream):
+        """让首轮旧记忆回答在停止后仍能返回完整正文，建立真实可复用缓存。"""
+        def __iter__(self) -> Iterator[bytes]:
+            """保留完整杭州回答，最后的实际模型用量随响应一并返回。"""
+            yield b'data: {"choices":[{"delta":{"content":"[A1] "}}]}\n\n'
+            waiting.set()
+            assert release.wait(10)
+            event={'choices':[{'delta':{'content':'我住在杭州'},'finish_reason':'stop'}],'usage':{'prompt_tokens':10,'completion_tokens':5,'total_tokens':15}}
+            yield ('data: '+json.dumps(event)+'\n\ndata: [DONE]\n\n').encode()
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """真实 Mem0 使用确定向量，仅最终回答读取记忆，分段调用单独计数。"""
+        nonlocal leaves,finals
+        if request.url.path.endswith('/embeddings'):
+            return recall_provider(request)
+        data=json.loads(request.content)
+        if not data.get('stream'):
+            leaves+=1
+            return summary_response(request)
+        finals+=1
+        if finals==1:
+            return httpx.Response(200,stream=WaitingAnswer())
+        wire=json.dumps(data['messages'],ensure_ascii=False)
+        assert '我住在杭州' not in wire and '我住在苏州' in wire
+        event={'choices':[{'delta':{'content':'我住在苏州 [A1]'},'finish_reason':'stop'}],'usage':{'prompt_tokens':10,'completion_tokens':5,'total_tokens':15}}
+        return httpx.Response(200,text='data: '+json.dumps(event)+'\n\ndata: [DONE]\n\n')
+
+    with TestClient(create_app(database_url,tmp_path,httpx.MockTransport(provider)),base_url='http://127.0.0.1:8000') as client:
+        original=configure_memory(client)
+        client.post(f'/api/conversations/{original}/messages',json={'content':'请记住：我住在杭州'})
+        memory=client.get('/api/memories').json()[0]
+        conversation=client.post('/api/conversations',json={}).json()['id']
+        file=client.post(f'/api/conversations/{conversation}/attachments',files={'files':('城市计划.txt',b'Friday deadline.')}).json()[0]
+        client.post(f'/api/conversations/{conversation}/runs',json={'content':'结合我的城市总结完整资料','attachment_ids':[file['id']]})
+        assert waiting.wait(5)
+        running=wait_message(client,conversation,'generating','[A1] ')
+        client.post(f"/api/conversations/{conversation}/messages/{running['id']}/stop")
+        release.set()
+        deadline=monotonic()+5
+        while client.get('/api/usage/summary').json()['pending_calls'] and monotonic()<deadline:
+            sleep(.02)
+        assert client.put(f"/api/memories/{memory['id']}",json={'fact':'我住在苏州','expected_version':1}).status_code==200
+        assert client.post(f"/api/conversations/{conversation}/messages/{running['id']}/retry").status_code==202
+        result=wait_message(client,conversation,'complete')
+        assert '我住在苏州' in result['content'] and '我住在杭州' not in result['content']
+        assert leaves==1 and finals==2
