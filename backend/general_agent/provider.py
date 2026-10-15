@@ -1,13 +1,36 @@
-"""OpenAI 兼容文字模型的外部调用边界。"""
+"""OpenAI 兼容文字、视觉与嵌入模型的外部调用边界。"""
 
 import json
 from collections.abc import Iterator
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypedDict
 
 import httpx
 from pydantic import BaseModel, Field, StrictInt, FiniteFloat
 
 from general_agent.settings import StoredSettings, StoredEmbeddingSettings
+
+
+class TextPart(TypedDict):
+    """为多模态请求提供文字描述及受信任来源标识。"""
+    type: Literal['text']
+    text: str
+
+
+class ImageURL(TypedDict):
+    """指定模型实际接收的图片数据地址。"""
+    url: str
+
+
+class ImagePart(TypedDict):
+    """通过兼容协议传递经校验的图片原字节。"""
+    type: Literal['image_url']
+    image_url: ImageURL
+
+
+class ModelMessage(TypedDict):
+    """使用明确的文字或多模态内容类型描述模型消息。"""
+    role: str
+    content: str | list[TextPart | ImagePart]
 
 
 class TokenUsage(BaseModel):
@@ -68,8 +91,8 @@ class ModelClient:
         """允许测试只替换外部网络响应，不替换应用内部协作对象。"""
         self.transport = transport
 
-    def complete(self, settings: StoredSettings, messages: list[dict[str, str]]) -> Completion:
-        """请求文字回答，隔离服务错误正文，并保留成功或失败响应中的已知用量。"""
+    def complete(self, settings: StoredSettings, messages: list[ModelMessage]) -> Completion:
+        """请求文字或视觉回答，隔离服务错误正文并保留成功或失败响应的已知用量。"""
         try:
             with httpx.Client(transport=self.transport, timeout=60, follow_redirects=False, trust_env=False) as client:
                 response = client.post(
@@ -100,8 +123,8 @@ class ModelClient:
             raise ModelFailure("模型未返回有效文字回答，请检查模型是否支持此接口。", usage) from None
 
 
-    def stream(self, settings: StoredSettings, messages: list[dict[str, str]]) -> Iterator[StreamChunk]:
-        """逐段解析 SSE 并保留结束原因之后的用量；断流或提前结束不标记为完整。"""
+    def stream(self, settings: StoredSettings, messages: list[ModelMessage]) -> Iterator[StreamChunk]:
+        """逐段解析文字或视觉 SSE 并保留结束原因之后的用量；断流或提前结束不标记为完整。"""
         usage = TokenUsage()
         has_content = False
         finished = False
