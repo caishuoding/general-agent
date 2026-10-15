@@ -5,6 +5,7 @@ import re
 from typing import Any
 from uuid import UUID, uuid5
 
+from general_agent.attachment_candidate_source import validate_attachment_source
 from general_agent.budget import BudgetPaused, OperationContext
 from general_agent.memory import MemoryService
 from general_agent.memory_correction import MemoryCorrection
@@ -50,10 +51,12 @@ class MemoryCandidates:
         return [{**row,'id':str(row['id'])} for row in rows]
 
     def get(self, identifier: UUID) -> dict[str, Any]:
-        """读取具体候选并按服务端时间标记过期，客户端不能延长有效期。"""
+        """读取具体候选及独立附件来源，按服务端时间标记过期，客户端不能延长有效期。"""
         with self.database.connect() as connection:
             connection.execute("UPDATE memory_candidates SET status='expired',error='候选已过期，请重新明确具体事实。' WHERE id=%s AND status NOT IN ('confirmed','rejected','expired') AND expires_at<=CURRENT_TIMESTAMP",(identifier,))
             row=connection.execute('SELECT * FROM memory_candidates WHERE id=%s',(identifier,)).fetchone()
+            if row:
+                row['attachment_source']=connection.execute('SELECT * FROM attachment_memory_candidates WHERE candidate_id=%s',(identifier,)).fetchone()
         if row is None:
             raise LookupError('候选记忆不存在。')
         return row
@@ -111,7 +114,7 @@ class MemoryCandidates:
             self.discovery_state(message_id,operation,'failed',detail)
 
     def confirm(self, identifier: UUID, operation: OperationContext) -> dict[str, Any]:
-        """确认绑定具体候选身份、正文和来源；同源多个事实独立保存或更正，旧目标版本不覆盖新值。"""
+        """确认绑定具体候选及人物；消息和附件分别核验来源，多事实独立保存且不覆盖旧目标版本。"""
         with self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(identifier.int % (2**63-1),))
@@ -122,9 +125,16 @@ class MemoryCandidates:
             if row['status'] in ('rejected','expired'):
                 raise ValueError('候选已拒绝或过期，不能继续提交。')
             source=self.source(row['source_message_id'],row['source_conversation_id'])
-            if row['source_quote'] not in source['content']:
+            if row['source_kind']=='attachment':
+                validate_attachment_source(self.database,self.memory.directory,row)
+            if row['source_kind']=='message' and row['source_quote'] not in source['content']:
                 lock.execute("UPDATE memory_candidates SET status='expired',error='原来源已变化，不能提交旧候选。' WHERE id=%s",(identifier,))
                 raise ValueError('原来源已变化，请重新确认具体事实。')
+            def validate_source() -> None:
+                """每次外部嵌入回传及正式发布前重读附件来源和人物批准，拒绝迟到写入。"""
+                current=self.get(identifier)
+                validate_attachment_source(self.database,self.memory.directory,current)
+
             update_id=uuid5(identifier,'confirmed-update')
             if row['target_id'] is not None:
                 target=lock.execute('SELECT status,version FROM memory_actions WHERE id=%s',(row['target_id'],)).fetchone()
@@ -139,7 +149,7 @@ class MemoryCandidates:
                     MemoryCorrection(self.memory).apply(row['target_id'],row['fact'],row['target_version'],update_id,operation,row['source_message_id'],row['source_conversation_id'])
                     action_id=row['target_id']
                 else:
-                    saved=self.memory.save(row['source_conversation_id'],row['source_message_id'],row['fact'],operation,action_id=uuid5(identifier,'confirmed-memory'))
+                    saved=self.memory.save(row['source_conversation_id'],row['source_message_id'],row['fact'],operation,action_id=uuid5(identifier,'confirmed-memory'),validate_source=validate_source if row['source_kind']=='attachment' else None)
                     action_id=saved['id']
                 lock.execute("UPDATE memory_candidates SET status='confirmed',memory_action_id=%s,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s",(action_id,identifier))
             except BudgetPaused:

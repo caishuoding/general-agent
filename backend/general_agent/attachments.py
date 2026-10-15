@@ -172,12 +172,12 @@ class AttachmentService:
         for attachment_id in attachment_ids:
             connection.execute('INSERT INTO message_attachments (message_id,attachment_id) VALUES (%s,%s) ON CONFLICT DO NOTHING', (user_id, attachment_id))
 
-    def prepare(self, conversation_id: UUID, user_id: UUID | None, content: str, attachment_ids: list[UUID] | None = None, settings: StoredSettings | None = None) -> AttachmentContext:
-        """检索会话文字并保留提取缺口，按本次选图或明确追问读取图片；图片须通过当前配置能力检查。"""
+    def prepare(self, conversation_id: UUID, user_id: UUID | None, content: str, attachment_ids: list[UUID] | None = None, settings: StoredSettings | None = None, only_attachment_ids: list[UUID] | None = None) -> AttachmentContext:
+        """检索会话文字并保留缺口，可限定已授权文件集合；实际图片读取须通过当前配置能力检查。"""
         words = list(dict.fromkeys(re.findall(r'[a-zA-Z0-9]{2,}', content.lower()) + re.findall(r'(?=([\u4e00-\u9fff]{2}))', content)))[:64]
         with self.database.connect() as connection:
-            selected = connection.execute("SELECT a.id,a.filename,a.parse_info,c.citation_id,c.ordinal,c.location,c.content,(SELECT count(*) FROM unnest(%s::text[]) word WHERE strpos(lower(c.content),word)>0) AS relevance FROM attachments a JOIN attachment_chunks c ON c.attachment_id=a.id WHERE a.conversation_id=%s AND a.status='ready' AND a.image_metadata IS NULL AND (a.id=ANY(%s) OR EXISTS (SELECT 1 FROM message_attachments ma JOIN messages m ON m.id=ma.message_id WHERE ma.attachment_id=a.id AND m.conversation_id=%s AND (%s::uuid IS NULL OR m.position <= (SELECT position FROM messages WHERE id=%s)))) ORDER BY relevance DESC,a.created_at,a.id,c.ordinal LIMIT 12", (words, conversation_id, attachment_ids or [], conversation_id, user_id, user_id)).fetchall()
-        images = self.image_sources(conversation_id, user_id, content, attachment_ids or [], settings)
+            selected = connection.execute("SELECT a.id,a.filename,a.parse_info,c.citation_id,c.ordinal,c.location,c.content,(SELECT count(*) FROM unnest(%s::text[]) word WHERE strpos(lower(c.content),word)>0) AS relevance FROM attachments a JOIN attachment_chunks c ON c.attachment_id=a.id WHERE a.conversation_id=%s AND a.status='ready' AND a.image_metadata IS NULL AND (a.id=ANY(%s) OR EXISTS (SELECT 1 FROM message_attachments ma JOIN messages m ON m.id=ma.message_id WHERE ma.attachment_id=a.id AND m.conversation_id=%s AND (%s::uuid IS NULL OR m.position <= (SELECT position FROM messages WHERE id=%s)))) AND (%s::uuid[] IS NULL OR a.id=ANY(%s)) ORDER BY relevance DESC,a.created_at,a.id,c.ordinal LIMIT 12", (words, conversation_id, attachment_ids or [], conversation_id, user_id, user_id,only_attachment_ids,only_attachment_ids)).fetchall()
+        images = self.image_sources(conversation_id, user_id, content, attachment_ids or [], settings,only_attachment_ids)
         if not selected and not images:
             return AttachmentContext()
         citations = [{'key': f'A{row["citation_id"]}', 'attachment_id': str(row['id']), 'filename': row['filename'], 'location': row['location'], 'excerpt': row['content'], 'ordinal': row['ordinal'], 'parse_info': row['parse_info']} for row in selected]
@@ -193,12 +193,12 @@ class AttachmentService:
             messages.append({'role': 'user', 'content': parts})
         return AttachmentContext(messages, citations)
 
-    def image_sources(self, conversation_id: UUID, user_id: UUID | None, content: str, attachment_ids: list[UUID], settings: StoredSettings | None) -> list[dict[str, Any]]:
-        """只选本条绑定图片或明确追问的已发送图片；明确拒绝读图和普通聊天不发送图片。"""
+    def image_sources(self, conversation_id: UUID, user_id: UUID | None, content: str, attachment_ids: list[UUID], settings: StoredSettings | None, only_attachment_ids: list[UUID] | None = None) -> list[dict[str, Any]]:
+        """只选已授权集合中的本条或明确追问图片；明确拒绝读图和普通聊天不发送图片。"""
         if re.search(r'(?:不要|不用|无需|别)(?:再)?(?:读取|分析|识别|查看|看|使用|处理)?(?:这些|这张|任何)?(?:图片|图表|截图|照片)', content):
             return []
         with self.database.connect() as connection:
-            rows = connection.execute("SELECT a.*,c.citation_id,c.content,EXISTS (SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id AND ma.message_id=%s) AS current FROM attachments a JOIN attachment_chunks c ON c.attachment_id=a.id WHERE a.conversation_id=%s AND a.status='ready' AND a.image_metadata IS NOT NULL AND (a.id=ANY(%s) OR EXISTS (SELECT 1 FROM message_attachments ma JOIN messages m ON m.id=ma.message_id WHERE ma.attachment_id=a.id AND m.conversation_id=%s AND (%s::uuid IS NULL OR m.position <= (SELECT position FROM messages WHERE id=%s)))) ORDER BY a.created_at,a.id", (user_id,conversation_id,attachment_ids,conversation_id,user_id,user_id)).fetchall()
+            rows = connection.execute("SELECT a.*,c.citation_id,c.content,EXISTS (SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id AND ma.message_id=%s) AS current FROM attachments a JOIN attachment_chunks c ON c.attachment_id=a.id WHERE a.conversation_id=%s AND a.status='ready' AND a.image_metadata IS NOT NULL AND (a.id=ANY(%s) OR EXISTS (SELECT 1 FROM message_attachments ma JOIN messages m ON m.id=ma.message_id WHERE ma.attachment_id=a.id AND m.conversation_id=%s AND (%s::uuid IS NULL OR m.position <= (SELECT position FROM messages WHERE id=%s)))) AND (%s::uuid[] IS NULL OR a.id=ANY(%s)) ORDER BY a.created_at,a.id", (user_id,conversation_id,attachment_ids,conversation_id,user_id,user_id,only_attachment_ids,only_attachment_ids)).fetchall()
             selected = [row for row in rows if row['current'] or row['id'] in attachment_ids]
             if not selected:
                 named = [row for row in rows if row['filename'] in content]

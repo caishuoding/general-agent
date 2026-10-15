@@ -1,7 +1,7 @@
 """只把当前用户已明确批准的事实交给 Mem0，并核对部分提交及来源。"""
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -26,15 +26,15 @@ class MemoryService:
         self.database, self.embedding, self.calls, self.directory = database, embedding, calls, directory
 
     @contextmanager
-    def session(self, settings: StoredEmbeddingSettings, operation: OperationContext | None = None, reserved: UUID | None = None) -> Iterator['PgMemory']:
-        """按操作创建 SDK 适配；首次导入前限制 SDK 辅助目录并关闭遥测。"""
+    def session(self, settings: StoredEmbeddingSettings, operation: OperationContext | None = None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None) -> Iterator['PgMemory']:
+        """按操作创建 SDK 并携带可选写入前来源核验；首次导入前关闭遥测和限定辅助目录。"""
         os.environ['MEM0_TELEMETRY'] = 'False'
         os.environ['MEM0_DIR'] = str(self.directory / 'mem0-runtime')
         from general_agent.mem0_adapter import PgMemory
         with self.database.connect() as connection:
             connection.autocommit = True
             connection.execute('SELECT pg_advisory_lock(91402705)')
-            memory = PgMemory(self.database, settings, self.calls.bind(operation) if operation else None, reserved)
+            memory = PgMemory(self.database, settings, self.calls.bind(operation) if operation else None, reserved,before_write)
         try:
             yield memory
         finally:
@@ -46,10 +46,11 @@ class MemoryService:
             return connection.execute('SELECT * FROM memory_actions WHERE id=%s', (uuid5(message_id,'explicit-memory:0'),)).fetchone()
 
     def list(self) -> list[dict[str, Any]]:
-        """展示原来源与更正来源；只有已完整提交的事实才从正式存储核验。"""
+        """展示消息、附件及更正来源；只有已完整提交的事实才从正式存储核验。"""
         with self.database.connect() as connection:
             rows = connection.execute('SELECT a.*, c.title AS conversation_title FROM memory_actions a JOIN conversations c ON c.id=a.conversation_id ORDER BY a.created_at DESC,a.id').fetchall()
             for row in rows:
+                row['attachment_sources']=connection.execute('SELECT s.* FROM attachment_memory_candidates s JOIN memory_candidates c ON c.id=s.candidate_id WHERE c.memory_action_id=%s',(row['id'],)).fetchall()
                 row["updates"] = connection.execute("SELECT u.*,c.title AS conversation_title FROM memory_updates u LEFT JOIN conversations c ON c.id=u.source_conversation_id WHERE action_id=%s ORDER BY u.created_at,u.id",(row["id"],)).fetchall()
         if not rows or not any(row["status"] == "complete" for row in rows):
             return rows
@@ -66,8 +67,10 @@ class MemoryService:
                         row['fact'] = entry['memory']
         return rows
 
-    def save(self, conversation_id: UUID, message_id: UUID, fact: str, operation: OperationContext, reserved: UUID | None = None, action_id: UUID | None = None) -> dict[str, Any]:
-        """以明确动作或候选身份登记批准；复用部分提交向量，并允许同来源多个独立事实。"""
+    def save(self, conversation_id: UUID, message_id: UUID, fact: str, operation: OperationContext, reserved: UUID | None = None, action_id: UUID | None = None, validate_source: Callable[[], None] | None = None) -> dict[str, Any]:
+        """以稳定动作登记批准并复用部分向量；附件在嵌入回传后和发布前重新核验来源。"""
+        if validate_source:
+            validate_source()
         action_id = action_id or uuid5(message_id, 'explicit-memory:0')
         with self.database.connect() as lock:
             lock.autocommit = True
@@ -83,7 +86,7 @@ class MemoryService:
             try:
                 settings = self.embedding.verified()
                 self.embedding.bind_index('personal_memories', settings)
-                with self.session(settings, operation, reserved) as memory:
+                with self.session(settings, operation, reserved,validate_source) as memory:
                     rows = memory.vector_store.list(filters={'action_id': str(action_id), 'user_id': 'local-person'}, limit=2)[0]
                     if len(rows) > 1:
                         raise ValueError('发现重复的正式记忆，需先核对存储，未继续保存。')
@@ -97,6 +100,8 @@ class MemoryService:
                         raise ValueError('正式记忆与已批准事实不一致，保存结果待核对。')
                     if not memory.history(memory_id):
                         memory.db.add_history(memory_id, None, fact, 'ADD', created_at=entry['created_at'], role='user')
+                if validate_source:
+                    validate_source()
                 lock.execute("UPDATE memory_actions SET status='complete',memory_id=%s,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s", (memory_id,action_id))
             except BudgetPaused:
                 lock.execute("UPDATE memory_actions SET status='pending',error='等待预算许可，尚未确认保存。' WHERE id=%s", (action_id,))

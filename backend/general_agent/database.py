@@ -54,7 +54,7 @@ class Database:
             return row
 
     def decorate_message(self, row: dict[str, Any]) -> dict[str, Any]:
-        """补齐附件、候选、正式记忆及明确搜索状态，停止或失败不抹去完成步骤。"""
+        """补齐附件候选的文件及人物预览、正式记忆和搜索状态，停止或失败保留完成步骤。"""
         with self.connect() as connection:
             row['attachment_ids'] = [item['attachment_id'] for item in connection.execute('SELECT attachment_id FROM message_attachments WHERE message_id=%s ORDER BY attachment_id', (row['id'],)).fetchall()]
         if row['role'] == 'assistant' and row.get('reply_to'):
@@ -65,6 +65,8 @@ class Database:
         with self.connect() as connection:
             connection.execute("UPDATE memory_candidates SET status='expired',error='候选已过期，请重新明确具体事实。' WHERE source_message_id=%s AND status IN ('pending','paused','failed') AND expires_at<=CURRENT_TIMESTAMP",(row.get('reply_to'),))
             row['memory_candidates'] = connection.execute('SELECT * FROM memory_candidates WHERE source_message_id=%s ORDER BY created_at,id',(row.get('reply_to'),)).fetchall() if row['role']=='assistant' else []
+            for candidate in row['memory_candidates']:
+                candidate['attachment_source']=connection.execute('SELECT * FROM attachment_memory_candidates WHERE candidate_id=%s',(candidate['id'],)).fetchone()
             row['memory_discovery'] = connection.execute('SELECT status,error FROM memory_discoveries WHERE message_id=%s',(row.get('reply_to'),)).fetchone() if row['role']=='assistant' else None
             row['memory_update'] = connection.execute('SELECT * FROM memory_updates WHERE id=%s',(uuid5(row['reply_to'],'explicit-correction:0'),)).fetchone() if row['role']=='assistant' and row.get('reply_to') else None
             row['search_action'] = connection.execute('SELECT id,query,status,error,revision,sources,purpose,expires_at FROM search_requests WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()

@@ -7,6 +7,7 @@ from uuid import UUID
 from general_agent.budget import OperationContext
 from general_agent.calls import CallGateway
 from general_agent.memory import MemoryService
+from general_agent.attachment_memory import AttachmentMemory, attachment_memory_intent
 from general_agent.memory_candidates import MemoryCandidates, candidate_eligible
 from general_agent.memory_correction import MemoryCorrection, correction_intent
 from general_agent.recall import MemoryRecall
@@ -48,12 +49,13 @@ class ChatExecution:
     """共用批准动作和回答准备；传输、线程及答案尝试留给聊天入口。"""
 
     def __init__(self, calls: CallGateway, memory: MemoryService, search: SearchService) -> None:
-        """绑定本地动作、明确搜索及唯一云端调用边界。"""
+        """绑定本地保存、独立附件候选、明确搜索及唯一云端调用边界。"""
         self.calls, self.memory = calls, memory
         self.recall = MemoryRecall(memory)
         self.search = search
         self.correction = MemoryCorrection(memory)
         self.candidates = MemoryCandidates(memory)
+        self.attachment_memory = AttachmentMemory(self.candidates, search.attachments)
 
     def embedding_revision(self, content: str) -> str | None:
         """保存、更正或召回涉及嵌入时绑定版本，暂停尝试不能沿用修改前的配置批准。"""
@@ -71,7 +73,9 @@ class ChatExecution:
         return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """预留保存或召回调用；候选、搜索、更正与全文处理先记录状态，再逐步检查预算。"""
+        """预留保存或召回调用；消息与附件候选、搜索、更正和全文先登记状态再逐步检查预算。"""
+        if attachment_memory_intent(content):
+            return None
         if correction_intent(content) is not None:
             # 更正先持久化目标版本并停用旧值，再在步骤内申请预算。
             return None
@@ -119,7 +123,9 @@ class ChatExecution:
         return reserved if row and row['unit']=='chat_tokens' and row['status']=='reserved' else None
 
     def prepare(self, conversation_id: UUID, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None, settings: StoredSettings | None = None) -> str | None:
-        """执行明确保存或更正；普通个人事实先提出候选，再继续普通回答。"""
+        """附件明确提取先独立预览；直接保存更正规则不变，普通个人事实只提出候选。"""
+        if attachment_memory_intent(content) and settings is not None:
+            return self.attachment_memory.prepare(conversation_id,user_id,settings,operation)
         if correction_intent(content) is not None:
             return self.correction.chat(content,user_id,conversation_id,operation)
         intent = explicit_intent(content)
