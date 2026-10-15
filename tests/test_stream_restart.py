@@ -10,10 +10,12 @@ from threading import Event, Thread
 from time import monotonic, sleep
 
 import httpx
+import pytest
 
 
-def test_killed_process_recovers_partial_answer_as_failed(database_url: str, tmp_path: Path) -> None:
-    """强制终止生成中的后端并重启后，部分内容仍在且不会遗留虚假的生成中状态。"""
+@pytest.mark.parametrize("stop_before_kill", [False, True])
+def test_killed_process_recovers_partial_answer_as_failed(database_url: str, tmp_path: Path, stop_before_kill: bool) -> None:
+    """强制终止生成或已停止待用量的后端后，保留部分内容并清除遗留在途状态。"""
     release = Event()
 
     class Provider(BaseHTTPRequestHandler):
@@ -70,16 +72,20 @@ def test_killed_process_recovers_partial_answer_as_failed(database_url: str, tmp
                     break
                 sleep(0.02)
             assert (message["status"], message["content"]) == ("generating", "persisted partial")
+            if stop_before_kill:
+                assert client.post(f"/api/conversations/{conversation_id}/messages/{message['id']}/stop").status_code == 200
             process.kill()
             process.wait(timeout=5)
             process = launch()
             ready(client)
             restored = client.get(f"/api/conversations/{conversation_id}").json()["messages"][-1]
-            assert (restored["status"], restored["content"]) == ("failed", "persisted partial")
-            assert "重启" in restored["error"]
+            assert (restored["status"], restored["content"]) == ("stopped" if stop_before_kill else "failed", "persisted partial")
+            if not stop_before_kill:
+                assert "重启" in restored["error"]
             usage = client.get("/api/usage").json()[0]
-            assert usage["status"] == "failed"
+            assert usage["status"] == ("stopped" if stop_before_kill else "failed")
             assert usage["total_tokens"] is None
+            assert client.get("/api/usage/summary").json()["pending_calls"] == 0
     finally:
         process.terminate()
         process.wait(timeout=5)

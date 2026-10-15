@@ -2,14 +2,14 @@
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +18,8 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 
+from general_agent.budget import BudgetInput, BudgetPaused, BudgetService, OperationContext
+from general_agent.calls import CallGateway
 from general_agent.capabilities import Capability, CapabilityResult, CapabilityService
 from general_agent.chat import ChatService
 from general_agent.database import Database
@@ -57,12 +59,21 @@ class ConversationDetail(Conversation):
     messages: list[Message] = Field(default_factory=list)
 
 
+class ApprovalInput(BaseModel):
+    pause_id: UUID
+
+
 class UsageRecord(BaseModel):
     id: UUID
     conversation_id: UUID | None
     purpose: str
     model: str
     status: str
+    operation_id: UUID | None = None
+    base_url: str | None = None
+    estimated_cost: str | None = None
+    unit: str = "chat_tokens"
+    credits: str | None = None
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None
@@ -77,7 +88,8 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     settings = SettingsStore(data_dir or Path(os.environ.get("APP_DATA_DIR", ".local")))
     embedding_settings = EmbeddingSettingsStore(settings.directory)
     embedding_configuration = EmbeddingConfiguration(database, embedding_settings)
-    model = ModelClient(model_transport)
+    budget = BudgetService(database)
+    model = CallGateway(budget, ModelClient(model_transport))
     chat = ChatService(database, model)
     capabilities = CapabilityService(database, model, settings, embedding_settings)
     streaming = StreamingChat(database, model)
@@ -91,6 +103,8 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         await asyncio.to_thread(streaming.close)
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
+    app.state.calls = model
+    app.state.budget = budget
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
 
     @app.middleware("http")
@@ -134,13 +148,69 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         """展示当前已保存配置的独立能力结果，旧版本结果不会冒充当前能力。"""
         return capabilities.results()
 
-    @app.post("/api/settings/capabilities/{capability}", response_model=CapabilityResult)
-    def check_capability(capability: Capability) -> CapabilityResult:
-        """发起一项可能产生费用的真实能力检查，失败也保留结果与用量。"""
+    def perform(purpose: str, scope: object, operation_id: UUID | None, conversation_id: UUID | None, action: Callable[[OperationContext], BaseModel], status: int = 200) -> JSONResponse:
+        """绑定请求范围并缓存已执行结果，暂停保留可恢复操作且不重复发送云端请求。"""
         try:
-            return capabilities.check(capability)
+            with budget.operation(purpose, scope, operation_id, conversation_id) as (operation, previous):
+                if previous and previous["result"] is not None:
+                    return JSONResponse(previous["result"], status_code=previous["response_status"])
+                if budget.has_calls(operation):
+                    raise ValueError("该操作已执行但结果尚未确认，请先查看原会话或能力结果，不能重复发送。")
+                try:
+                    result = action(operation).model_dump(mode="json")
+                    response_status = status
+                except ModelFailure as error:
+                    result, response_status = {"detail": str(error)}, 502
+                budget.cache_result(operation, result, response_status)
+                return JSONResponse(result, status_code=response_status)
+        except BudgetPaused as paused:
+            return JSONResponse(paused.public(), status_code=402)
+        except LookupError as error:
+            raise HTTPException(404, str(error)) from None
         except ValueError as error:
             raise HTTPException(409, str(error)) from None
+
+    @app.post("/api/settings/capabilities/{capability}")
+    def check_capability(capability: Capability, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
+        """将能力检查绑定到配置版本，暂停批准只恢复同一个能力和配置。"""
+        saved = embedding_settings.read() if capability == "embedding" else settings.read()
+        if saved is None:
+            raise HTTPException(409, "请先保存对应的模型连接配置。")
+
+        def check(operation: OperationContext) -> BaseModel:
+            """用显式操作上下文执行当前能力检查。"""
+            return capabilities.check(capability, operation, saved)
+        return perform("capability_" + capability, saved.revision, operation_id, None, check)
+
+    @app.get("/api/settings/budget")
+    def get_budget() -> dict[str, object]:
+        """展示人民币月度预算和按服务、模型绑定的单价。"""
+        return budget.settings()
+
+    @app.put("/api/settings/budget")
+    def save_budget(body: BudgetInput) -> dict[str, object]:
+        """保存可选月度预算，空预算允许继续使用并保留未知费用。"""
+        return budget.save(body)
+
+    @app.get("/api/usage/summary")
+    def usage_summary() -> dict[str, object]:
+        """返回上海时区当月全部调用统计，费用未知与已知部分分别展示。"""
+        return budget.summary()
+
+    @app.post("/api/budget/operations/{operation_id}/approve")
+    def approve_operation(operation_id: UUID, body: ApprovalInput) -> dict[str, str]:
+        """只批准持久化暂停挑战对应的下一次云端调用。"""
+        try:
+            budget.approve(operation_id, body.pause_id)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
+        return {"approval_scope": "next_call"}
+
+    @app.post("/api/budget/operations/{operation_id}/cancel")
+    def cancel_operation(operation_id: UUID) -> dict[str, str]:
+        """撤回该操作后续调用许可，已经发生的用量仍可继续记录。"""
+        budget.cancel(OperationContext(operation_id, ""))
+        return {"status": "cancelled"}
 
     @app.get("/api/settings/embedding", response_model=PublicEmbeddingSettings)
     def get_embedding_settings() -> PublicEmbeddingSettings:
@@ -175,49 +245,44 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
             raise HTTPException(404, "会话不存在。")
         return ConversationDetail.model_validate(row)
 
-    @app.post("/api/conversations/{conversation_id}/messages", response_model=ConversationDetail)
-    def send_message(conversation_id: UUID, body: MessageInput) -> ConversationDetail:
-        """兼容同步对话并拒绝已有流式生成；失败保留记录并返回公开说明。"""
+    @app.post("/api/conversations/{conversation_id}/messages")
+    def send_message(conversation_id: UUID, body: MessageInput, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
+        """同步对话也经过操作范围校验和预算网关，重复提交复用已保存结果。"""
         saved = settings.read()
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
-        try:
-            chat.send(conversation_id, body.content, saved)
-        except LookupError:
-            raise HTTPException(404, "会话不存在。") from None
-        except ModelFailure as error:
-            raise HTTPException(502, str(error)) from None
-        except ValueError as error:
-            raise HTTPException(409, str(error)) from None
-        return get_conversation(conversation_id)
 
-    @app.post("/api/conversations/{conversation_id}/runs", status_code=202, response_model=ConversationDetail)
-    def start_stream(conversation_id: UUID, body: MessageInput) -> ConversationDetail:
-        """启动持久化的流式回答，客户端可订阅事件或重新读取会话。"""
-        saved = settings.read()
-        if saved is None:
-            raise HTTPException(409, "请先在设置中配置模型。")
-        try:
-            streaming.start(conversation_id, body.content, saved)
-        except LookupError as error:
-            raise HTTPException(404, str(error)) from None
-        except ValueError as error:
-            raise HTTPException(409, str(error)) from None
-        return get_conversation(conversation_id)
+        def send(operation: OperationContext) -> BaseModel:
+            """在同一操作中完成同步回答及公开会话读取。"""
+            chat.send(conversation_id, body.content, saved, operation)
+            return get_conversation(conversation_id)
+        return perform("chat", [body.content, saved.revision], operation_id, conversation_id, send)
 
-    @app.post("/api/conversations/{conversation_id}/messages/{message_id}/retry", status_code=202, response_model=ConversationDetail)
-    def retry_stream(conversation_id: UUID, message_id: UUID) -> ConversationDetail:
-        """重试最新失败或停止的回答，产生新的实际调用而不重复用户消息。"""
+    @app.post("/api/conversations/{conversation_id}/runs", status_code=202)
+    def start_stream(conversation_id: UUID, body: MessageInput, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
+        """启动前预留一次可计量调用，预算暂停时不会保存未发送的消息。"""
         saved = settings.read()
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
-        try:
-            streaming.retry(conversation_id, message_id, saved)
-        except LookupError as error:
-            raise HTTPException(404, str(error)) from None
-        except ValueError as error:
-            raise HTTPException(409, str(error)) from None
-        return get_conversation(conversation_id)
+
+        def start(operation: OperationContext) -> BaseModel:
+            """把显式操作传给后台线程，使停止和用量收尾仍属于同一执行。"""
+            streaming.start(conversation_id, body.content, saved, operation)
+            return get_conversation(conversation_id)
+        return perform("chat_stream", [body.content, saved.revision], operation_id, conversation_id, start, 202)
+
+    @app.post("/api/conversations/{conversation_id}/messages/{message_id}/retry", status_code=202)
+    def retry_stream(conversation_id: UUID, message_id: UUID, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
+        """重试构成新的可计量操作，每次实际云端请求重新检查预算。"""
+        saved = settings.read()
+        if saved is None:
+            raise HTTPException(409, "请先在设置中配置模型。")
+
+        def retry(operation: OperationContext) -> BaseModel:
+            """仅为当前会话允许重试的原回答创建一个新尝试。"""
+            streaming.retry(conversation_id, message_id, saved, operation)
+            return get_conversation(conversation_id)
+        return perform("chat_retry", [str(message_id), saved.revision], operation_id, conversation_id, retry, 202)
 
     @app.post("/api/conversations/{conversation_id}/messages/{message_id}/stop", response_model=ConversationDetail)
     def stop_stream(conversation_id: UUID, message_id: UUID) -> ConversationDetail:
@@ -254,7 +319,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     @app.get("/api/usage", response_model=list[UsageRecord])
     def get_usage() -> list[UsageRecord]:
         """返回最近调用的服务用量，未知值不会被替换为零。"""
-        return [UsageRecord.model_validate(row) for row in database.list_usage()]
+        return [UsageRecord.model_validate({**row, "estimated_cost": format(row["estimated_cost"], "f") if row["estimated_cost"] is not None else None, "credits": format(row["credits"], "f") if row["credits"] is not None else None}) for row in database.list_usage()]
 
     frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     if frontend.is_dir():
