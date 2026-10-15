@@ -328,3 +328,35 @@ def test_retry_after_memory_edit_rebuilds_only_final_answer(database_url: str, t
         result=wait_message(client,conversation,'complete')
         assert '我住在苏州' in result['content'] and '我住在杭州' not in result['content']
         assert leaves==1 and finals==2
+
+
+def test_explicit_search_summary_and_document_summary_keep_separate_routes(database_url: str, tmp_path: Path) -> None:
+    """包含总结词的明确联网优先走搜索，随后纯资料全文请求不重发搜索或抢用网页出处。"""
+    from test_search import reply
+    queries: list[str]=[]
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """按实际外部边界返回网页或附件来源，意图错路由会缺少所需来源而失败。"""
+        payload=json.loads(request.content)
+        if request.url.host=='search.example':
+            queries.append(payload['query'])
+            return httpx.Response(200,json={'results':[{'url':'https://weather.example/report','title':'公开天气报告','content':'Friday rain.'}],'usage':{'credits':1}})
+        for message in payload['messages']:
+            if isinstance(message['content'],str) and message['content'].startswith('实际联网搜索结果'):
+                source=json.loads(message['content'].split('\n',1)[1])[0]
+                return reply(payload,f'公开报告总结。[{source["key"]}]')
+        return summary_response(request)
+
+    with TestClient(create_app(database_url,tmp_path,httpx.MockTransport(provider)),base_url='http://127.0.0.1:8000') as client:
+        conversation=configure(client)
+        client.put('/api/settings/search',json={'base_url':'https://search.example','api_key':'test-key'})
+        file=client.post(f'/api/conversations/{conversation}/attachments',files={'files':('本地报告.txt',b'Friday deadline.')}).json()[0]
+        response=client.post(f'/api/conversations/{conversation}/messages',json={'content':'联网搜索：总结公开天气报告'})
+        assert response.status_code==200
+        answer=response.json()['messages'][-1]
+        assert answer['document_progress'] is None and len(answer['web_sources'])==1 and answer['citations']==[]
+        client.post(f'/api/conversations/{conversation}/runs',json={'content':'请全文总结本地报告.txt','attachment_ids':[file['id']]})
+        answer=wait_message(client,conversation,'complete')
+        assert answer['document_progress']['status']=='complete'
+        assert len(answer['citations'])==1 and answer['web_sources']==[]
+        assert queries==['总结公开天气报告']
