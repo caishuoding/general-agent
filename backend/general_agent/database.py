@@ -62,6 +62,8 @@ class Database:
                 row['memory_action'] = connection.execute('SELECT * FROM memory_actions WHERE message_id=%s', (row['reply_to'],)).fetchone()
         else:
             row['memory_action'] = None
+        with self.connect() as connection:
+            row['memory_recall'] = connection.execute('SELECT status,match_count AS count,detail FROM memory_recalls WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
         return row
 
     def list_usage(self) -> list[dict[str, Any]]:

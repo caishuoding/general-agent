@@ -60,6 +60,7 @@ class Message(BaseModel):
     reply_to: UUID | None = None
     error: str | None = None
     memory_action: dict[str, Any] | None = None
+    memory_recall: dict[str, Any] | None = None
     budget_pause: dict[str, str] | None = None
     attachment_ids: list[UUID] = Field(default_factory=list)
     citations: list[dict[str, object]] = Field(default_factory=list)

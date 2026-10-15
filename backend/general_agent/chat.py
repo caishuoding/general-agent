@@ -22,7 +22,7 @@ class ChatService:
         self.attachments = attachments
 
     def send(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, attachment_ids: list[UUID] | None = None) -> None:
-        """先绑定原消息与附件，再执行当前授权及资料回答；实际读图才核验能力，暂停和失败保留稳定身份。"""
+        """绑定当前授权及资料后准备相关记忆；实际读图才核验能力，暂停保留稳定身份。"""
         self.attachments.validate(conversation_id, attachment_ids or [])
         user_id, answer_id = uuid4(), uuid4()
         with self.database.connect() as connection:
@@ -42,7 +42,8 @@ class ChatService:
             response = self.execution.prepare(conversation_id,user_id,content,operation,reserved)
             if response is None:
                 material = self.attachments.prepare(conversation_id, user_id, content, settings=settings)
-                response = self.model.bind(operation).complete(settings,material.messages + [{'role':str(row['role']),'content':str(row['content'])} for row in rows],self.execution.chat_reservation(content,reserved)).content
+                memory_material = self.execution.prepare_answer(user_id,content,operation,reserved)
+                response = self.model.bind(operation).complete(settings,memory_material + material.messages + [{'role':str(row['role']),'content':str(row['content'])} for row in rows],self.execution.chat_reservation(content,reserved)).content
         except BudgetPaused as paused:
             with self.database.connect() as connection:
                 connection.execute("UPDATE messages SET status='paused',budget_pause=%s WHERE id=%s AND status='generating'", (Jsonb(paused.public()),answer_id))

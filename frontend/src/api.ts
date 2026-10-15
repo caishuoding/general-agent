@@ -13,6 +13,7 @@ export type Message = {
   content: string;
   status: "generating" | "paused" | "complete" | "stopped" | "failed";
   memory_action: MemoryAction | null;
+  memory_recall: { status: "pending" | "complete" | "failed" | "skipped" | "unavailable"; count: number; detail: string } | null;
   budget_pause: { detail: string; operation_id: string; pause_id: string } | null;
   attachment_ids: string[];
   citations: FileCitation[];

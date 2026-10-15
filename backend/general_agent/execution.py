@@ -7,6 +7,8 @@ from uuid import UUID
 from general_agent.budget import OperationContext
 from general_agent.calls import CallGateway
 from general_agent.memory import MemoryService
+from general_agent.recall import MemoryRecall
+from general_agent.provider import ModelMessage
 from general_agent.settings import StoredSettings
 
 
@@ -44,18 +46,24 @@ class ChatExecution:
     def __init__(self, calls: CallGateway, memory: MemoryService) -> None:
         """绑定本地动作模块及唯一云端调用边界。"""
         self.calls, self.memory = calls, memory
+        self.recall = MemoryRecall(memory)
 
     def embedding_revision(self, content: str) -> str | None:
-        """读取本请求涉及的嵌入版本，供暂停尝试检查配置是否仍相同。"""
-        embedding = self.memory.embedding.store.read() if explicit_intent(content).fact else None
+        """保存或召回涉及嵌入时绑定版本，暂停尝试不能沿用修改前的配置批准。"""
+        embedding = self.memory.embedding.store.read() if explicit_intent(content).fact or self.recall.available() else None
         return embedding.revision if embedding else None
 
+    def same_embedding_revision(self, expected: str | None) -> bool:
+        """续跑只核验原来涉及的嵌入配置，不把记忆数量变化误当配置修改。"""
+        current=self.memory.embedding.store.read()
+        return expected is None or (current is not None and current.revision==expected)
+
     def scope(self, content: str, settings: StoredSettings) -> list[str | None]:
-        """将明确保存涉及的嵌入版本纳入幂等范围，批准不能转用于后来修改的服务。"""
+        """将保存或相关召回涉及的嵌入版本纳入幂等范围，批准不能转用于新服务。"""
         return [content, settings.revision, self.embedding_revision(content)]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """只预留下一条真实调用，明确保存不提前占用最终聊天的预算。"""
+        """只预留下一条真实调用，保存或召回均不提前占用最终聊天预算。"""
         intent = explicit_intent(content)
         if intent.clarification:
             return None
@@ -70,11 +78,29 @@ class ChatExecution:
             except ValueError:
                 return None
             return self.calls.budget.reserve(operation, embedding, 'embedding_tokens')
+        if self.recall.available():
+            try:
+                embedding = self.memory.embedding.verified()
+            except ValueError:
+                return None
+            return self.calls.budget.reserve(operation, embedding, 'embedding_tokens')
         return self.calls.budget.reserve(operation, settings)
 
+    def prepare_answer(self, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None) -> list[ModelMessage]:
+        """普通回答提供已批准相关记忆，兼容文字或视觉消息组合；明确保存维持独立回执。"""
+        if explicit_intent(content).fact:
+            return []
+        with self.memory.database.connect() as connection:
+            row=connection.execute('SELECT unit FROM model_calls WHERE id=%s',(reserved,)).fetchone() if reserved else None
+        return self.recall.prepare(user_id,content,operation,reserved,skip=bool(row and row['unit']=='chat_tokens'))
+
     def chat_reservation(self, content: str, reserved: UUID | None) -> UUID | None:
-        """普通聊天复用首个预留；保存用过的嵌入预留不得挪作回答调用。"""
-        return None if explicit_intent(content).fact else reserved
+        """仅复用聊天预留；记忆保存或召回用过的嵌入请求不得挪作回答调用。"""
+        if reserved is None:
+            return None
+        with self.memory.database.connect() as connection:
+            row=connection.execute('SELECT unit FROM model_calls WHERE id=%s',(reserved,)).fetchone()
+        return reserved if row and row['unit']=='chat_tokens' else None
 
     def prepare(self, conversation_id: UUID, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None) -> str | None:
         """执行明确批准的本地动作并返回确定回执；空值表示继续普通回答。"""

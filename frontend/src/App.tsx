@@ -351,7 +351,7 @@ export function App() {
     return <details className="file-citation" key={citation.key} open><summary>[{citation.key}] <a href={`/api/conversations/${conversation?.id}/attachments/${citation.attachment_id}/file`} download>{citation.filename} · {citation.location}</a></summary><blockquote>{citation.excerpt}</blockquote></details>;
   }
 
-  // 展示纯文本回答、记忆状态、预算暂停和可信出处，保留停止及重试入口。
+  // 展示回答、真实记忆召回及动作、预算暂停和可信出处，保留停止及重试入口。
   function renderMessage(message: Message) {
     return (
       <article
@@ -369,6 +369,7 @@ export function App() {
           </time>
         </div>
         <div className="message-content">{message.content}</div>
+        {message.memory_recall && message.memory_recall.status !== "skipped" && <div data-testid="memory-recall" className={`memory-recall ${message.memory_recall.status}`} role="status">{message.memory_recall.detail}</div>}
         {message.memory_action && <div className={`memory-action ${message.memory_action.status}`} role="status">
           {message.memory_action.status === "complete" ? `已保存 · ${message.memory_action.fact}` : message.memory_action.status === "failed" ? `记忆保存未完成 · ${message.memory_action.error || "可以重试核对。"}` : "记忆正在处理，尚未确认保存。"}
         </div>}
