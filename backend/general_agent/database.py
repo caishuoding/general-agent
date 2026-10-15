@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4, uuid5
 
+from general_agent.history import public_history
+
 import psycopg
 from psycopg.rows import dict_row
 
@@ -54,7 +56,7 @@ class Database:
             return row
 
     def decorate_message(self, row: dict[str, Any]) -> dict[str, Any]:
-        """补齐附件、候选、正式记忆及明确搜索状态，停止或失败不抹去完成步骤。"""
+        """补齐当前动作与真实来源；历史摘录每次从仍有效消息重建。"""
         with self.connect() as connection:
             row['attachment_ids'] = [item['attachment_id'] for item in connection.execute('SELECT attachment_id FROM message_attachments WHERE message_id=%s ORDER BY attachment_id', (row['id'],)).fetchall()]
         if row['role'] == 'assistant' and row.get('reply_to'):
@@ -69,6 +71,9 @@ class Database:
             row['memory_update'] = connection.execute('SELECT * FROM memory_updates WHERE id=%s',(uuid5(row['reply_to'],'explicit-correction:0'),)).fetchone() if row['role']=='assistant' and row.get('reply_to') else None
             row['search_action'] = connection.execute('SELECT id,query,status,error,revision,sources,purpose,expires_at FROM search_requests WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
             row['memory_recall'] = connection.execute('SELECT status,match_count AS count,detail FROM memory_recalls WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
+        row['history_search'], row['history_sources'] = public_history(self, row.get('operation_id'))
+        if row['history_search'] and row['history_search']['status'] == 'unavailable' and row['status'] != 'complete':
+            row['content'] = row['history_search']['detail']
         return row
 
     def list_usage(self) -> list[dict[str, Any]]:
