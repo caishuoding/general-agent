@@ -26,7 +26,7 @@ class ControlledModel(BaseHTTPRequestHandler):
     attempts: dict[str, int] = {}
 
     def do_POST(self) -> None:
-        """按外部请求返回真实分段 SSE，指定测试输入可模拟慢速回答与断流。"""
+        """返回分段 SSE 与资料出处，指定测试输入可模拟慢速回答与断流。"""
         payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
         prompt = payload["messages"][-1]["content"]
         self.attempts[prompt] = self.attempts.get(prompt, 0) + 1
@@ -44,6 +44,8 @@ class ControlledModel(BaseHTTPRequestHandler):
         slow = "分段" in prompt or "停止" in prompt or "断流" in prompt
         first = "第一段" if slow else "这是受控"
         second = "，第二段。" if slow else "模型的测试回答。"
+        if any("attachment_id" in str(item.get("content", "")) for item in payload["messages"]):
+            first, second = "蓝鲸项目星期五交付。", "[A1]"
         self.write_event({"choices": [{"delta": {"content": first}}]})
         sleep(2 if slow else 0.05)
         self.write_event({"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 10, "total_tokens": 22}})

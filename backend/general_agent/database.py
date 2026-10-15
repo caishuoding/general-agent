@@ -46,11 +46,11 @@ class Database:
             return connection.execute("SELECT * FROM conversations ORDER BY created_at DESC, id").fetchall()
 
     def get_conversation(self, conversation_id: UUID) -> dict[str, Any] | None:
-        """读取单个会话及其有序消息，不存在时返回空值。"""
+        """读取单个会话及有序消息、已发送附件和可信出处，不存在时返回空值。"""
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM conversations WHERE id = %s", (conversation_id,)).fetchone()
             if row is not None:
-                row["messages"] = connection.execute("SELECT * FROM messages WHERE conversation_id = %s ORDER BY position", (conversation_id,)).fetchall()
+                row["messages"] = connection.execute("SELECT m.*, ARRAY(SELECT ma.attachment_id FROM message_attachments ma WHERE ma.message_id=m.id ORDER BY ma.attachment_id) AS attachment_ids FROM messages m WHERE conversation_id = %s ORDER BY position", (conversation_id,)).fetchall()
             return row
 
     def list_usage(self) -> list[dict[str, Any]]:

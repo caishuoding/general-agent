@@ -18,6 +18,8 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 
+from general_agent.attachment_api import attachment_router
+from general_agent.attachments import AttachmentService
 from general_agent.budget import BudgetInput, BudgetPaused, BudgetService, OperationContext
 from general_agent.calls import CallGateway
 from general_agent.capabilities import Capability, CapabilityResult, CapabilityService
@@ -43,6 +45,7 @@ class Conversation(BaseModel):
 class MessageInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
     content: str = Field(min_length=1, max_length=32000)
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=5)
 
 
 class Message(BaseModel):
@@ -53,6 +56,8 @@ class Message(BaseModel):
     created_at: datetime
     reply_to: UUID | None = None
     error: str | None = None
+    attachment_ids: list[UUID] = Field(default_factory=list)
+    citations: list[dict[str, object]] = Field(default_factory=list)
 
 
 class ConversationDetail(Conversation):
@@ -81,7 +86,7 @@ class UsageRecord(BaseModel):
 
 
 def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None) -> FastAPI:
-    """创建聊天及能力配置应用，测试可指定真实数据库、配置目录和外部 HTTP 替身。"""
+    """创建聊天、会话资料及能力配置应用，测试可指定数据库、目录和外部 HTTP 替身。"""
     database = Database(database_url or os.environ.get(
         "DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/general_agent"
     ))
@@ -90,19 +95,22 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     embedding_configuration = EmbeddingConfiguration(database, embedding_settings)
     budget = BudgetService(database)
     model = CallGateway(budget, ModelClient(model_transport))
-    chat = ChatService(database, model)
+    attachments = AttachmentService(database, settings.directory)
+    chat = ChatService(database, model, attachments)
     capabilities = CapabilityService(database, model, settings, embedding_settings)
-    streaming = StreamingChat(database, model)
+    streaming = StreamingChat(database, model, attachments)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """启动时迁移并恢复遗留执行；停机时标记未完成回答并短暂等待工作线程。"""
+        """启动时迁移并恢复遗留生成及资料处理；停机时标记未完成回答并等待工作线程。"""
         database.migrate()
         streaming.recover()
+        attachments.recover()
         yield
         await asyncio.to_thread(streaming.close)
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
+    app.include_router(attachment_router(attachments))
     app.state.calls = model
     app.state.budget = budget
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
@@ -125,7 +133,9 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, error: RequestValidationError) -> JSONResponse:
-        """仅返回字段名和通用提示，避免验证错误回显密钥或完整请求体。"""
+        """返回字段或附件数量提示，避免验证错误回显密钥及完整请求体。"""
+        if any("attachment_ids" in item["loc"] and item["type"] == "too_long" for item in error.errors()):
+            return JSONResponse(status_code=422, content={"detail": "每条消息最多五个附件，请分成多条消息发送。"})
         fields = sorted({str(item["loc"][-1]) for item in error.errors()})
         return JSONResponse(status_code=422, content={"detail": "请检查输入字段：" + "、".join(fields)})
 
@@ -254,9 +264,9 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
         def send(operation: OperationContext) -> BaseModel:
             """在同一操作中完成同步回答及公开会话读取。"""
-            chat.send(conversation_id, body.content, saved, operation)
+            chat.send(conversation_id, body.content, saved, operation, body.attachment_ids)
             return get_conversation(conversation_id)
-        return perform("chat", [body.content, saved.revision], operation_id, conversation_id, send)
+        return perform("chat", [body.content, saved.revision, [str(item) for item in body.attachment_ids]], operation_id, conversation_id, send)
 
     @app.post("/api/conversations/{conversation_id}/runs", status_code=202)
     def start_stream(conversation_id: UUID, body: MessageInput, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
@@ -267,9 +277,9 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
         def start(operation: OperationContext) -> BaseModel:
             """把显式操作传给后台线程，使停止和用量收尾仍属于同一执行。"""
-            streaming.start(conversation_id, body.content, saved, operation)
+            streaming.start(conversation_id, body.content, saved, operation, body.attachment_ids)
             return get_conversation(conversation_id)
-        return perform("chat_stream", [body.content, saved.revision], operation_id, conversation_id, start, 202)
+        return perform("chat_stream", [body.content, saved.revision, [str(item) for item in body.attachment_ids]], operation_id, conversation_id, start, 202)
 
     @app.post("/api/conversations/{conversation_id}/messages/{message_id}/retry", status_code=202)
     def retry_stream(conversation_id: UUID, message_id: UUID, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
