@@ -13,6 +13,7 @@ from general_agent.recall import MemoryRecall
 from general_agent.provider import ModelMessage
 from general_agent.settings import StoredSettings
 from general_agent.summary import summary_mode
+from general_agent.history import HistorySearch, history_query
 from general_agent.search import SearchService, search_query
 
 
@@ -48,15 +49,18 @@ class ChatExecution:
     """共用批准动作和回答准备；传输、线程及答案尝试留给聊天入口。"""
 
     def __init__(self, calls: CallGateway, memory: MemoryService, search: SearchService) -> None:
-        """绑定本地动作、明确搜索及唯一云端调用边界。"""
+        """绑定本地记忆、明确历史与联网检索，以及唯一云端调用边界。"""
         self.calls, self.memory = calls, memory
         self.recall = MemoryRecall(memory)
         self.search = search
+        self.history = HistorySearch(memory.database)
         self.correction = MemoryCorrection(memory)
         self.candidates = MemoryCandidates(memory)
 
     def embedding_revision(self, content: str) -> str | None:
-        """保存、更正或召回涉及嵌入时绑定版本，暂停尝试不能沿用修改前的配置批准。"""
+        """只读历史不涉及嵌入；保存、更正或召回绑定本次配置版本。"""
+        if history_query(content) is not None:
+            return None
         embedding = self.memory.embedding.store.read() if explicit_intent(content).fact or correction_intent(content) is not None or self.recall.available() else None
         return embedding.revision if embedding else None
 
@@ -71,7 +75,9 @@ class ChatExecution:
         return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """预留保存或召回调用；候选、搜索、更正与全文处理先记录状态，再逐步检查预算。"""
+        """历史本机检索先落状态；其他动作预留实际首步并遵守预算。"""
+        if history_query(content) is not None:
+            return None
         if correction_intent(content) is not None:
             # 更正先持久化目标版本并停用旧值，再在步骤内申请预算。
             return None
@@ -119,7 +125,9 @@ class ChatExecution:
         return reserved if row and row['unit']=='chat_tokens' and row['status']=='reserved' else None
 
     def prepare(self, conversation_id: UUID, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None, settings: StoredSettings | None = None) -> str | None:
-        """执行明确保存或更正；普通个人事实先提出候选，再继续普通回答。"""
+        """历史请求保持只读；其他当前明确动作及普通个人事实沿既有规则执行。"""
+        if history_query(content) is not None:
+            return None
         if correction_intent(content) is not None:
             return self.correction.chat(content,user_id,conversation_id,operation)
         intent = explicit_intent(content)
