@@ -71,7 +71,7 @@ class MemoryCandidates:
             self.discover_source(conversation_id,message_id,settings,operation)
 
     def discover_source(self, conversation_id: UUID, message_id: UUID, settings: StoredSettings, operation: OperationContext) -> None:
-        """仅发送当前获准事实并保存检查点；失败可见，普通回答仍可继续。"""
+        """仅发送当前获准事实并原子核验停止状态后存检查点；失败可见，普通回答仍可继续。"""
         source=self.source(message_id,conversation_id)
         if not candidate_eligible(source['content']):
             return
@@ -96,6 +96,9 @@ class MemoryCandidates:
                 if not isinstance(item,dict) or item.get('subject')!='user' or not isinstance(item.get('fact'),str) or not 0<len(item['fact'].strip())<=5000 or not isinstance(item.get('quote'),str) or not item['quote'] or item['quote'] not in source['content'] or not candidate_eligible(item['quote']) or item.get('target_id') is not None and item.get('target_id') not in targets:
                     raise ValueError('候选事实、人物归属或原文引用无法核验。')
             with self.database.connect() as connection:
+                active=connection.execute('SELECT cancelled FROM cloud_operations WHERE id=%s FOR UPDATE',(operation.operation_id,)).fetchone()
+                if active is None or active['cancelled']:
+                    raise ValueError('候选提取已停止，未提交候选。')
                 for index,item in enumerate(items):
                     target=targets.get(item.get('target_id'))
                     connection.execute("INSERT INTO memory_candidates(id,source_message_id,source_conversation_id,source_quote,fact,subject,target_id,target_version,target_fact,status) VALUES(%s,%s,%s,%s,%s,'user',%s,%s,%s,'pending') ON CONFLICT(id) DO NOTHING",(uuid5(message_id,f'candidate:{index}'),message_id,conversation_id,item['quote'],item['fact'].strip(),target['id'] if target else None,target['version'] if target else None,target['fact'] if target else None))

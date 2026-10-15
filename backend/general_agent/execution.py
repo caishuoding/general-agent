@@ -12,6 +12,7 @@ from general_agent.memory_correction import MemoryCorrection, correction_intent
 from general_agent.recall import MemoryRecall
 from general_agent.provider import ModelMessage
 from general_agent.settings import StoredSettings
+from general_agent.search import SearchService, search_query
 
 
 @dataclass(frozen=True)
@@ -45,10 +46,11 @@ def explicit_intent(content: str) -> Intent:
 class ChatExecution:
     """共用批准动作和回答准备；传输、线程及答案尝试留给聊天入口。"""
 
-    def __init__(self, calls: CallGateway, memory: MemoryService) -> None:
-        """绑定本地动作模块及唯一云端调用边界。"""
+    def __init__(self, calls: CallGateway, memory: MemoryService, search: SearchService) -> None:
+        """绑定本地动作、明确搜索及唯一云端调用边界。"""
         self.calls, self.memory = calls, memory
         self.recall = MemoryRecall(memory)
+        self.search = search
         self.correction = MemoryCorrection(memory)
         self.candidates = MemoryCandidates(memory)
 
@@ -63,11 +65,12 @@ class ChatExecution:
         return expected is None or (current is not None and current.revision==expected)
 
     def scope(self, content: str, settings: StoredSettings) -> list[str | None]:
-        """将保存或相关召回涉及的嵌入版本纳入幂等范围，批准不能转用于新服务。"""
-        return [content, settings.revision, self.embedding_revision(content)]
+        """将嵌入及明确搜索的配置版本纳入幂等范围，批准不能转用于新服务。"""
+        search = self.search.settings.read() if search_query(content) else None
+        return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """预留下一条保存或召回调用；候选先持久化来源、更正先停用旧值，再逐步检查预算。"""
+        """预留保存或召回调用；候选、明确搜索及更正先记录业务状态，再逐步检查预算。"""
         if correction_intent(content) is not None:
             # 更正先持久化目标版本并停用旧值，再在步骤内申请预算。
             return None
@@ -85,7 +88,7 @@ class ChatExecution:
             except ValueError:
                 return None
             return self.calls.budget.reserve(operation, embedding, 'embedding_tokens')
-        if candidate_eligible(content):
+        if candidate_eligible(content) or search_query(content):
             return None
         if self.recall.available():
             try:

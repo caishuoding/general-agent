@@ -34,6 +34,7 @@ from general_agent.database import Database
 from general_agent.embedding import EmbeddingConfiguration, EmbeddingIndexConflict
 from general_agent.provider import ModelClient, ModelFailure
 from general_agent.streaming import StreamingChat
+from general_agent.search import SearchService, SearchSettingsInput, SearchQueryInput, SearchDecisionInput
 from general_agent.settings import (PublicSettings, SettingsInput, SettingsStore, EmbeddingSettingsInput, EmbeddingSettingsStore, PublicEmbeddingSettings)
 
 
@@ -69,6 +70,8 @@ class Message(BaseModel):
     memory_recall: dict[str, Any] | None = None
     budget_pause: dict[str, str] | None = None
     attachment_ids: list[UUID] = Field(default_factory=list)
+    search_action: dict[str, Any] | None = None
+    web_sources: list[dict[str, object]] = Field(default_factory=list)
     citations: list[dict[str, object]] = Field(default_factory=list)
 
 
@@ -98,7 +101,7 @@ class UsageRecord(BaseModel):
 
 
 def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None) -> FastAPI:
-    """创建聊天、会话资料及能力配置应用，测试可指定数据库、目录和外部 HTTP 替身。"""
+    """创建聊天、资料及独立搜索应用，测试可指定数据库、目录和外部 HTTP 替身。"""
     database = Database(database_url or os.environ.get(
         "DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/general_agent"
     ))
@@ -108,8 +111,10 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     budget = BudgetService(database)
     model = CallGateway(budget, ModelClient(model_transport))
     memory = MemoryService(database, embedding_configuration, model, settings.directory)
-    execution = ChatExecution(model, memory)
     attachments = AttachmentService(database, settings.directory)
+    search_settings = SettingsStore(settings.directory, 'search.json')
+    search = SearchService(database, model, search_settings, memory, attachments, model_transport)
+    execution = ChatExecution(model, memory, search)
     chat = ChatService(database, model, execution, attachments)
     capabilities = CapabilityService(database, model, settings, embedding_settings)
     streaming = StreamingChat(database, model, execution, attachments)
@@ -154,6 +159,54 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
             return JSONResponse(status_code=422, content={"detail": "每条消息最多五个附件，请分成多条消息发送。"})
         fields = sorted({str(item["loc"][-1]) for item in error.errors()})
         return JSONResponse(status_code=422, content={"detail": "请检查输入字段：" + "、".join(fields)})
+
+    @app.get('/api/settings/search', response_model=PublicSettings)
+    def get_search_settings() -> PublicSettings:
+        """展示独立 Tavily 配置状态，永不返回完整密钥。"""
+        saved = search_settings.read()
+        return saved.public() if saved else PublicSettings(base_url='https://api.tavily.com',model='tavily-basic')
+
+    @app.put('/api/settings/search', response_model=PublicSettings)
+    def save_search_settings(body: SearchSettingsInput) -> PublicSettings:
+        """仅保存搜索连接，空密钥只在同地址保留，保存本身不联网。"""
+        try:
+            return search_settings.save(body)
+        except ValueError:
+            raise HTTPException(422,'请填写此搜索服务的密钥；配置未保存。') from None
+
+    @app.delete('/api/settings/search', response_model=PublicSettings)
+    def clear_search_settings() -> PublicSettings:
+        """删除本机独立搜索凭据，聊天和嵌入配置仍可继续使用。"""
+        with search_settings.lock:
+            search_settings.path.unlink(missing_ok=True)
+        return get_search_settings()
+
+    @app.put('/api/conversations/{conversation_id}/search/{request_id}')
+    def edit_search_query(conversation_id: UUID, request_id: UUID, body: SearchQueryInput) -> ConversationDetail:
+        """修改待外发的完整文本并返回新修订，修改不构成批准。"""
+        try:
+            search.change_query(conversation_id,request_id,body)
+            return get_conversation(conversation_id)
+        except LookupError as error:
+            raise HTTPException(404,str(error)) from None
+        except ValueError as error:
+            raise HTTPException(409,str(error)) from None
+
+    @app.post('/api/conversations/{conversation_id}/search/{request_id}/decision')
+    def decide_search_query(conversation_id: UUID, request_id: UUID, body: SearchDecisionInput) -> ConversationDetail:
+        """确认本次具体外发或拒绝发送；仅首次批准恢复原暂停答案。"""
+        try:
+            message_id=search.decide(conversation_id,request_id,body)
+            if message_id:
+                saved=settings.read()
+                if saved is None:
+                    raise ValueError('聊天配置不可用，请恢复配置后继续。')
+                streaming.resume(conversation_id,message_id,saved)
+            return get_conversation(conversation_id)
+        except LookupError as error:
+            raise HTTPException(404,str(error)) from None
+        except ValueError as error:
+            raise HTTPException(409,str(error)) from None
 
     @app.get("/api/settings", response_model=PublicSettings)
     def get_settings() -> PublicSettings:

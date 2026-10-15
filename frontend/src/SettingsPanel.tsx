@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { SearchSettings } from "./SearchSettings";
 import { BudgetPanel } from "./BudgetPanel";
 import { ModelCapabilities } from "./ModelCapabilities";
 import { api, errorMessage, type Settings, type Usage } from "./api";
@@ -9,7 +10,7 @@ type Props = {
   onSaved: (value: Settings) => void;
 };
 
-// 管理聊天连接、独立嵌入能力、月度预算与近期用量；保存配置不代表验证通过。
+// 管理聊天、独立嵌入与搜索设置、月度预算和真实用量；保存不代表验证通过。
 export function SettingsPanel({ settings, usage, onSaved }: Props) {
   const [recentUsage, setRecentUsage] = useState(usage);
   const [saving, setSaving] = useState(false);
@@ -18,6 +19,9 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
 
   // 同步页面首次进入后加载的用量，能力检查也可更新本地列表。
   useEffect(() => { setRecentUsage(usage); }, [usage]);
+
+  // 搜索连接保存后刷新用量引用，使预算面板加载新的搜索服务身份。
+  async function searchSaved() { setRecentUsage(await api<Usage[]>("/usage")); }
 
   // 从表单读取连接信息，成功后清空密钥输入并更新公开配置状态。
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -43,7 +47,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
     }
   }
 
-  // 按实际生成状态与服务返回值显示调用，未取得的用量始终标为未知。
+  // 按实际状态和计量单位显示调用，搜索credits与模型token缺失时均标为未知。
   function renderUsage(call: Usage) {
     return (
       <tr key={call.id}>
@@ -53,8 +57,8 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
             {({ complete: "已完成", failed: "失败", stopped: "已停止", generating: "生成中" } as Record<string, string>)[call.status] || call.status}
           </span>
         </td>
-        <td>{call.prompt_tokens ?? "未知"}</td>
-        <td>{call.completion_tokens ?? "未知"}</td>
+        <td>{call.unit === "credits" ? `${call.credits ?? "未知"} credits` : call.prompt_tokens ?? "未知"}</td>
+        <td>{call.unit === "credits" ? "—" : call.completion_tokens ?? "未知"}</td>
         <td>{call.estimated_cost === null ? "未知" : `¥${call.estimated_cost}`}</td>
         <td>
           {new Date(call.created_at).toLocaleString("zh-CN", {
@@ -137,6 +141,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
         </form>
       </div>
       <ModelCapabilities settings={settings} onUsageChanged={setRecentUsage} />
+      <SearchSettings onSaved={searchSaved} />
       <BudgetPanel settings={settings} usage={recentUsage} onUsageChanged={setRecentUsage} />
       <div className="settings-card usage-card">
         <div className="card-heading">
@@ -153,7 +158,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
                 <tr>
                   <th>模型</th>
                   <th>状态</th>
-                  <th>输入</th>
+                  <th>输入 / credits</th>
                   <th>输出</th>
                   <th>估算费用</th>
                   <th>时间</th>
