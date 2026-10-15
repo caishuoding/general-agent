@@ -88,7 +88,7 @@ class StreamingChat:
         return new_id
 
     def execute(self, conversation_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
-        """先完成当前可信动作，再准备资料回答并核验出处；暂停恢复保留已完成动作。"""
+        """先完成当前可信动作，再准备资料回答并核验出处；图片核验仅针对实际读图，暂停恢复保留已完成动作。"""
         material = AttachmentContext()
         failure: str | None = None
         try:
@@ -99,7 +99,7 @@ class StreamingChat:
                 with self.database.connect() as connection:
                     connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (local,message_id))
             else:
-                material = self.attachments.prepare(conversation_id, user_id, str(rows[-1]['content']))
+                material = self.attachments.prepare(conversation_id, user_id, str(rows[-1]['content']), settings=settings)
                 reserved = self.execution.chat_reservation(str(rows[-1]["content"]), call_id) or self.model.budget.reserve(operation, settings)
                 for chunk in self.model.bind(operation).stream(settings, material.messages + [{"role": str(row["role"]), "content": str(row["content"])} for row in rows], reserved, message_id):
                     if chunk.content:
