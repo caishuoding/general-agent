@@ -176,8 +176,22 @@ class AttachmentService:
         for attachment_id in attachment_ids:
             connection.execute('INSERT INTO message_attachments (message_id,attachment_id) VALUES (%s,%s) ON CONFLICT DO NOTHING', (user_id, attachment_id))
 
+    def question_scope(self, conversation_id: UUID, user_id: UUID | None, content: str, attachment_ids: list[UUID]) -> list[UUID] | None:
+        """先确定本条所选或已发送的具名文件，再检索片段；失效或未发送的具名来源不得回退。"""
+        with self.database.connect() as connection:
+            rows=connection.execute("SELECT a.id,a.filename,EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id AND ma.message_id=%s) AS current FROM attachments a WHERE a.conversation_id=%s AND (a.id=ANY(%s) OR EXISTS(SELECT 1 FROM message_attachments ma JOIN messages m ON m.id=ma.message_id WHERE ma.attachment_id=a.id AND (%s::uuid IS NULL OR m.position<=(SELECT position FROM messages WHERE id=%s)))) ORDER BY a.created_at,a.id",(user_id,conversation_id,attachment_ids,user_id,user_id)).fetchall()
+        selected=[row['id'] for row in rows if row['current'] or row['id'] in attachment_ids]
+        if selected:
+            return selected
+        named=[row['id'] for row in rows if row['filename'] in content]
+        if named or re.search(r'\.(?:txt|md|markdown|pdf|docx|png|jpe?g)\b',content,re.IGNORECASE):
+            return named
+        return None
+
     def prepare(self, conversation_id: UUID, user_id: UUID | None, content: str, attachment_ids: list[UUID] | None = None, settings: StoredSettings | None = None, only_attachment_ids: list[UUID] | None = None) -> AttachmentContext:
-        """检索会话文字并保留缺口，可限定已授权文件集合；实际图片读取须通过当前配置能力检查。"""
+        """先按当前选择或具名来源限定范围，再检索相关片段；保留提取缺口与实际图片能力门槛。"""
+        if only_attachment_ids is None:
+            only_attachment_ids=self.question_scope(conversation_id,user_id,content,attachment_ids or [])
         words = list(dict.fromkeys(re.findall(r'[a-zA-Z0-9]{2,}', content.lower()) + re.findall(r'(?=([\u4e00-\u9fff]{2}))', content)))[:64]
         with self.database.connect() as connection:
             selected = connection.execute("SELECT a.id,a.filename,a.parse_info,c.citation_id,c.ordinal,c.location,c.content,(SELECT count(*) FROM unnest(%s::text[]) word WHERE strpos(lower(c.content),word)>0) AS relevance FROM attachments a JOIN attachment_chunks c ON c.attachment_id=a.id WHERE a.conversation_id=%s AND a.status='ready' AND a.image_metadata IS NULL AND (a.id=ANY(%s) OR EXISTS (SELECT 1 FROM message_attachments ma JOIN messages m ON m.id=ma.message_id WHERE ma.attachment_id=a.id AND m.conversation_id=%s AND (%s::uuid IS NULL OR m.position <= (SELECT position FROM messages WHERE id=%s)))) AND (%s::uuid[] IS NULL OR a.id=ANY(%s)) ORDER BY relevance DESC,a.created_at,a.id,c.ordinal LIMIT 12", (words, conversation_id, attachment_ids or [], conversation_id, user_id, user_id,only_attachment_ids,only_attachment_ids)).fetchall()

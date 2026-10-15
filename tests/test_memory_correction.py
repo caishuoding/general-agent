@@ -113,6 +113,7 @@ def test_update_history_failure_reconciles_without_reembedding(database_url: str
         client.post(f'/api/conversations/{source}/messages',json={'content':'请记住：我住在杭州'})
         original=client.get('/api/memories').json()[0]
         with psycopg.connect(database_url) as connection:
+            # 模拟记忆更正历史提交失败，验证恢复核对已有向量。
             connection.execute("CREATE FUNCTION reject_update_history() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event = 'UPDATE' THEN RAISE EXCEPTION 'update history unavailable'; END IF; RETURN NEW; END $$")
             connection.execute('CREATE TRIGGER reject_update_history BEFORE INSERT ON mem0_history FOR EACH ROW EXECUTE FUNCTION reject_update_history()')
         assert client.put(f"/api/memories/{original['id']}",json={'fact':'我住在苏州','expected_version':1}).status_code==409

@@ -10,9 +10,9 @@ from general_agent.budget import BudgetPaused, OperationContext
 from general_agent.calls import CallGateway
 from general_agent.execution import ChatExecution
 from general_agent.history import HistoryContext
-from general_agent.provider import ModelFailure, ModelMessage
+from general_agent.provider import ModelFailure
 from general_agent.settings import StoredSettings
-from general_agent.summary import DocumentSummary, SummaryPreparation, summary_mode
+from general_agent.summary import SummaryPreparation
 from general_agent.search import SearchAwaiting
 
 
@@ -20,13 +20,13 @@ class ChatService:
     """同步调用与流式入口共享明确保存规则和原用户来源。"""
 
     def __init__(self, database: Database, model: CallGateway, execution: ChatExecution, attachments: AttachmentService) -> None:
-        """绑定持久化、统一调用、共同动作与独立会话资料模块。"""
+        """绑定持久化与统一调用，材料编排及全文检查点复用共同执行器。"""
         self.database, self.model, self.execution = database, model, execution
         self.attachments = attachments
-        self.documents = DocumentSummary(database, model, attachments)
+        self.documents = execution.documents
 
     def send(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, attachment_ids: list[UUID] | None = None) -> None:
-        """仅在有效会话登记当前授权，明确历史只读旧消息，资料沿共同执行与预算边界。"""
+        """在有效会话登记授权，统一准备回答材料；同步传输独立保存最终答案及真实状态。"""
         self.attachments.validate(conversation_id, attachment_ids or [])
         user_id, answer_id = uuid4(), uuid4()
         with self.database.connect() as connection:
@@ -47,19 +47,9 @@ class ChatService:
         try:
             response = self.execution.prepare(conversation_id,user_id,content,operation,reserved,settings)
             if response is None:
-                history_material = self.execution.history.prepare(conversation_id,user_id,content,operation)
-                web_material = history_material.messages if history_material else self.execution.search.prepare(conversation_id,user_id,content,settings,operation)
-                chat_reserved = self.execution.chat_reservation(content,reserved)
-                if web_material is None:
-                    material = self.attachments.prepare(conversation_id,user_id,content,settings=settings) if summary_mode(content) is None else AttachmentContext()
-                    memory_material = self.execution.prepare_answer(user_id,content,operation,reserved)
-                    summary = self.documents.prepare(conversation_id,user_id,answer_id,content,settings,operation,chat_reserved,memory_material)
-                    if summary:
-                        material = summary.material
-                else:
-                    memory_material = web_material
-                history: list[ModelMessage] = [{'role':str(row['role']),'content':str(row['content'])} for row in (rows[-1:] if summary or history_material else rows)]
-                response = history_material.local_answer if history_material and history_material.local_answer else summary.cached_answer if summary and summary.cached_answer else self.model.bind(operation).complete(settings,memory_material + material.messages + history,self.documents.reserve_final(summary,settings,operation) if summary else chat_reserved,answer_id).content
+                prepared=self.execution.prepare_response(conversation_id,user_id,answer_id,settings,operation,reserved,rows)
+                material,summary,history_material=prepared.material,prepared.summary,prepared.history
+                response=prepared.local_answer if prepared.local_answer is not None else self.model.bind(operation).complete(settings,prepared.messages,self.documents.reserve_final(summary,settings,operation) if summary else prepared.reserved,answer_id).content
                 if summary and summary.cached_answer is None:
                     response = self.documents.finish(summary,response)
         except (BudgetPaused,SearchAwaiting) as paused:

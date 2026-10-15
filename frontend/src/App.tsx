@@ -191,8 +191,10 @@ export function App() {
     [conversation, pending],
   );
 
-  // 清理被接受后重读会话与消息；即使部分失败，停用的来源也立刻退出当前选择。
+  // 清理后刷新来源；详情只回写发起时仍选中的会话，切换或重新选择后的旧响应失效。
   async function refreshSources() {
+    const id = activeId.current;
+    const selected = selection.current;
     setSelectedAttachments([]);
     const items = await api<Conversation[]>("/conversations");
     setConversations(items);
@@ -200,11 +202,14 @@ export function App() {
       // 每次清理后重新载入附件和未完成清理记录。
       (value) => value + 1,
     );
-    if (activeId.current && items.some(
-      // 只有仍有效会话才继续读取。
-      (item) => item.id === activeId.current,
-    )) setConversation(await api<ConversationDetail>(`/conversations/${activeId.current}`));
-    else { activeId.current = null; selection.current += 1; setConversation(null); localStorage.removeItem("active-conversation"); }
+    if (!id || activeId.current !== id || selection.current !== selected) return;
+    if (items.some(
+      // 只刷新发起删除时仍有效的原会话，不读取用户后来选择的会话。
+      (item) => item.id === id,
+    )) {
+      const detail = await api<ConversationDetail>(`/conversations/${id}`);
+      if (activeId.current === id && selection.current === selected) setConversation(detail);
+    } else { activeId.current = null; selection.current += 1; setConversation(null); localStorage.removeItem("active-conversation"); }
   }
   // 当前会话删除需先呈现包含更正和附件来源的完整影响。
   function deleteConversation() { if (activeId.current) setDeleteTarget({ path: `/conversations/${activeId.current}`, label: '会话' }); }

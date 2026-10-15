@@ -42,6 +42,25 @@ class MemoryService:
             finally:
                 memory.close()
 
+    @contextmanager
+    def maintenance(self) -> Iterator[None]:
+        """先取得允许维护期间查看及删除的记忆租约，调用方随后才可锁业务来源行。"""
+        with self.embedding.spaces.lease(maintenance=True):
+            yield
+
+    def retainable(self, actions: list[dict[str, Any]]) -> set[UUID]:
+        """核验当前活动空间中的完整事实，隐藏配置与 SDK；来源删除调用方须先持维护租约。"""
+        valid: set[UUID]=set()
+        settings=self.embedding.spaces.local_settings()
+        if settings and any(row['status']=='complete' and row['memory_id'] for row in actions):
+            with self.session(settings) as sdk:
+                for row in actions:
+                    if row['status']=='complete' and row['memory_id']:
+                        entry=sdk.get(str(row['memory_id']))
+                        if entry and entry.get('user_id')=='local-person' and entry.get('memory')==row['fact']:
+                            valid.add(row['id'])
+        return valid
+
     def action(self, message_id: UUID) -> dict[str, Any] | None:
         """只返回原用户明确保存动作，候选确认的多个独立身份不会混入回答重试。"""
         with self.database.connect() as connection:
