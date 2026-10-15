@@ -1,5 +1,6 @@
 """Mem0 1.0.11 的局部 PostgreSQL 兼容层，不调用 SDK 默认 SQLite 生命周期。"""
 
+from collections.abc import Callable
 import logging
 import os
 from importlib.metadata import version
@@ -68,13 +69,14 @@ class PgHistory:
 class MeteredEmbedding(EmbeddingBase):
     """用操作专属网关替换默认嵌入客户端，SDK 内部线程仍携带预算身份。"""
 
-    def __init__(self, settings: StoredEmbeddingSettings, calls: BoundCalls | None, reserved: UUID | None = None) -> None:
-        """保存显式配置及可选预留请求；只读会话不具有发出云请求的权限。"""
+    def __init__(self, settings: StoredEmbeddingSettings, calls: BoundCalls | None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None) -> None:
+        """保存配置、可选预留和来源守卫；只读会话不具有发出云请求的权限。"""
         super().__init__(BaseEmbedderConfig(model=settings.model, embedding_dims=settings.dimensions))
         self.settings, self.calls, self.reserved = settings, calls, reserved
+        self.before_write=before_write
 
     def embed(self, text: str, memory_action: str | None = None) -> list[float]:
-        """先计量实际嵌入，再检查取消；保存或更正停止时不继续写入正式记忆。"""
+        """先计量实际嵌入，再核验取消和可选来源守卫，失效时不继续写入正式记忆。"""
         if self.calls is None:
             raise ValueError('只读记忆会话不能发出嵌入请求。')
         reserved, self.reserved = self.reserved, None
@@ -83,6 +85,8 @@ class MeteredEmbedding(EmbeddingBase):
             row = connection.execute('SELECT cancelled FROM cloud_operations WHERE id=%s', (self.calls.context.operation_id,)).fetchone()
             if row is None or row['cancelled']:
                 raise ValueError('记忆操作已停止；尚未继续写入。')
+        if self.before_write:
+            self.before_write()
         return list(result.data[0].embedding)
 
 
@@ -109,14 +113,14 @@ class SimilarityPGVector(PGVector):
 class PgMemory(Memory):
     """锁定版本，仅接管生命周期；add/get/search/update/delete 复用真实 OSS SDK。"""
 
-    def __init__(self, database: Database, settings: StoredEmbeddingSettings, calls: BoundCalls | None = None, reserved: UUID | None = None) -> None:
-        """显式注入 PostgreSQL 历史和计量适配，失败时也关闭自建连接池。"""
+    def __init__(self, database: Database, settings: StoredEmbeddingSettings, calls: BoundCalls | None = None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None) -> None:
+        """显式注入历史、计量和可选来源守卫，构造失败也关闭自建连接池。"""
         if version('mem0ai') != '1.0.11':
             raise RuntimeError('Mem0 版本不符，必须先重新验证 PostgreSQL 兼容层。')
         self.config = MemoryConfig(vector_store={'provider': 'pgvector', 'config': {'connection_string': database.url, 'collection_name': COLLECTION, 'embedding_model_dims': settings.dimensions, 'hnsw': False}}, llm={'provider': 'openai', 'config': {'enable_vision': False}})
         self.custom_fact_extraction_prompt = None
         self.custom_update_memory_prompt = None
-        self.embedding_model = MeteredEmbedding(settings, calls, reserved)
+        self.embedding_model = MeteredEmbedding(settings, calls, reserved,before_write)
         self.llm = DisabledInference()
         self.db = PgHistory(database)
         self.collection_name = COLLECTION

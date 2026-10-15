@@ -135,7 +135,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
     app.include_router(attachment_router(attachments))
     app.include_router(correction_router(MemoryCorrection(memory)))
-    app.include_router(candidates_router(execution.candidates,settings))
+    app.include_router(candidates_router(execution.candidates,settings,execution.attachment_memory))
     app.include_router(deletion_router(execution.deletion))
     app.state.calls = model
     app.state.budget = budget
