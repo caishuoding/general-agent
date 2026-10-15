@@ -34,7 +34,7 @@ class ModelClient:
         self.transport = transport
 
     def complete(self, settings: StoredSettings, messages: list[dict[str, str]]) -> Completion:
-        """请求文字回答，隔离服务错误正文，并尽可能保留返回的用量。"""
+        """请求文字回答，隔离服务错误正文，并保留成功或失败响应中的已知用量。"""
         try:
             with httpx.Client(transport=self.transport, timeout=60, follow_redirects=False, trust_env=False) as client:
                 response = client.post(
@@ -46,17 +46,20 @@ class ModelClient:
             raise ModelFailure("模型响应超时，请检查连接后重新发送。") from None
         except httpx.RequestError:
             raise ModelFailure("无法连接模型服务，请检查 API 地址与网络。") from None
-        if response.status_code in (401, 403):
-            raise ModelFailure("模型认证失败，请在设置中检查密钥与访问权限。")
-        if not response.is_success:
-            raise ModelFailure(f"模型请求失败（HTTP {response.status_code}），请检查模型配置或稍后重新发送。")
+        payload = None
         usage = TokenUsage()
         try:
             payload = response.json()
-            try:
-                usage = TokenUsage.model_validate(payload.get("usage") or {})
-            except (ValueError, AttributeError):
-                usage = TokenUsage()
+            usage = TokenUsage.model_validate(payload.get("usage") or {})
+        except (ValueError, AttributeError):
+            pass
+        if response.status_code in (401, 403):
+            raise ModelFailure("模型认证失败，请在设置中检查密钥与访问权限。", usage)
+        if not response.is_success:
+            raise ModelFailure(f"模型请求失败（HTTP {response.status_code}），请检查模型配置或稍后重新发送。", usage)
+        try:
+            if not isinstance(payload, dict):
+                raise ValueError("响应不是 JSON 对象。")
             return Completion(content=payload["choices"][0]["message"]["content"], usage=usage)
         except (ValueError, KeyError, IndexError, TypeError):
             raise ModelFailure("模型未返回有效文字回答，请检查模型是否支持此接口。", usage) from None

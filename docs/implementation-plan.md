@@ -2,7 +2,7 @@
 
 第一版是供本人使用的本机 Web 应用，支持流式对话、会话附件、Mem0 长期记忆、按明确要求触发的历史聊天检索和联网搜索。界面使用 React 与 TypeScript，后端使用 FastAPI，PostgreSQL 通过 Docker Compose 在本机运行。
 
-状态：产品范围与上述技术选择已确认；本文中的 Mem0 集成及具体实现安排待整体核对。尚未编写应用代码或启动数据库。产品行为以 [需求文档](requirements.md) 为准，术语见 [GLOSSARY.md](../GLOSSARY.md)。
+状态（2026-10-15）：任务 01 已实现本机文字对话、模型配置、PostgreSQL 持久化及用量记录，并完成 DeepSeek 真实文字调用。本文其余部分描述整体方案，不能视为已实现能力；Mem0、附件等仍按后续任务推进。产品行为以 [正式规格](../.scratch/general-agent/spec.md) 为准，实现范围和顺序以 [任务目录](../.scratch/general-agent/issues/) 为准，术语见 [GLOSSARY.md](../GLOSSARY.md)，实际检查见 [任务 01 验收记录](verification-01.md)。
 
 ## 总体结构
 
@@ -83,17 +83,19 @@ Mem0 的适配、来源状态和删除清理集中在长期记忆模块内。外
 
 ## 数据与本机运行
 
-业务记录建议由 SQLAlchemy 和 Psycopg 访问 PostgreSQL，数据库结构使用 Alembic 版本迁移脚本管理。版本迁移属于应用升级实现，不增加本期用户数据导入导出工具。[Psycopg 方言](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#module-sqlalchemy.dialects.postgresql.psycopg)、[Alembic 迁移说明](https://alembic.sqlalchemy.org/en/latest/autogenerate.html)
+任务 01 使用 Psycopg 直接访问 PostgreSQL，以 SQL 文件、结构版本记录和事务锁执行启动迁移；目前没有引入 SQLAlchemy 或 Alembic。版本迁移属于应用升级实现，不增加本期用户数据导入导出工具。
 
-PostgreSQL 使用 Docker Compose 与持久化存储卷，拟采用包含 pgvector 的镜像并固定版本。前端和后端直接在本机运行，数据库及应用仅绑定本机地址。前端构建产物可由后端同源提供。[pgvector 镜像说明](https://github.com/pgvector/pgvector#docker)
+PostgreSQL 使用 Docker Compose 与持久化存储卷。任务 01 使用固定摘要的 PostgreSQL 17 镜像；pgvector 随 Mem0 集成任务引入。前端和后端直接在本机运行，数据库及应用仅绑定本机地址，前端构建产物由后端同源提供。[pgvector 镜像说明](https://github.com/pgvector/pgvector#docker)
 
 业务表保存会话、消息、附件及处理状态、候选记忆、记忆来源和操作状态、用量与设置。Mem0 管理的正式记忆集合、适配后的记忆历史及独立资料索引分别组织，避免通过删除一种资料误删另一种。
 
 模型和搜索密钥由后端保存在独立的本机配置中，设置读取接口仅返回是否已配置及掩码，不回传完整密钥；日志不记录凭证。交付文档说明数据库卷、附件目录和本机配置的位置。
 
-已核实本机存在 Docker 和 Compose 客户端，以及可运行的 Node.js 24、Python 3.12 自带运行时。Docker daemon 的可访问性及实际 PostgreSQL 容器运行情况仍需实施时验证，目前尚未启动服务。
+已使用本机 Docker Desktop、Compose、Node.js 24 和 Python 3.12 启动应用与 PostgreSQL，并验证实际数据库容器重启后的记录保留。
 
 ## 实现顺序
+
+以下为初始阶段划分；当前执行顺序以正式规格拆分出的 18 项任务及其阻塞依赖为准，先交付任务 01 的可用文字对话，再推进流式响应、能力验证、预算与 Mem0。
 
 1. **Mem0 集成验证**：锁定 SDK 版本，验证 pgvector、直接写入与更新、历史存储适配、删除清理和统一计费入口；使用受控替身验证调用规则，避免把未验证的适配当成既有能力。
 2. **本机基础与对话**：建立项目结构、数据库迁移与 Compose 配置、模型设置和连接检查，完成会话持久化、流式回答、停止及失败重试。

@@ -62,6 +62,23 @@ def test_provider_failure_is_persisted_without_secret(database_url: str, tmp_pat
         assert call["prompt_tokens"] is None
 
 
+def test_http_failure_preserves_returned_usage(database_url: str, tmp_path: Path) -> None:
+    """服务以失败状态返回已发生的用量时，调用记录仍保存这些数据。"""
+    def provider(request: httpx.Request) -> httpx.Response:
+        """模拟已消耗输入 token 后发生的服务错误。"""
+        return httpx.Response(500, json={"error": "private-provider-detail", "usage": {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9}})
+
+    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
+        client.put("/api/settings", json={"base_url": "https://model.example/v1", "model": "chat", "api_key": "test-key"})
+        conversation_id = client.post("/api/conversations", json={}).json()["id"]
+        response = client.post(f"/api/conversations/{conversation_id}/messages", json={"content": "你好"})
+        assert response.status_code == 502
+        assert "private-provider-detail" not in response.text
+        usage = client.get("/api/usage").json()[0]
+        assert usage["status"] == "failed"
+        assert (usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"]) == (7, 2, 9)
+
+
 def test_conversations_keep_separate_model_context(database_url: str, tmp_path: Path) -> None:
     """往返两个会话时，模型只收到当前会话按顺序保存的消息。"""
     expected = [

@@ -54,4 +54,6 @@ pnpm --dir frontend test:e2e
 
 测试遵循应用对外接口边界，使用真实 PostgreSQL；测试用模型替身只替换外部 HTTP 响应。实际服务兼容性需填写自己的模型配置后验证，替身通过不等同于真实接口已验收。
 
+2026-10-15 已使用 DeepSeek 官方接口完成一次真实文字调用：API 地址为 `https://api.deepseek.com`，模型为 `deepseek-flash`，返回“连接成功”并记录服务用量。实际验证范围、自动化检查和审查修复见 [任务 01 验收记录](docs/verification-01.md)。密钥不包含在文档或代码中。
+
 参考：[FastAPI 外部依赖测试](https://fastapi.tiangolo.com/advanced/testing-dependencies/)、[Psycopg 事务管理](https://www.psycopg.org/psycopg3/docs/basic/transactions.html)、[Vite 使用说明](https://vite.dev/guide/)、[pnpm 构建脚本配置](https://pnpm.io/settings/build#allowbuilds)。

@@ -171,7 +171,7 @@ export function App() {
     }
   }
 
-  // 发送当前会话的一条消息，切换会话后返回的结果不会覆盖新页面。
+  // 发送当前会话的一条消息，隔离其他会话结果，并使此前读取的旧消息失效。
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
@@ -195,14 +195,20 @@ export function App() {
         `/conversations/${targetId}/messages`,
         { method: "POST", body: JSON.stringify({ content }) },
       );
-      if (activeId.current === targetId) setConversation(result);
+      if (activeId.current === targetId) {
+        selection.current += 1;
+        setConversation(result);
+      }
     } catch (failure) {
       if (activeId.current === targetId) setError(errorMessage(failure));
       try {
         const result = await api<ConversationDetail>(
           `/conversations/${targetId}`,
         );
-        if (activeId.current === targetId) setConversation(result);
+        if (activeId.current === targetId) {
+          selection.current += 1;
+          setConversation(result);
+        }
       } catch {
         /* 主请求错误已展示，保留当前已知内容。 */
       }
