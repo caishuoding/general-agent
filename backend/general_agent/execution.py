@@ -58,11 +58,11 @@ class ChatExecution:
         return expected is None or (current is not None and current.revision==expected)
 
     def scope(self, content: str, settings: StoredSettings) -> list[str | None]:
-        """将明确保存涉及的嵌入版本纳入幂等范围，批准不能转用于后来修改的服务。"""
+        """将保存或相关召回涉及的嵌入版本纳入幂等范围，批准不能转用于新服务。"""
         return [content, settings.revision, self.embedding_revision(content)]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """只预留下一条真实调用，明确保存不提前占用最终聊天的预算。"""
+        """只预留下一条真实调用，保存或召回均不提前占用最终聊天预算。"""
         intent = explicit_intent(content)
         if intent.clarification:
             return None

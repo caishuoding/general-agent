@@ -32,13 +32,15 @@ def test_new_conversation_reuses_only_related_approved_memories_after_restart(da
     transport=httpx.MockTransport(recall_provider)
     with TestClient(create_app(database_url,tmp_path,transport),base_url='http://127.0.0.1:8000') as client:
         old=configure_memory(client)
+        attachment=client.post(f'/api/conversations/{old}/attachments',files={'files':('旧资料.txt','旧附件专属内容583029'.encode())}).json()[0]['id']
         for content in ('请记住：我喜欢简洁的中文回答','请记住：我住在杭州','我的未批准门禁码是927481'):
-            assert client.post(f'/api/conversations/{old}/messages',json={'content':content}).status_code==200
+            selected=[attachment] if '927481' in content else []
+            assert client.post(f'/api/conversations/{old}/messages',json={'content':content,'attachment_ids':selected}).status_code==200
         new=client.post('/api/conversations',json={}).json()['id']
         assert client.post(f'/api/conversations/{new}/runs',json={'content':'按我的偏好给我一段回答风格示例'}).status_code==202
         answer=wait_message(client,new,'complete')
         assert '我喜欢简洁的中文回答' in answer['content']
-        assert '杭州' not in answer['content'] and '927481' not in answer['content']
+        assert '杭州' not in answer['content'] and '927481' not in answer['content'] and '583029' not in answer['content']
         assert answer['memory_recall']['status']=='complete' and answer['memory_recall']['count']==1
         assert len(client.get('/api/memories').json())==2
     with TestClient(create_app(database_url,tmp_path,transport),base_url='http://127.0.0.1:8000') as client:
