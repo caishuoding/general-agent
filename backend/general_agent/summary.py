@@ -175,7 +175,7 @@ class DocumentSummary:
             connection.execute("UPDATE messages SET document_progress=%s WHERE id=%s AND status='generating'", (Jsonb(data),preparation.message_id))
 
     def finish(self, preparation: SummaryPreparation, answer: str) -> str:
-        """完整最终回答持久缓存并附后端范围说明；停止不会将部分生成显示为完整。"""
+        """核验完整最终回答后缓存；与删除失效原子核对；普通停止允许完整结果供重试复用，删除后不能重新缓存。"""
         with self.database.connect() as connection:
             job = connection.execute('SELECT files FROM document_jobs WHERE id=%s', (preparation.job_id,)).fetchone()
             assert job is not None
@@ -192,6 +192,9 @@ class DocumentSummary:
             lines.append(line + ('；' + '；'.join(notes) if notes else ''))
         result = answer + '\n\n处理范围：\n' + '\n'.join(lines)
         with self.database.connect() as connection:
+            active=connection.execute('SELECT o.invalidated FROM cloud_operations o JOIN messages m ON m.operation_id=o.id WHERE m.id=%s FOR UPDATE OF o',(preparation.message_id,)).fetchone()
+            if active is None or active['invalidated']:
+                raise ValueError('原操作已失效，未缓存迟到的资料结果。')
             connection.execute('UPDATE document_jobs SET final_content=%s WHERE id=%s', (result,preparation.job_id))
         self.progress(preparation,'complete')
         return result

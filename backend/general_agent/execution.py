@@ -7,6 +7,7 @@ from uuid import UUID
 from general_agent.budget import OperationContext
 from general_agent.calls import CallGateway
 from general_agent.memory import MemoryService
+from general_agent.memory_deletion import MemoryDeletion, deletion_intent
 from general_agent.memory_candidates import MemoryCandidates, candidate_eligible
 from general_agent.memory_correction import MemoryCorrection, correction_intent
 from general_agent.recall import MemoryRecall
@@ -54,9 +55,12 @@ class ChatExecution:
         self.search = search
         self.correction = MemoryCorrection(memory)
         self.candidates = MemoryCandidates(memory)
+        self.deletion = MemoryDeletion(memory)
 
     def embedding_revision(self, content: str) -> str | None:
-        """保存、更正或召回涉及嵌入时绑定版本，暂停尝试不能沿用修改前的配置批准。"""
+        """本地删除不绑定嵌入；其余保存、更正或召回按原配置版本约束暂停恢复。"""
+        if deletion_intent(content) is not None:
+            return None
         embedding = self.memory.embedding.store.read() if explicit_intent(content).fact or correction_intent(content) is not None or self.recall.available() else None
         return embedding.revision if embedding else None
 
@@ -71,7 +75,9 @@ class ChatExecution:
         return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """预留保存或召回调用；候选、搜索、更正与全文处理先记录状态，再逐步检查预算。"""
+        """本地删除不申请预算；其余动作在真实云端调用前逐步检查预算。"""
+        if deletion_intent(content) is not None:
+            return None
         if correction_intent(content) is not None:
             # 更正先持久化目标版本并停用旧值，再在步骤内申请预算。
             return None
@@ -119,7 +125,9 @@ class ChatExecution:
         return reserved if row and row['unit']=='chat_tokens' and row['status']=='reserved' else None
 
     def prepare(self, conversation_id: UUID, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None, settings: StoredSettings | None = None) -> str | None:
-        """执行明确保存或更正；普通个人事实先提出候选，再继续普通回答。"""
+        """执行当前明确删除、保存或更正；普通个人事实先候选后回答。"""
+        if deletion_intent(content) is not None:
+            return self.deletion.chat(content,user_id)
         if correction_intent(content) is not None:
             return self.correction.chat(content,user_id,conversation_id,operation)
         intent = explicit_intent(content)

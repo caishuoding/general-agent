@@ -61,9 +61,11 @@ def correction_router(correction: MemoryCorrection) -> APIRouter:
 
     @router.post('/api/memory-updates/{identifier}/retry')
     def retry_memory(identifier: UUID, operation_id: UUID | None = Header(default=None,alias='X-Operation-ID')) -> JSONResponse:
-        """复用原更正目标和来源，新尝试先核对部分提交再决定是否嵌入。"""
+        """拒绝已删除的旧批准；其余重试复用原目标并先核对部分提交。"""
         try:
             row=correction.get(identifier)
+            if row['status']=='deleted':
+                raise HTTPException(409,'该记忆已删除，旧更正批准已失效。')
             return perform(row['action_id'],CorrectionInput(fact=row['fact'],expected_version=row['target_version']-1),operation_id,identifier)
         except LookupError as error:
             raise HTTPException(404,str(error)) from None

@@ -200,9 +200,9 @@ class BudgetService:
             connection.execute("UPDATE model_calls SET estimated_cost=" + self.cost_sql() + " WHERE id=%s", (call_id,))
 
     def invalidate(self, operation_id: UUID) -> None:
-        """失效已删除来源关联操作的结果与批准，防止幂等重放旧正文或过时成功状态。"""
+        """清除旧结果、批准和暂停挑战，删除后不能重放正文或继续旧许可。"""
         with self.database.connect() as connection:
-            connection.execute("UPDATE cloud_operations SET cancelled=TRUE,approved=FALSE,result=NULL,response_status=NULL WHERE id=%s", (operation_id,))
+            connection.execute("UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,approved=FALSE,result=NULL,response_status=NULL,pause_id=NULL,reason=NULL WHERE id=%s", (operation_id,))
 
     def has_calls(self, context: OperationContext) -> bool:
         """识别结果尚未缓存但已开始的执行，HTTP重放不得盲目再次发送云端请求。"""
@@ -210,6 +210,6 @@ class BudgetService:
             return connection.execute("SELECT id FROM model_calls WHERE operation_id=%s AND status <> 'cancelled' LIMIT 1", (context.operation_id,)).fetchone() is not None
 
     def invalidate_conversation(self, conversation_id: UUID) -> None:
-        """清除会话来源关联的所有缓存正文并撤销许可，供删除来源流程调用。"""
+        """清除会话全部缓存正文、批准和暂停挑战，供删除来源流程调用。"""
         with self.database.connect() as connection:
-            connection.execute("UPDATE cloud_operations SET cancelled=TRUE,approved=FALSE,result=NULL,response_status=NULL WHERE conversation_id=%s", (conversation_id,))
+            connection.execute("UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,approved=FALSE,result=NULL,response_status=NULL,pause_id=NULL,reason=NULL WHERE conversation_id=%s", (conversation_id,))
