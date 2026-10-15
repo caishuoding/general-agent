@@ -74,7 +74,7 @@ class MeteredEmbedding(EmbeddingBase):
         self.settings, self.calls, self.reserved = settings, calls, reserved
 
     def embed(self, text: str, memory_action: str | None = None) -> list[float]:
-        """先计量实际嵌入，再检查取消；停止发生在响应期间时不继续落库。"""
+        """先计量实际嵌入，再检查取消；保存或更正停止时不继续写入正式记忆。"""
         if self.calls is None:
             raise ValueError('只读记忆会话不能发出嵌入请求。')
         reserved, self.reserved = self.reserved, None
@@ -82,7 +82,7 @@ class MeteredEmbedding(EmbeddingBase):
         with self.calls.gateway.budget.database.connect() as connection:
             row = connection.execute('SELECT cancelled FROM cloud_operations WHERE id=%s', (self.calls.context.operation_id,)).fetchone()
             if row is None or row['cancelled']:
-                raise ValueError('保存已停止；尚未写入记忆。')
+                raise ValueError('记忆操作已停止；尚未继续写入。')
         return list(result.data[0].embedding)
 
 

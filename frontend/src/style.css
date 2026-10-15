@@ -860,6 +860,14 @@ td {
 .file-citation a, .attachment-item a { color: #435d49; }
 .file-citation blockquote { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; margin: 8px 0 0; color: #616b5f; }
 
+.memory-edit textarea { display: block; width: 100%; min-height: 90px; margin: 8px 0 12px; padding: 12px; border: 1px solid #cbd5c4; border-radius: 8px; resize: vertical; font: inherit; }
+.memory-edit-actions { margin-top: 12px; }
+.memory-edit button { margin-right: 14px; }
+.memory-update-source { display: flex; gap: 12px; flex-wrap: wrap; justify-content: space-between; color: #6e7968; font-size: 13px; margin: 10px 0; }
+.memory-update-source button { color: #426348; text-decoration: underline; }
+.memory-identity { font-size: 11px; color: #879082; margin: 10px 0 6px; overflow-wrap: anywhere; }
+.document-coverage { width: 100%; padding: 7px 10px; border-radius: 5px; background: #f7f3e9; }
+.attachment-item .document-coverage p { margin: 3px 0; color: #796b43; line-height: 1.55; }
 .attachment-image-info { color: var(--text-muted, #777); flex-basis: 100%; padding-left: 24px; }
 .attachment-image-help { margin: 6px 0; color: #777; font-size: 11px; line-height: 1.5; }
 

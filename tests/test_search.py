@@ -306,3 +306,67 @@ def test_stop_inflight_search_preserves_usage_without_followup_and_retry_needs_n
         assert retried['search_action']['id']!=action['id']
         assert client.post(path,json={'revision':action['revision'],'decision':'approve'}).status_code==409
         assert searches==['上海青松路咖啡店']
+
+
+def test_public_memory_correction_invalidates_pending_and_budget_paused_approvals(database_url: str, tmp_path: Path) -> None:
+    """经正式编辑 API 更改记忆后，待确认与已批准但预算暂停的查询都不能发送旧地址。"""
+    from test_memory import configure_memory, memory_provider
+    searches: list[str]=[]
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Mem0 使用真实更新路径，搜索规划使用当前正式记忆，任何 Tavily 调用都记为泄漏。"""
+        payload=json.loads(request.content)
+        if request.url.path.endswith('/embeddings'):
+            return memory_provider(request)
+        if request.url.host=='search.example':
+            searches.append(payload['query'])
+            return httpx.Response(200,json={'results':[],'usage':{'credits':1}})
+        return reply(payload,json.dumps({'query':'青松路附近咖啡店'},ensure_ascii=False))
+    with TestClient(create_app(database_url,tmp_path,httpx.MockTransport(provider)),base_url='http://127.0.0.1:8000') as client:
+        old=configure_memory(client)
+        client.post(f'/api/conversations/{old}/messages',json={'content':'请记住：我住在青松路 88 号'})
+        client.put('/api/settings/search',json={'base_url':'https://search.example','api_key':'test'})
+        for phase in ('pending','approved'):
+            conversation=client.post('/api/conversations',json={}).json()['id']
+            response=client.post(f'/api/conversations/{conversation}/messages',json={'content':'联网搜索：根据长期记忆查住址附近的咖啡店'})
+            message=response.json()['messages'][-1]
+            assert message['status']=='paused'
+            action=message['search_action']
+            decision=f'/api/conversations/{conversation}/search/{action["id"]}/decision'
+            if phase=='approved':
+                client.put('/api/settings/budget',json={'monthly_limit':'0'})
+                assert client.post(decision,json={'revision':action['revision'],'decision':'approve'}).status_code==200
+                paused=wait_message(client,conversation,'paused')
+                assert paused['search_action']['status']=='approved' and paused['budget_pause']
+                client.put('/api/settings/budget',json={})
+            memory=client.get('/api/memories').json()[0]
+            changed=client.put(f'/api/memories/{memory["id"]}',json={'fact':'我住在新地址 '+phase,'expected_version':memory['version']})
+            assert changed.status_code==200
+            if phase=='pending':
+                assert client.post(decision,json={'revision':action['revision'],'decision':'approve'}).status_code==409
+            else:
+                assert client.post(f'/api/conversations/{conversation}/messages/{message["id"]}/resume').status_code==200
+            expired=wait_message(client,conversation,'failed')['search_action']
+            assert expired['status']=='expired' and expired['query']==''
+            assert searches==[]
+
+
+def test_search_credentials_are_independent_private_and_removed_without_chat_regression(database_url: str, tmp_path: Path) -> None:
+    """搜索密钥本机私有保存且不跟随地址迁移，清除后其他配置与普通回答继续可用。"""
+    def provider(request: httpx.Request) -> httpx.Response:
+        """配置验证仅走本地输入校验，唯一模型请求为清除后的普通聊天。"""
+        assert request.url.host=='model.example'
+        return reply(json.loads(request.content),'你好。')
+    with TestClient(create_app(database_url,tmp_path,httpx.MockTransport(provider)),base_url='http://127.0.0.1:8000') as client:
+        conversation=configure(client)
+        chat=client.get('/api/settings').json()
+        response=client.put('/api/settings/search',json={'base_url':'https://search.example','api_key':'private-search-key'})
+        assert response.status_code==200 and 'private-search-key' not in response.text
+        assert (tmp_path/'search.json').stat().st_mode & 0o777==0o600
+        assert client.put('/api/settings/search',json={'base_url':'https://other.example'}).status_code==422
+        assert client.put('/api/settings/search',json={'base_url':'https://user:password@search.example','api_key':'private-search-key'}).status_code==422
+        assert client.get('/api/settings/search').json()['base_url']=='https://search.example'
+        assert client.delete('/api/settings/search').status_code==200
+        assert client.get('/api/settings/search').json()['api_key_configured'] is False
+        assert not (tmp_path/'search.json').exists()
+        assert client.get('/api/settings').json()==chat
+        assert client.post(f'/api/conversations/{conversation}/messages',json={'content':'你好'}).status_code==200

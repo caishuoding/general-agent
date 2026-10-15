@@ -11,11 +11,12 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test && playwright test --config playwright.capabilities.config.ts && playwright test --config playwright.budget.config.ts && playwright test --config playwright.memory.config.ts && playwright test --config playwright.recall.config.ts && playwright test --config playwright.images.config.ts && playwright test --config playwright.search.config.ts",
+    "test:e2e": "playwright test && playwright test --config playwright.capabilities.config.ts && playwright test --config playwright.budget.config.ts && playwright test --config playwright.memory.config.ts && playwright test --config playwright.recall.config.ts && playwright test --config playwright.correction.config.ts && playwright test --config playwright.images.config.ts && playwright test --config playwright.search.config.ts",
     "test:budget": "playwright test --config playwright.budget.config.ts",
     "test:capabilities": "playwright test --config playwright.capabilities.config.ts",
     "test:memory": "playwright test --config playwright.memory.config.ts",
     "test:recall": "playwright test --config playwright.recall.config.ts",
+    "test:correction": "playwright test --config playwright.correction.config.ts",
     "test:images": "playwright test --config playwright.images.config.ts",
     "test:search": "playwright test --config playwright.search.config.ts"
   },
