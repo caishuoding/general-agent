@@ -15,6 +15,8 @@ export type Message = {
   role: "user" | "assistant";
   content: string;
   status: "generating" | "paused" | "complete" | "stopped" | "failed";
+  search_action: { id: string; query: string; status: string; revision: string; purpose: string; sources: { id: string; label: string }[]; error: string | null } | null;
+  web_sources: { key: string; title: string; url: string; excerpt: string }[];
   memory_action: MemoryAction | null;
   memory_update: MemoryUpdate | null;
   memory_recall: { status: "pending" | "complete" | "failed" | "skipped" | "unavailable"; count: number; detail: string } | null;
@@ -34,6 +36,8 @@ export type Usage = {
   model: string;
   purpose: string;
   estimated_cost: string | null;
+  unit: string;
+  credits: string | null;
   status: string;
   prompt_tokens: number | null;
   completion_tokens: number | null;

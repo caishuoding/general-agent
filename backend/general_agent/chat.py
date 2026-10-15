@@ -12,6 +12,7 @@ from general_agent.execution import ChatExecution
 from general_agent.provider import ModelFailure, ModelMessage
 from general_agent.settings import StoredSettings
 from general_agent.summary import DocumentSummary, SummaryPreparation, summary_mode
+from general_agent.search import SearchAwaiting
 
 
 class ChatService:
@@ -24,7 +25,7 @@ class ChatService:
         self.documents = DocumentSummary(database, model, attachments)
 
     def send(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, attachment_ids: list[UUID] | None = None) -> None:
-        """先核验普通资料能力再召回记忆；全文请求逐段处理，暂停保留身份及完成检查点。"""
+        """先处理明确联网；普通资料先核验能力，全文逐段处理并保留暂停检查点。"""
         self.attachments.validate(conversation_id, attachment_ids or [])
         user_id, answer_id = uuid4(), uuid4()
         with self.database.connect() as connection:
@@ -44,28 +45,34 @@ class ChatService:
         try:
             response = self.execution.prepare(conversation_id,user_id,content,operation,reserved)
             if response is None:
-                material = self.attachments.prepare(conversation_id,user_id,content,settings=settings) if summary_mode(content) is None else AttachmentContext()
-                memory_material = self.execution.prepare_answer(user_id,content,operation,reserved)
+                web_material = self.execution.search.prepare(conversation_id,user_id,content,settings,operation)
                 chat_reserved = self.execution.chat_reservation(content,reserved)
-                summary = self.documents.prepare(conversation_id,user_id,answer_id,content,settings,operation,chat_reserved,memory_material)
-                if summary:
-                    material = summary.material
+                if web_material is None:
+                    material = self.attachments.prepare(conversation_id,user_id,content,settings=settings) if summary_mode(content) is None else AttachmentContext()
+                    memory_material = self.execution.prepare_answer(user_id,content,operation,reserved)
+                    summary = self.documents.prepare(conversation_id,user_id,answer_id,content,settings,operation,chat_reserved,memory_material)
+                    if summary:
+                        material = summary.material
+                else:
+                    memory_material = web_material
                 history: list[ModelMessage] = [{'role':str(row['role']),'content':str(row['content'])} for row in (rows[-1:] if summary else rows)]
                 response = summary.cached_answer if summary and summary.cached_answer else self.model.bind(operation).complete(settings,memory_material + material.messages + history,self.documents.reserve_final(summary,settings,operation) if summary else chat_reserved,answer_id).content
                 if summary and summary.cached_answer is None:
                     response = self.documents.finish(summary,response)
-        except BudgetPaused as paused:
+        except (BudgetPaused,SearchAwaiting) as paused:
             with self.database.connect() as connection:
-                connection.execute("UPDATE messages SET status='paused',budget_pause=%s WHERE id=%s AND status='generating'", (Jsonb(paused.public()),answer_id))
+                connection.execute("UPDATE messages SET status='paused',budget_pause=%s WHERE id=%s AND status='generating'", (Jsonb(paused.public()) if isinstance(paused,BudgetPaused) else None,answer_id))
             return
         except Exception as error:
             failure = error if isinstance(error,ModelFailure) else ModelFailure(str(error) if isinstance(error,ValueError) else '记忆操作未完成，可以重试核对。')
             response = str(failure)
+            self.execution.search.fail(operation,response)
         if failure and summary:
             self.documents.failed_final(summary)
+        response, web_sources = self.execution.search.resolve(operation,response)
         response, citations = self.attachments.resolve(conversation_id, response, material)
         with self.database.connect() as connection:
-            connection.execute("UPDATE messages SET content=%s,status=%s,error=%s,citations=%s WHERE id=%s AND status='generating'", (response,'failed' if failure else 'complete',str(failure) if failure else None,Jsonb(citations),answer_id))
+            connection.execute("UPDATE messages SET content=%s,status=%s,error=%s,citations=%s,web_sources=%s WHERE id=%s AND status='generating'", (response,'failed' if failure else 'complete',str(failure) if failure else None,Jsonb(citations),Jsonb(web_sources),answer_id))
             connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE id=%s AND status='reserved'", (reserved,))
         if failure:
             raise failure

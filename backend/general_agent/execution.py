@@ -12,6 +12,7 @@ from general_agent.recall import MemoryRecall
 from general_agent.provider import ModelMessage
 from general_agent.settings import StoredSettings
 from general_agent.summary import summary_mode
+from general_agent.search import SearchService, search_query
 
 
 @dataclass(frozen=True)
@@ -45,10 +46,11 @@ def explicit_intent(content: str) -> Intent:
 class ChatExecution:
     """共用批准动作和回答准备；传输、线程及答案尝试留给聊天入口。"""
 
-    def __init__(self, calls: CallGateway, memory: MemoryService) -> None:
-        """绑定本地动作模块及唯一云端调用边界。"""
+    def __init__(self, calls: CallGateway, memory: MemoryService, search: SearchService) -> None:
+        """绑定本地动作、明确搜索及唯一云端调用边界。"""
         self.calls, self.memory = calls, memory
         self.recall = MemoryRecall(memory)
+        self.search = search
         self.correction = MemoryCorrection(memory)
 
     def embedding_revision(self, content: str) -> str | None:
@@ -62,11 +64,12 @@ class ChatExecution:
         return expected is None or (current is not None and current.revision==expected)
 
     def scope(self, content: str, settings: StoredSettings) -> list[str | None]:
-        """将保存或相关召回涉及的嵌入版本纳入幂等范围，批准不能转用于新服务。"""
-        return [content, settings.revision, self.embedding_revision(content)]
+        """将嵌入及明确搜索的配置版本纳入幂等范围，批准不能转用于新服务。"""
+        search = self.search.settings.read() if search_query(content) else None
+        return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """预留真实下一次调用；更正先停用旧值，全文先落范围和进度后逐段申请预算。"""
+        """更正先停用旧值，搜索和全文在具体步骤申请预算，其余只预留真实下一次调用。"""
         if correction_intent(content) is not None:
             # 更正先持久化目标版本并停用旧值，再在步骤内申请预算。
             return None
@@ -84,6 +87,8 @@ class ChatExecution:
             except ValueError:
                 return None
             return self.calls.budget.reserve(operation, embedding, 'embedding_tokens')
+        if search_query(content):
+            return None
         if self.recall.available():
             try:
                 embedding = self.memory.embedding.verified()

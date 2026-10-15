@@ -19,6 +19,7 @@ import {
   type Usage,
 } from "./api";
 import { AttachmentPanel } from "./AttachmentPanel";
+import { SearchCard } from "./SearchCard";
 import { BudgetPrompt } from "./BudgetPrompt";
 import { SettingsPanel } from "./SettingsPanel";
 import { MemoryPanel } from "./MemoryPanel";
@@ -347,12 +348,22 @@ export function App() {
     );
   }
 
+  // 仅更新当前会话的确认结果，切换后的旧请求不能覆盖新会话。
+  function applySearchUpdate(detail: ConversationDetail) {
+    if (activeId.current === detail.id) { selection.current += 1; setConversation(detail); }
+  }
+
+  // 只渲染后端提供的安全网页来源链接，模型正文仍按纯文本展示。
+  function renderWebSource(source: Message["web_sources"][number]) {
+    return <details className="file-citation" key={source.key}><summary>[{source.key}] <a href={source.url} target="_blank" rel="noopener noreferrer">{source.title || source.url}</a></summary><blockquote>{source.excerpt}</blockquote></details>;
+  }
+
   // 展示后端核验的文件位置与原文摘录，所有正文均按纯文本渲染。
   function renderCitation(citation: FileCitation) {
     return <details className="file-citation" key={citation.key} open><summary>[{citation.key}] <a href={`/api/conversations/${conversation?.id}/attachments/${citation.attachment_id}/file`} download>{citation.filename} · {citation.location}</a></summary><blockquote>{citation.excerpt}</blockquote></details>;
   }
 
-  // 展示回答、记忆召回和更正、全文资料进度及预算暂停和出处，保留停止及重试入口。
+  // 展示回答、搜索确认、记忆更正及全文资料进度，暂停和重试使用持久状态。
   function renderMessage(message: Message) {
     return (
       <article
@@ -385,6 +396,8 @@ export function App() {
           <button className="retry-button" data-action="stop" data-message={message.id} onClick={changeRun} disabled={changingRun}>取消本次回答</button>
         </section>}
         {!!message.attachment_ids?.length && <div className="message-progress">已附 {message.attachment_ids.length} 个会话文件</div>}
+        {message.search_action && conversation && <SearchCard message={message} conversationId={conversation.id} onUpdated={applySearchUpdate} />}
+        {message.web_sources?.map(renderWebSource)}
         {message.citations?.map(renderCitation)}
         {message.status === "generating" && <div className="message-progress" role="status">正在生成…</div>}
         {message.status === "failed" && (
