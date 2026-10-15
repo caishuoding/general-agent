@@ -3,7 +3,7 @@ import { test, expect } from "@playwright/test";
 const modelUrl = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18081"}/v1`;
 const appUrl = `http://127.0.0.1:${process.env.TEST_APP_PORT || "18080"}`;
 
-// 从浏览器验证首次配置、发送消息、刷新持久化、会话切换和空记忆入口。
+// 从浏览器精确核对配置保存提示，并验证发送、刷新持久化、会话切换和空记忆入口。
 test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
   await page.goto("/");
   await expect(
@@ -14,7 +14,9 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
   await page.getByLabel("模型名称", { exact: true }).fill("controlled-model");
   await page.getByLabel("API 密钥", { exact: true }).fill("browser-test-key");
   await page.getByRole("button", { name: "保存配置" }).click();
-  await expect(page.getByRole("status")).toContainText("配置已保存");
+  await expect(
+    page.getByText("配置已保存。修改后的连接请重新检查能力。", { exact: true }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "新建会话" }).click();
   await page
     .getByRole("textbox", { name: "消息", exact: true })
