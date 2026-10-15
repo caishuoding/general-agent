@@ -12,6 +12,7 @@ from general_agent.memory_correction import MemoryCorrection, correction_intent
 from general_agent.recall import MemoryRecall
 from general_agent.provider import ModelMessage
 from general_agent.settings import StoredSettings
+from general_agent.summary import summary_mode
 from general_agent.search import SearchService, search_query
 
 
@@ -70,7 +71,7 @@ class ChatExecution:
         return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """预留保存或召回调用；候选、明确搜索及更正先记录业务状态，再逐步检查预算。"""
+        """预留保存或召回调用；候选、搜索、更正与全文处理先记录状态，再逐步检查预算。"""
         if correction_intent(content) is not None:
             # 更正先持久化目标版本并停用旧值，再在步骤内申请预算。
             return None
@@ -96,7 +97,7 @@ class ChatExecution:
             except ValueError:
                 return None
             return self.calls.budget.reserve(operation, embedding, 'embedding_tokens')
-        return self.calls.budget.reserve(operation, settings)
+        return None if summary_mode(content) else self.calls.budget.reserve(operation, settings)
 
     def prepare_answer(self, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None) -> list[ModelMessage]:
         """提供正式相关记忆及候选授权提示；当前个人表达不得被回答模型声称为自动保存。"""
