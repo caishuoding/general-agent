@@ -123,7 +123,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     search_settings = SettingsStore(settings.directory, 'search.json')
     search = SearchService(database, model, search_settings, memory, attachments, model_transport)
     execution = ChatExecution(model, memory, search)
-    source_deletion = SourceDeletion(execution.deletion)
+    source_deletion = SourceDeletion(execution.deletion,memory)
     rebuild = EmbeddingRebuild(memory)
     chat = ChatService(database, model, execution, attachments)
     capabilities = CapabilityService(database, model, settings, embedding_settings)

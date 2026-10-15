@@ -215,6 +215,7 @@ def test_partial_target_write_and_publishing_failure_recover_without_reembedding
         cid=configure_memory(client)
         client.post(f'/api/conversations/{cid}/messages',json={'content':'请记住：我喜欢茶'})
         with psycopg.connect(database_url) as connection:
+            # 阻止目标向量完成检查点提交，验证重启后核对真实落库而不重复嵌入。
             connection.execute("CREATE FUNCTION reject_rebuild_progress() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action_id IS NOT NULL AND NEW.status='complete' THEN RAISE EXCEPTION 'progress unavailable'; END IF; RETURN NEW; END $$")
             connection.execute('CREATE TRIGGER reject_rebuild_progress BEFORE UPDATE ON embedding_rebuild_steps FOR EACH ROW EXECUTE FUNCTION reject_rebuild_progress()')
         client.post('/api/settings/embedding/rebuilds',json={'id':identifier,'target':target(),'confirmed':True})
@@ -222,6 +223,7 @@ def test_partial_target_write_and_publishing_failure_recover_without_reembedding
         assert target_inputs==['连接验证','我喜欢茶']
         with psycopg.connect(database_url) as connection:
             connection.execute('DROP TRIGGER reject_rebuild_progress ON embedding_rebuild_steps')
+            # 阻止目标空间发布，验证未完成切换不能提前允许查询。
             connection.execute("CREATE FUNCTION reject_space_publish() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.model='new-embed' THEN RAISE EXCEPTION 'publish unavailable'; END IF; RETURN NEW; END $$")
             connection.execute('CREATE TRIGGER reject_space_publish BEFORE UPDATE ON embedding_indexes FOR EACH ROW EXECUTE FUNCTION reject_space_publish()')
         client.post(f'/api/settings/embedding/rebuilds/{identifier}/resume')

@@ -79,6 +79,7 @@ def test_correction_repeated_values_repair_current_history_and_preserve_metadata
         assert client.put(path,json={'fact':'我住在苏州','expected_version':1}).status_code==200
         assert client.put(path,json={'fact':'我住在杭州','expected_version':2}).status_code==200
         with psycopg.connect(database_url) as connection:
+            # 模拟重复更正的 SDK 历史写入失败，验证恢复不会重复更新。
             connection.execute("CREATE FUNCTION reject_repeated_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'history unavailable'; END $$")
             connection.execute('CREATE TRIGGER reject_repeated_update BEFORE INSERT ON mem0_history FOR EACH ROW EXECUTE FUNCTION reject_repeated_update()')
         assert client.put(path,json={'fact':'我住在苏州','expected_version':3}).status_code==409

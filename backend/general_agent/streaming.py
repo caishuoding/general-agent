@@ -11,9 +11,9 @@ from general_agent.execution import ChatExecution
 from general_agent.history import HistoryContext
 from psycopg.types.json import Jsonb
 from general_agent.calls import CallGateway
-from general_agent.provider import ModelFailure, ModelMessage
+from general_agent.provider import ModelFailure
 from general_agent.settings import StoredSettings
-from general_agent.summary import DocumentSummary, SummaryPreparation, summary_mode
+from general_agent.summary import SummaryPreparation
 from general_agent.search import SearchAwaiting
 
 
@@ -21,12 +21,12 @@ class StreamingChat:
     """协调持久化的生成尝试与后台模型请求，每段文字提交后即可重新读取。"""
 
     def __init__(self, database: Database, model: CallGateway, execution: ChatExecution, attachments: AttachmentService) -> None:
-        """绑定共同动作、独立资料与统一模型边界，并跟踪本进程工作线程。"""
+        """绑定共同动作、材料和全文检查点，流式层仅额外跟踪本进程工作线程。"""
         self.database = database
         self.model = model
         self.execution = execution
         self.attachments = attachments
-        self.documents = DocumentSummary(database, model, attachments)
+        self.documents = execution.documents
         self.threads: set[Thread] = set()
         self.lock = Lock()
 
@@ -104,7 +104,7 @@ class StreamingChat:
         return new_id
 
     def execute(self, conversation_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
-        """共同动作后明确历史只读消息；其他资料与全文按原预算、恢复和来源规则执行。"""
+        """共同动作及材料准备后流式输出，保留预算暂停、来源重核和持久化进度。"""
         material = AttachmentContext()
         summary: SummaryPreparation | None = None
         history_material: HistoryContext | None = None
@@ -117,29 +117,15 @@ class StreamingChat:
                 with self.database.connect() as connection:
                     connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (local,message_id))
             else:
-                content = str(rows[-1]['content'])
-                history_material = self.execution.history.prepare(conversation_id,user_id,content,operation)
-                web_material = history_material.messages if history_material else self.execution.search.prepare(conversation_id,user_id,content,settings,operation)
-                chat_reserved = self.execution.chat_reservation(content,call_id)
-                if web_material is None:
-                    material = self.attachments.prepare(conversation_id,user_id,content,settings=settings) if summary_mode(content) is None else AttachmentContext()
-                    memory_material = self.execution.prepare_answer(user_id,content,operation,call_id)
-                    summary = self.documents.prepare(conversation_id,user_id,message_id,content,settings,operation,chat_reserved,memory_material)
-                    if summary:
-                        material = summary.material
-                else:
-                    memory_material = web_material
-                if history_material and history_material.local_answer is not None:
+                prepared=self.execution.prepare_response(conversation_id,user_id,message_id,settings,operation,call_id,rows)
+                material,summary,history_material=prepared.material,prepared.summary,prepared.history
+                if prepared.local_answer is not None:
                     with self.database.connect() as connection:
-                        connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (history_material.local_answer,message_id))
-                elif summary and summary.cached_answer is not None:
-                    with self.database.connect() as connection:
-                        connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (summary.cached_answer,message_id))
+                        connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (prepared.local_answer,message_id))
                 else:
-                    reserved = self.documents.reserve_final(summary,settings,operation) if summary else (chat_reserved or self.model.budget.reserve(operation,settings))
-                    history: list[ModelMessage] = [{"role":str(row["role"]),"content":str(row["content"])} for row in (rows[-1:] if summary or history_material else rows)]
+                    reserved = self.documents.reserve_final(summary,settings,operation) if summary else (prepared.reserved or self.model.budget.reserve(operation,settings))
                     answer = ''
-                    for chunk in self.model.bind(operation).stream(settings,memory_material + material.messages + history,reserved,message_id):
+                    for chunk in self.model.bind(operation).stream(settings,prepared.messages,reserved,message_id):
                         answer += chunk.content
                         if chunk.content and (not history_material or self.execution.history.available(operation)):
                             with self.database.connect() as connection:

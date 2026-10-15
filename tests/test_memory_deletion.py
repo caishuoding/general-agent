@@ -117,6 +117,7 @@ def test_history_purge_failure_stays_inactive_and_retries_after_restart(database
         entry=client.get('/api/memories').json()[0]
         client.put(f"/api/memories/{entry['id']}",json={'fact':'我住在苏州','expected_version':1})
         with psycopg.connect(database_url) as connection:
+            # 拒绝真实历史清理，验证删除不会虚报完成且可在重启后恢复。
             connection.execute("CREATE FUNCTION reject_purge() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private history error'; END $$")
             connection.execute('CREATE TRIGGER reject_purge BEFORE DELETE ON mem0_history FOR EACH ROW EXECUTE FUNCTION reject_purge()')
         failed=client.delete(f"/api/memories/{entry['id']}")
@@ -153,6 +154,7 @@ def test_delete_reconciles_sdk_partial_save_by_action_identity(database_url: str
     with TestClient(create_app(database_url,tmp_path,httpx.MockTransport(recall_provider)),base_url='http://127.0.0.1:8000') as client:
         source=configure_memory(client)
         with psycopg.connect(database_url) as connection:
+            # 拒绝 SDK 历史提交，验证删除能清理仅写入向量的部分保存。
             connection.execute("CREATE FUNCTION reject_add_history() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'history down'; END $$")
             connection.execute('CREATE TRIGGER reject_add_history BEFORE INSERT ON mem0_history FOR EACH ROW EXECUTE FUNCTION reject_add_history()')
         client.post(f'/api/conversations/{source}/runs',json={'content':'请记住：我住在杭州'})

@@ -6,19 +6,21 @@ from typing import Any
 from uuid import UUID, uuid4, uuid5
 
 from general_agent.memory_deletion import MemoryDeletion
+from general_agent.memory import MemoryService
 
 
 class SourceDeletion:
     """来源删除先撤回使用许可，再复用正式记忆删除与本机物理清理。"""
 
-    def __init__(self, memory: MemoryDeletion) -> None:
-        """绑定正式删除服务和原文件目录，不具有云端调用入口。"""
+    def __init__(self, memory: MemoryDeletion, memories: MemoryService) -> None:
+        """显式绑定删除与正式记忆核验接口，不依赖删除服务内部的 SDK 或空间配置路径。"""
         self.memory=memory
-        self.database=memory.database
-        self.directory=memory.memory.directory/'attachments'
+        self.memories=memories
+        self.database=memories.database
+        self.directory=memories.directory/'attachments'
 
     def impact(self, connection: Any, kind: str, conversation_id: UUID, source_id: UUID) -> dict[str,Any]:
-        """按真实来源关系收集全部关联动作，独立上传及同源其他事实不按正文匹配。"""
+        """按真实来源关系收集关联动作，经正式记忆接口核验可保留项，不按正文扩大影响。"""
         conversation=connection.execute('SELECT * FROM conversations WHERE id=%s AND NOT deleting FOR UPDATE',(conversation_id,)).fetchone()
         if conversation is None:
             raise LookupError('会话不存在或正在删除。')
@@ -30,22 +32,14 @@ class SourceDeletion:
         candidates=connection.execute('SELECT DISTINCT c.* FROM memory_candidates c LEFT JOIN attachment_memory_candidates a ON a.candidate_id=c.id WHERE (%s AND c.source_conversation_id=%s) OR a.attachment_id=ANY(%s)',(kind=='conversation',conversation_id,file_ids)).fetchall()
         ids={value for row in candidates for value in [row['memory_action_id'],uuid5(row['id'],'confirmed-memory')] if value}
         actions=connection.execute("SELECT * FROM memory_actions WHERE status<>'deleted' AND (id=ANY(%s) OR (%s AND (conversation_id=%s OR id IN (SELECT action_id FROM memory_updates WHERE source_conversation_id=%s)))) ORDER BY id FOR UPDATE",(list(ids),kind=='conversation',conversation_id,conversation_id)).fetchall()
-        valid=set()
-        settings=self.memory.memory.embedding.spaces.local_settings()
-        if settings and any(row['status']=='complete' and row['memory_id'] for row in actions):
-            with self.memory.memory.session(settings) as sdk:
-                for row in actions:
-                    if row['status']=='complete' and row['memory_id']:
-                        entry=sdk.get(str(row['memory_id']))
-                        if entry and entry.get('user_id')=='local-person' and entry.get('memory')==row['fact']:
-                            valid.add(row['id'])
+        valid=self.memories.retainable(actions)
         fingerprint=[kind,str(source_id),str(conversation_id),[(str(row['id']),row['status'],str(row['created_at'])) for row in files],[(str(row['id']),row['status'],row['version'],row['id'] in valid) for row in actions],sorted(str(row['id']) for row in candidates),sorted(map(str,message_ids))]
         revision=hashlib.sha256(json.dumps(fingerprint).encode()).hexdigest()
         return {'kind':kind,'source_id':source_id,'conversation_id':conversation_id,'name':conversation['title'] if kind=='conversation' else files[0]['filename'],'revision':revision,'attachment_ids':file_ids,'message_ids':message_ids,'candidate_ids':[row['id'] for row in candidates],'action_ids':[row['id'] for row in actions],'memories':[{**row,'delete_by_default':True,'can_keep':row['id'] in valid} for row in actions]}
 
     def preview(self, kind: str, conversation_id: UUID, source_id: UUID) -> dict[str,Any]:
         """先取空间租约再锁来源行核验活动 SDK，避免与发布形成反向锁序。"""
-        with self.memory.memory.embedding.spaces.lease(maintenance=True), self.database.connect() as connection:
+        with self.memories.maintenance(), self.database.connect() as connection:
             impact=self.impact(connection,kind,conversation_id,source_id)
         return {key:impact[key] for key in ['kind','source_id','name','revision','memories']}
 
@@ -59,7 +53,7 @@ class SourceDeletion:
 
     def accept(self, kind: str, conversation_id: UUID, source_id: UUID, revision: str, keep_ids: list[UUID]) -> dict[str,Any]:
         """空间租约内原子验证、保留与停用；墓碑先提交，再等待动作清理，不持来源行等待云请求。"""
-        with self.memory.memory.embedding.spaces.lease(maintenance=True), self.database.connect() as connection:
+        with self.memories.maintenance(), self.database.connect() as connection:
             connection.execute('SELECT pg_advisory_xact_lock(%s)',(source_id.int % (2**63-1),))
             existing=connection.execute('SELECT * FROM source_deletions WHERE kind=%s AND source_id=%s',(kind,source_id)).fetchone()
             if existing:

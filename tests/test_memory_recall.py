@@ -115,6 +115,7 @@ def test_incomplete_mem0_write_is_not_recalled_as_approved(database_url: str, tm
     with TestClient(create_app(database_url,tmp_path,httpx.MockTransport(recall_provider)),base_url='http://127.0.0.1:8000') as client:
         old=configure_memory(client)
         with psycopg.connect(database_url) as connection:
+            # 制造未完整批准的 SDK 部分写入，验证召回排除未完成事实。
             connection.execute("CREATE FUNCTION reject_recall_fixture_history() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'history unavailable'; END $$")
             connection.execute('CREATE TRIGGER reject_recall_fixture_history BEFORE INSERT ON mem0_history FOR EACH ROW EXECUTE FUNCTION reject_recall_fixture_history()')
         assert client.post(f'/api/conversations/{old}/messages',json={'content':'请记住：我喜欢简洁的中文回答'}).status_code==502

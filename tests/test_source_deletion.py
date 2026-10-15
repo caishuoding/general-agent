@@ -93,6 +93,7 @@ def test_failed_source_cleanup_is_inaccessible_and_resumes_exact_keep_selection_
         path=f"/api/conversations/{conversation}/attachments/{file['id']}"
         preview=client.get(path+'/deletion-preview').json()
         with psycopg.connect(database_url) as connection:
+            # 模拟来源删除时 SDK 历史清理失败，验证原文件停用和精确恢复。
             connection.execute("CREATE FUNCTION reject_source_purge() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture history failure'; END $$")
             connection.execute('CREATE TRIGGER reject_source_purge BEFORE DELETE ON mem0_history FOR EACH ROW EXECUTE FUNCTION reject_source_purge()')
         count=len(client.get('/api/usage').json())
