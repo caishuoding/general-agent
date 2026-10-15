@@ -75,7 +75,7 @@ class MemoryCorrection:
         return '已更正长期记忆：'+str(result['fact'])
 
     def apply(self, action_id: UUID, fact: str, expected_version: int, identifier: UUID, operation: OperationContext, source_message_id: UUID | None = None, source_conversation_id: UUID | None = None) -> dict[str, Any]:
-        """先原子停用旧版本，核对向量历史后发布；删除墓碑始终阻止迟到更正复活。"""
+        """先核验仍有效的批准来源再停用旧版本，发布前重验来源与删除墓碑。"""
         with self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(action_id.int % (2**63-1),))
@@ -95,6 +95,7 @@ class MemoryCorrection:
                 if entry['version']!=expected_version or entry['status']!='complete':
                     raise ValueError('记忆版本已变化或有未完成更正，请刷新或重试原更正。')
                 with lock.transaction():
+                    self.memory.guard_source(lock,source_conversation_id,source_message_id,operation)
                     changed=lock.execute("UPDATE memory_actions SET status='pending',version=version+1,error='更正尚未完成，旧事实已停止召回。',updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status='complete' AND version=%s RETURNING id",(action_id,expected_version)).fetchone()
                     if changed is None:
                         raise ValueError('目标记忆已变化，旧批准未提交。')
@@ -118,6 +119,7 @@ class MemoryCorrection:
                     if not any(item['event']=='UPDATE' and item['new_memory']==fact and item['old_memory']==existing['previous_fact'] and item['updated_at']==current.get('updated_at') for item in history):
                         sdk.db.add_history(str(entry['memory_id']),existing['previous_fact'],fact,'UPDATE',created_at=current['created_at'],updated_at=current.get('updated_at'),role='user')
                 with lock.transaction():
+                    self.memory.guard_source(lock,source_conversation_id,source_message_id,operation)
                     changed=lock.execute("UPDATE memory_actions SET fact=%s,status='complete',error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status NOT IN ('deleting','deleted') RETURNING id",(fact,action_id)).fetchone()
                     if changed is None:
                         raise ValueError('该长期记忆已删除，迟到的更正未生效。')

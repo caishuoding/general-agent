@@ -26,9 +26,9 @@ class MemoryCandidates:
         self.memory,self.database=memory,memory.database
 
     def source(self, message_id: UUID, conversation_id: UUID) -> dict[str, Any]:
-        """重新读取属于此会话的原用户来源，拒绝助手消息和不存在的来源。"""
+        """只读取未停用会话的原用户消息，来源删除中不继续外发或批准。"""
         with self.database.connect() as connection:
-            row=connection.execute("SELECT id,content FROM messages WHERE id=%s AND conversation_id=%s AND role='user'",(message_id,conversation_id)).fetchone()
+            row=connection.execute("SELECT m.id,m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.id=%s AND m.conversation_id=%s AND m.role='user' AND NOT c.deleting",(message_id,conversation_id)).fetchone()
         if row is None:
             raise ValueError('候选来源已不存在或不是用户消息。')
         return row
@@ -62,8 +62,11 @@ class MemoryCandidates:
         return row
 
     def discovery_state(self, message_id: UUID, operation: OperationContext, status: str, error: str | None = None) -> None:
-        """记录提取真实步骤状态，预算恢复和刷新均不凭模型文字推断完成。"""
+        """仅为仍存在且未失效操作记录提取状态，来源删除后不重新登记晚到失败正文。"""
         with self.database.connect() as connection:
+            active=connection.execute('SELECT invalidated FROM cloud_operations WHERE id=%s FOR SHARE',(operation.operation_id,)).fetchone()
+            if active is None or active['invalidated']:
+                return
             connection.execute('INSERT INTO memory_discoveries(message_id,operation_id,status,error) VALUES(%s,%s,%s,%s) ON CONFLICT(message_id) DO UPDATE SET operation_id=EXCLUDED.operation_id,status=EXCLUDED.status,error=EXCLUDED.error,updated_at=CURRENT_TIMESTAMP',(message_id,operation.operation_id,status,error))
 
     def discover(self, conversation_id: UUID, message_id: UUID, settings: StoredSettings, operation: OperationContext) -> None:
@@ -101,6 +104,7 @@ class MemoryCandidates:
                 if not isinstance(item,dict) or item.get('subject')!='user' or not isinstance(item.get('fact'),str) or not 0<len(item['fact'].strip())<=5000 or not isinstance(item.get('quote'),str) or not item['quote'] or item['quote'] not in source['content'] or not candidate_eligible(item['quote']) or item.get('target_id') is not None and item.get('target_id') not in targets:
                     raise ValueError('候选事实、人物归属或原文引用无法核验。')
             with self.database.connect() as connection:
+                self.memory.guard_source(connection,conversation_id,message_id,operation)
                 active=connection.execute('SELECT cancelled FROM cloud_operations WHERE id=%s FOR UPDATE',(operation.operation_id,)).fetchone()
                 suppressed=connection.execute('SELECT message_id FROM memory_source_suppressions WHERE message_id=%s',(message_id,)).fetchone()
                 if active is None or active['cancelled'] or suppressed:

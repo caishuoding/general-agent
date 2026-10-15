@@ -19,6 +19,8 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 
+from general_agent.source_deletion import SourceDeletion
+from general_agent.source_deletion_api import source_deletion_router
 from general_agent.attachment_api import attachment_router
 from general_agent.attachments import AttachmentService
 from general_agent.budget import BudgetInput, BudgetPaused, BudgetService, OperationContext
@@ -105,7 +107,7 @@ class UsageRecord(BaseModel):
 
 
 def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None) -> FastAPI:
-    """创建聊天、资料及独立搜索应用，测试可指定数据库、目录和外部 HTTP 替身。"""
+    """创建聊天、资料、搜索与可恢复来源删除应用，测试可指定隔离数据库、目录和 HTTP 替身。"""
     database = Database(database_url or os.environ.get(
         "DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/general_agent"
     ))
@@ -119,21 +121,24 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     search_settings = SettingsStore(settings.directory, 'search.json')
     search = SearchService(database, model, search_settings, memory, attachments, model_transport)
     execution = ChatExecution(model, memory, search)
+    source_deletion = SourceDeletion(execution.deletion)
     chat = ChatService(database, model, execution, attachments)
     capabilities = CapabilityService(database, model, settings, embedding_settings)
     streaming = StreamingChat(database, model, execution, attachments)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """启动时迁移并恢复遗留生成及资料处理；停机时标记未完成回答并等待工作线程。"""
+        """启动时迁移并标记中断生成、资料和删除操作；来源保持停用，停机等待工作线程。"""
         database.migrate()
         streaming.recover()
         attachments.recover()
+        source_deletion.recover()
         yield
         await asyncio.to_thread(streaming.close)
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
     app.include_router(attachment_router(attachments))
+    app.include_router(source_deletion_router(source_deletion))
     app.include_router(correction_router(MemoryCorrection(memory)))
     app.include_router(candidates_router(execution.candidates,settings,execution.attachment_memory))
     app.include_router(deletion_router(execution.deletion))

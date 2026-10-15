@@ -64,7 +64,7 @@ class SearchService:
         self.recall = MemoryRecall(memory)
 
     def prepare(self, conversation_id: UUID, user_id: UUID, content: str, model_settings: StoredSettings, operation: OperationContext) -> list[ModelMessage] | None:
-        """明确联网才规划或执行；个人资料查询先停在持久确认，预算恢复复用完成结果。"""
+        """明确联网且来源操作仍有效才登记规划；个人资料先持久确认，预算恢复复用完成结果。"""
         query = search_query(content)
         if query is None:
             return None
@@ -72,6 +72,7 @@ class SearchService:
         if saved is None:
             raise ValueError('尚未配置 Tavily 搜索。请在设置中填写独立搜索密钥；本次未联网。')
         with self.database.connect() as connection:
+            self.memory.guard_source(connection,conversation_id,user_id,operation)
             connection.execute("INSERT INTO search_requests (id,operation_id,conversation_id,message_id,query,search_revision,status) VALUES (%s,%s,%s,%s,%s,%s,'planning') ON CONFLICT(operation_id) DO NOTHING", (uuid4(),operation.operation_id,conversation_id,user_id,query,saved.revision))
             row = connection.execute('SELECT * FROM search_requests WHERE operation_id=%s', (operation.operation_id,)).fetchone()
         assert row is not None
@@ -283,11 +284,13 @@ class SearchService:
         return cleaned, used
 
     def save_sources(self, message_id: UUID, operation: OperationContext) -> None:
-        """写入完整或部分答案的安全来源，停止后的正文保持冻结。"""
+        """与来源删除的操作失效串行发布出处，迟到结果不能恢复已清空的网页来源。"""
         with self.database.connect() as connection:
+            active=connection.execute('SELECT invalidated FROM cloud_operations WHERE id=%s FOR SHARE',(operation.operation_id,)).fetchone()
+            if active is None or active['invalidated']:
+                return
             row = connection.execute('SELECT content FROM messages WHERE id=%s',(message_id,)).fetchone()
-        if row is None:
-            return
-        content, sources = self.resolve(operation, str(row['content']))
-        with self.database.connect() as connection:
+            if row is None:
+                return
+            content, sources = self.resolve(operation, str(row['content']))
             connection.execute("UPDATE messages SET content=CASE WHEN status='stopped' THEN content ELSE %s END,web_sources=%s WHERE id=%s",(content,Jsonb(sources),message_id))

@@ -45,14 +45,14 @@ def excerpt(content: str, terms: list[str]) -> str:
 
 
 def public_history(database: 'Database', operation_id: UUID | None) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    """每次公开读取都从有效原消息重建出处，不把引用记录当作可独立读取的正文缓存。"""
+    """只从未停用会话的有效原消息重建出处，删除过程即使尚未物理清除也不公开摘录。"""
     if operation_id is None:
         return None, []
     with database.connect() as connection:
         query = connection.execute('SELECT h.*,m.content FROM history_queries h JOIN messages m ON m.id=h.request_message_id WHERE h.operation_id=%s', (operation_id,)).fetchone()
         if not query:
             return None, []
-        rows = connection.execute("SELECT h.*,m.content,m.role,m.created_at,c.title FROM history_hits h JOIN messages m ON m.id=h.source_message_id AND m.conversation_id=h.source_conversation_id JOIN conversations c ON c.id=m.conversation_id WHERE h.operation_id=%s AND m.status='complete' ORDER BY h.ordinal", (operation_id,)).fetchall()
+        rows = connection.execute("SELECT h.*,m.content,m.role,m.created_at,c.title FROM history_hits h JOIN messages m ON m.id=h.source_message_id AND m.conversation_id=h.source_conversation_id JOIN conversations c ON c.id=m.conversation_id WHERE h.operation_id=%s AND m.status='complete' AND NOT c.deleting ORDER BY h.ordinal", (operation_id,)).fetchall()
     terms = query_terms(history_query(query['content']) or '')
     sources = [{'key': row['source_key'], 'conversation_id': str(row['source_conversation_id']), 'conversation_title': row['title'], 'message_id': str(row['source_message_id']), 'role': row['role'], 'created_at': row['created_at'].isoformat(), 'excerpt': excerpt(row['content'], terms)} for row in rows if content_hash(row['content']) == row['source_hash']]
     lost = len(sources) != query['result_count']
@@ -76,7 +76,7 @@ class HistorySearch:
         self.database = database
 
     def prepare(self, conversation_id: UUID, user_id: UUID, content: str, operation: OperationContext) -> HistoryContext | None:
-        """当前明确查询才检索；恢复复用出处标识并重核来源，不重放已删除正文。"""
+        """明确查询才检索；登记时锁有效来源会话，恢复重核来源并不重放已停用正文。"""
         query = history_query(content)
         if query is None:
             return None
@@ -90,7 +90,7 @@ class HistorySearch:
             previous = connection.execute('SELECT operation_id FROM history_queries WHERE operation_id=%s', (operation.operation_id,)).fetchone()
             if not previous:
                 patterns = ['%' + term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%' for term in terms]
-                rows = connection.execute("SELECT id,conversation_id,position,content FROM messages WHERE conversation_id<>%s AND status='complete' AND content ILIKE ANY(%s) ORDER BY position DESC LIMIT %s", (conversation_id, patterns, LIMIT)).fetchall()
+                rows = connection.execute("SELECT m.id,m.conversation_id,m.position,m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.conversation_id<>%s AND m.status='complete' AND NOT c.deleting AND m.content ILIKE ANY(%s) ORDER BY m.position DESC LIMIT %s FOR SHARE OF c", (conversation_id, patterns, LIMIT)).fetchall()
                 connection.execute('INSERT INTO history_queries(operation_id,conversation_id,request_message_id,result_count) VALUES(%s,%s,%s,%s)', (operation.operation_id, conversation_id, user_id, len(rows)))
                 for ordinal, row in enumerate(rows):
                     connection.execute('INSERT INTO history_hits(operation_id,source_message_id,source_conversation_id,source_hash,source_key,ordinal) VALUES(%s,%s,%s,%s,%s,%s)', (operation.operation_id, row['id'], row['conversation_id'], content_hash(row['content']), f'H{row["position"]}', ordinal))

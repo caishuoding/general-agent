@@ -899,3 +899,9 @@ td {
 .attachment-person { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 12px 0; }
 .attachment-person label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
 .attachment-person select, .attachment-person input { padding: 8px; border: 1px solid var(--border, #d9ded8); border-radius: 6px; background: white; color: #263b31; }
+
+.source-delete-dialog { margin: 16px; padding: 20px; border: 1px solid #c6b8aa; border-radius: 12px; background: #fffaf4; overflow: auto; }
+.source-delete-memory { display: block; padding: 10px 0; }
+.source-delete-dialog button, .source-delete-pending button { margin: 8px 12px 0 0; }
+.source-delete-pending { padding: 0 20px; color: #77503e; }
+.delete-conversation { align-self: flex-end; margin: 4px 24px; }

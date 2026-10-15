@@ -19,12 +19,14 @@ def validate_attachment_source(database: Database, directory: Path, candidate: d
 
 
 def clarify_subject(database: Database, directory: Path, identifier: UUID, kind: str, label: str) -> dict[str, Any]:
-    """只允许未批准附件候选澄清人物，形成新的精确预览正文，不能替换模型提取事实。"""
+    """只允许未批准候选澄清人物，并与来源删除锁同一会话，避免晚到澄清重建已清正文。"""
     with database.connect() as connection:
         connection.execute('SELECT pg_advisory_xact_lock(%s)',(identifier.int % (2**63-1),))
         row=connection.execute('SELECT * FROM memory_candidates WHERE id=%s',(identifier,)).fetchone()
         if row is None or row['source_kind']!='attachment' or row['status']!='pending' or row['approved_at'] is not None:
             raise ValueError('只能为尚未批准的附件候选澄清人物。')
+        if not connection.execute('SELECT id FROM conversations WHERE id=%s AND NOT deleting FOR SHARE',(row['source_conversation_id'],)).fetchone():
+            raise ValueError('来源会话已删除，不能继续澄清。')
         validate_attachment_source(database,directory,row,False)
         source=connection.execute('SELECT * FROM attachment_memory_candidates WHERE candidate_id=%s',(identifier,)).fetchone()
         assert source is not None

@@ -69,7 +69,7 @@ class DocumentSummary:
         return sources, files
 
     def prepare(self, conversation_id: UUID, user_id: UUID, message_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, reserved: UUID | None, memory_context: list[ModelMessage] | None = None) -> SummaryPreparation | None:
-        """处理全部原文并复用完成检查点；召回上下文改变时仅使最终回答缓存失效。"""
+        """在有效来源及操作下登记检查点并处理全部原文；上下文变化仅使最终缓存失效。"""
         mode = summary_mode(content)
         if mode is None:
             return None
@@ -82,6 +82,11 @@ class DocumentSummary:
         while counts[-1] > 4:
             counts.append((counts[-1] + 3) // 4)
         with self.database.connect() as connection:
+            if not connection.execute('SELECT id FROM conversations WHERE id=%s AND NOT deleting FOR SHARE',(conversation_id,)).fetchone():
+                raise ValueError('全文来源会话已删除。')
+            active=connection.execute('SELECT invalidated FROM cloud_operations WHERE id=%s FOR SHARE',(operation.operation_id,)).fetchone()
+            if active is None or active['invalidated']:
+                raise ValueError('全文操作已失效，不能重新建立检查点。')
             connection.execute('INSERT INTO document_jobs(id,user_message_id,conversation_id,model_revision,mode,source_hash,context_hash,attachment_ids,files,total_steps) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(user_message_id,model_revision) DO NOTHING', (uuid4(),user_id,conversation_id,settings.revision,mode,digest,context_hash,[UUID(row['attachment_id']) for row in files],Jsonb(files),sum(counts)+1))
             job = connection.execute('SELECT * FROM document_jobs WHERE user_message_id=%s AND model_revision=%s', (user_id,settings.revision)).fetchone()
             assert job is not None
@@ -164,10 +169,11 @@ class DocumentSummary:
         return identifier
 
     def progress(self, preparation: SummaryPreparation, status: str) -> None:
-        """将真实已完成步骤和源文件范围写入本次消息，停止后保留当时可见快照。"""
+        """保存真实步骤进度；已删除检查点不回写快照，普通停止保留当时可见状态。"""
         with self.database.connect() as connection:
             job = connection.execute('SELECT * FROM document_jobs WHERE id=%s', (preparation.job_id,)).fetchone()
-            assert job is not None
+            if job is None:
+                return
             count = connection.execute("SELECT count(*) AS n FROM document_steps WHERE job_id=%s AND status='complete'", (preparation.job_id,)).fetchone()
             assert count is not None
             completed = job['total_steps'] if status == 'complete' else count['n']
@@ -178,7 +184,8 @@ class DocumentSummary:
         """核验完整最终回答后缓存；与删除失效原子核对；普通停止允许完整结果供重试复用，删除后不能重新缓存。"""
         with self.database.connect() as connection:
             job = connection.execute('SELECT files FROM document_jobs WHERE id=%s', (preparation.job_id,)).fetchone()
-            assert job is not None
+            if job is None:
+                raise ValueError('原资料已删除，迟到的全文结果未缓存。')
         allowed = {item['key']:item for item in preparation.material.citations}
         cited = set(re.findall(r'\[(A\d+)\]',answer))
         covered = {allowed[key]['attachment_id'] for key in cited if key in allowed}

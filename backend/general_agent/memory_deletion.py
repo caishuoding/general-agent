@@ -75,14 +75,8 @@ class MemoryDeletion:
     def delete(self, action_id: UUID) -> dict[str, Any]:
         """先停用并清除业务正文，再按原身份删除向量和全部历史；失败保留可重试清理状态。"""
         with self.database.connect() as connection:
-            entry=connection.execute('SELECT * FROM memory_actions WHERE id=%s FOR UPDATE',(action_id,)).fetchone()
-            if entry is None:
-                raise LookupError('记忆条目不存在。')
-            if entry['status']=='deleted':
+            if not self.begin(connection,action_id):
                 return self.result(action_id)
-            connection.execute("INSERT INTO memory_deletions(action_id,status,memory_ids) VALUES(%s,'pending',%s) ON CONFLICT(action_id) DO UPDATE SET status='pending',error=NULL,updated_at=CURRENT_TIMESTAMP",(action_id,[entry['memory_id']] if entry['memory_id'] else []))
-            connection.execute("UPDATE memory_actions SET status='deleting',fact='',version=version+CASE WHEN status='deleting' THEN 0 ELSE 1 END,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s",(action_id,))
-            self.clear_dependents(connection,action_id)
         with self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(action_id.int % (2**63-1),))
@@ -98,11 +92,23 @@ class MemoryDeletion:
                 raise ValueError('记忆清理未完成，请重试；该条目仍停止召回。') from None
         return self.result(action_id)
 
+    def begin(self, connection: Any, action_id: UUID) -> bool:
+        """在调用方事务内立即停用指定记忆；来源删除复用此边界，实际 SDK 清理由 delete 接续。"""
+        entry=connection.execute('SELECT * FROM memory_actions WHERE id=%s FOR UPDATE',(action_id,)).fetchone()
+        if entry is None:
+            raise LookupError('记忆条目不存在。')
+        if entry['status']=='deleted':
+            return False
+        connection.execute("INSERT INTO memory_deletions(action_id,status,memory_ids) VALUES(%s,'pending',%s) ON CONFLICT(action_id) DO UPDATE SET status='pending',error=NULL,updated_at=CURRENT_TIMESTAMP",(action_id,[entry['memory_id']] if entry['memory_id'] else []))
+        connection.execute("UPDATE memory_actions SET status='deleting',fact='',version=version+CASE WHEN status='deleting' THEN 0 ELSE 1 END,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s",(action_id,))
+        self.clear_dependents(connection,action_id)
+        return True
+
     def clear_dependents(self, connection: Any, action_id: UUID) -> None:
         """在停用事务内清正文、全部旧许可及派生结果；同源其他事实保持独立。"""
         action=connection.execute('SELECT message_id,operation_id FROM memory_actions WHERE id=%s',(action_id,)).fetchone()
         updates=connection.execute('SELECT * FROM memory_updates WHERE action_id=%s',(action_id,)).fetchall()
-        sources={action['message_id']} | {row['source_message_id'] for row in updates if row['source_message_id']}
+        sources=({action['message_id']} if action['message_id'] else set()) | {row['source_message_id'] for row in updates if row['source_message_id']}
         candidates=connection.execute('SELECT id,target_id,memory_action_id,source_message_id FROM memory_candidates WHERE source_message_id=ANY(%s) OR target_id=%s OR memory_action_id=%s',(list(sources),action_id,action_id)).fetchall()
         affected=[row['id'] for row in candidates if row['target_id']==action_id or row['memory_action_id']==action_id or uuid5(row['id'],'confirmed-memory')==action_id]
         sources.update(row['source_message_id'] for row in candidates if row['id'] in affected)
