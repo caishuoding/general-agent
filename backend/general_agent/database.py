@@ -43,14 +43,14 @@ class Database:
             return row
 
     def list_conversations(self) -> list[dict[str, Any]]:
-        """按创建时间倒序列出个人会话。"""
+        """按创建时间倒序列出仍有效的个人会话，清理失败来源由独立状态入口恢复。"""
         with self.connect() as connection:
-            return connection.execute("SELECT * FROM conversations ORDER BY created_at DESC, id").fetchall()
+            return connection.execute("SELECT * FROM conversations WHERE NOT deleting ORDER BY created_at DESC, id").fetchall()
 
     def get_conversation(self, conversation_id: UUID) -> dict[str, Any] | None:
-        """读取会话有序消息、记忆状态、已发送附件与可信出处，不存在时返回空值。"""
+        """只读取未删除中的会话及其消息与出处；缺失或已停用时返回空值。"""
         with self.connect() as connection:
-            row = connection.execute("SELECT * FROM conversations WHERE id = %s", (conversation_id,)).fetchone()
+            row = connection.execute("SELECT * FROM conversations WHERE id = %s AND NOT deleting", (conversation_id,)).fetchone()
             if row is not None:
                 row["messages"] = [self.decorate_message(message) for message in connection.execute("SELECT * FROM messages WHERE conversation_id = %s ORDER BY position", (conversation_id,)).fetchall()]
             return row

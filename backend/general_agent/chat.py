@@ -26,11 +26,11 @@ class ChatService:
         self.documents = DocumentSummary(database, model, attachments)
 
     def send(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, attachment_ids: list[UUID] | None = None) -> None:
-        """沿共同执行器处理当前授权，明确历史只读旧消息，其他资料保持既有能力和预算边界。"""
+        """仅在有效会话登记当前授权，明确历史只读旧消息，资料沿共同执行与预算边界。"""
         self.attachments.validate(conversation_id, attachment_ids or [])
         user_id, answer_id = uuid4(), uuid4()
         with self.database.connect() as connection:
-            if not connection.execute('SELECT id FROM conversations WHERE id=%s FOR NO KEY UPDATE', (conversation_id,)).fetchone():
+            if not connection.execute('SELECT id FROM conversations WHERE id=%s AND NOT deleting FOR NO KEY UPDATE', (conversation_id,)).fetchone():
                 raise LookupError('会话不存在。')
             if connection.execute("SELECT id FROM messages WHERE conversation_id=%s AND status IN ('generating','paused')", (conversation_id,)).fetchone():
                 raise ValueError('本会话正在生成回答，请先停止或等待完成。')

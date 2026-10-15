@@ -1,3 +1,4 @@
+import { SourceDeletion, SourceDeletionPending, type DeleteTarget } from './SourceDeletion';
 import { HistorySources } from "./HistorySources";
 import { DocumentProgress } from './DocumentProgress';
 import {
@@ -28,7 +29,7 @@ import { MemoryPanel } from "./MemoryPanel";
 
 type Screen = "chat" | "settings" | "memory";
 
-// 展示会话、记忆、资料和历史出处及预算状态，并隔离过期异步响应。
+// 展示会话、记忆、资料与来源删除影响及恢复状态，并隔离过期异步响应。
 export function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(
@@ -52,6 +53,8 @@ export function App() {
     id: string;
     content: string;
   } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [sourceRevision, setSourceRevision] = useState(0);
   const [sourceMessage, setSourceMessage] = useState<string | null>(null);
   const activeId = useRef<string | null>(null);
   const selection = useRef(0);
@@ -187,6 +190,28 @@ export function App() {
     },
     [conversation, pending],
   );
+
+  // 清理被接受后重读会话与消息；即使部分失败，停用的来源也立刻退出当前选择。
+  async function refreshSources() {
+    setSelectedAttachments([]);
+    const items = await api<Conversation[]>("/conversations");
+    setConversations(items);
+    setSourceRevision(
+      // 每次清理后重新载入附件和未完成清理记录。
+      (value) => value + 1,
+    );
+    if (activeId.current && items.some(
+      // 只有仍有效会话才继续读取。
+      (item) => item.id === activeId.current,
+    )) setConversation(await api<ConversationDetail>(`/conversations/${activeId.current}`));
+    else { activeId.current = null; selection.current += 1; setConversation(null); localStorage.removeItem("active-conversation"); }
+  }
+  // 当前会话删除需先呈现包含更正和附件来源的完整影响。
+  function deleteConversation() { if (activeId.current) setDeleteTarget({ path: `/conversations/${activeId.current}`, label: '会话' }); }
+  // 附件按独立上传身份预览，绝不通过名称推断删除范围。
+  function deleteAttachment(id: string, name: string) { if (activeId.current) setDeleteTarget({ path: `/conversations/${activeId.current}/attachments/${id}`, label: `附件 ${name}` }); }
+  // 关闭预览不执行任何删除或保留授权。
+  function closeDeletion() { setDeleteTarget(null); }
 
   // 新建持久化会话，成功后立即进入该会话并刷新左侧列表。
   async function createConversation(): Promise<Conversation | null> {
@@ -505,6 +530,9 @@ export function App() {
             {error}
           </div>
         )}
+        <SourceDeletionPending revision={sourceRevision} onChanged={refreshSources} />
+        {deleteTarget && <SourceDeletion key={deleteTarget.path} target={deleteTarget} onClose={closeDeletion} onChanged={refreshSources} />}
+        {screen === 'chat' && conversation && <button className="delete-conversation" onClick={deleteConversation}>删除当前会话</button>}
         <BudgetPrompt onConfigure={openSettings} />
         {screen === "settings" ? (
           <div className="page-scroll">
@@ -570,7 +598,7 @@ export function App() {
               </div>
             </div>
             <div className="composer-wrap">
-              <AttachmentPanel conversationId={activeId.current} selected={selectedAttachments} onSelect={setSelectedAttachments} disabled={!!pending || !!generating || changingRun || creating || loading} />
+              <AttachmentPanel revision={sourceRevision} onDelete={deleteAttachment} conversationId={activeId.current} selected={selectedAttachments} onSelect={setSelectedAttachments} disabled={!!pending || !!generating || changingRun || creating || loading} />
               {streamNotice && <p className="stream-notice" role="status">{streamNotice}</p>}
               <form className="composer" ref={composer} onSubmit={send}>
                 <textarea

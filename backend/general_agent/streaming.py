@@ -51,11 +51,11 @@ class StreamingChat:
             connection.execute("UPDATE memory_actions SET status='failed',error='应用重启中断了记忆同步，请重试核对已有写入。' WHERE status='saving'")
 
     def start(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, attachment_ids: list[UUID] | None = None) -> UUID:
-        """校验并绑定附件到原用户消息，预留真实首步后执行共同动作与资料回答。"""
+        """仅在有效会话校验并绑定附件，预留真实首步后执行共同动作与资料回答。"""
         self.attachments.validate(conversation_id, attachment_ids or [])
         message_id = uuid4()
         with self.database.connect() as connection:
-            found = connection.execute("SELECT id FROM conversations WHERE id = %s FOR NO KEY UPDATE", (conversation_id,)).fetchone()
+            found = connection.execute("SELECT id FROM conversations WHERE id = %s AND NOT deleting FOR NO KEY UPDATE", (conversation_id,)).fetchone()
             if found is None:
                 raise LookupError("会话不存在。")
             if connection.execute("SELECT id FROM messages WHERE conversation_id = %s AND status IN ('generating','paused')", (conversation_id,)).fetchone():
@@ -75,14 +75,16 @@ class StreamingChat:
         return message_id
 
     def retry(self, conversation_id: UUID, message_id: UUID, settings: StoredSettings, operation: OperationContext) -> UUID:
-        """为最新失败或停止的回答创建新尝试，复用原用户消息并保留旧回答。"""
+        """为最新失败或停止回答创建尝试；来源删除使旧范围永久失效，不能回退到其他附件。"""
         new_id = uuid4()
         with self.database.connect() as connection:
-            if not connection.execute("SELECT id FROM conversations WHERE id = %s FOR NO KEY UPDATE", (conversation_id,)).fetchone():
+            if not connection.execute("SELECT id FROM conversations WHERE id = %s AND NOT deleting FOR NO KEY UPDATE", (conversation_id,)).fetchone():
                 raise LookupError("会话不存在。")
             row = connection.execute("SELECT * FROM messages WHERE conversation_id = %s ORDER BY position DESC LIMIT 1", (conversation_id,)).fetchone()
             if row is None or row["id"] != message_id or row["role"] != "assistant" or row["status"] not in ("failed", "stopped"):
                 raise ValueError("只能重试本会话最新一条失败或停止的回答。")
+            if connection.execute('SELECT id FROM source_deletions WHERE %s=ANY(operation_ids)',(row['operation_id'],)).fetchone():
+                raise ValueError('原来源已删除，旧请求范围已失效；请重新选择资料并发送新消息。')
             user_id = row["reply_to"]
             if user_id is None:
                 original = connection.execute("SELECT id FROM messages WHERE conversation_id = %s AND role = 'user' AND position < %s ORDER BY position DESC LIMIT 1", (conversation_id, row["position"])).fetchone()

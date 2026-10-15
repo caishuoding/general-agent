@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type ChangeEvent } from 'react';
 import { api, errorMessage, type Attachment } from './api';
 
-type Props = { conversationId: string | null; selected: string[]; onSelect: (ids: string[]) => void; disabled: boolean };
+type Props = { conversationId: string | null; selected: string[]; onSelect: (ids: string[]) => void; disabled: boolean; revision: number; onDelete: (id: string, name: string) => void };
 
-// 管理当前会话文字文档和图片上传，展示提取缺口、图片范围及能力要求。
-export function AttachmentPanel({ conversationId, selected, onSelect, disabled }: Props) {
+// 管理当前会话上传与删除预览，展示提取缺口和图片范围，停用来源不可再次发送。
+export function AttachmentPanel({ conversationId, selected, onSelect, disabled, revision, onDelete }: Props) {
   const [files, setFiles] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
@@ -37,7 +37,7 @@ export function AttachmentPanel({ conversationId, selected, onSelect, disabled }
       // 卸载或切换时停止计时并丢弃旧响应。
       return () => { alive = false; if (timer) clearTimeout(timer); };
     },
-    [conversationId, uploading],
+    [conversationId, uploading, revision],
   );
 
   // 将所选文件真实上传到本机会话，并等待后端处理状态决定是否可发送。
@@ -80,13 +80,15 @@ export function AttachmentPanel({ conversationId, selected, onSelect, disabled }
     return <p key={notice}>{notice}</p>;
   }
 
-  // 以真实文档覆盖和图片尺寸展示附件，下载地址始终带当前会话归属。
+  // 展示真实状态并提供来源影响预览；删除中的文件不能再次选择或读取。
   function renderFile(file: Attachment) {
     const info = file.parse_info;
-    const label = file.status === 'ready' ? (info?.format ? (info.coverage === 'partial' ? '文字可用（部分）' : '文字可用') : '可用') : file.status === 'failed' ? '失败' : '处理中';
+    // 以当前文件的独立身份打开删除预览。
+    function removeFile() { onDelete(file.id, file.filename); }
+    const label = file.status === 'ready' ? (info?.format ? (info.coverage === 'partial' ? '文字可用（部分）' : '文字可用') : '可用') : file.status === 'failed' ? '失败' : file.status === 'deleting' ? '清理未完成' : '处理中';
     return <li key={file.id} className={`attachment-item ${file.status}`}>
-      <label><input type="checkbox" aria-label={`随消息发送 ${file.filename}`} value={file.id} checked={selected.includes(file.id)} onChange={selectFile} disabled={disabled || uploading} /><span>{label} · {file.filename}</span></label>
-      <a href={`/api/conversations/${conversationId}/attachments/${file.id}/file`} download>原文件</a>
+      <label><input type="checkbox" aria-label={`随消息发送 ${file.filename}`} value={file.id} checked={selected.includes(file.id)} onChange={selectFile} disabled={disabled || uploading || file.status === 'deleting'} /><span>{label} · {file.filename}</span></label>
+      {file.status !== 'deleting' && <><a href={`/api/conversations/${conversationId}/attachments/${file.id}/file`} download>原文件</a><button onClick={removeFile}>删除附件 {file.filename}</button></>}
       {file.image_metadata && <small className="attachment-image-info">{file.image_metadata.format} · {file.image_metadata.width} × {file.image_metadata.height} 像素</small>}
       {file.error && <p role="alert">{file.error}</p>}
       {info?.format && <div className="document-coverage"><p>文字提取：{info.readable_units || 0} / {info.total_units || 0} {info.format === 'pdf' ? '页' : '段落'}</p>{info.missing_units?.map(renderNotice)}{info.limitations?.map(renderNotice)}</div>}

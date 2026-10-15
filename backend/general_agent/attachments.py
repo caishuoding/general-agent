@@ -43,12 +43,12 @@ class AttachmentService:
             path.unlink(missing_ok=True)
 
     def register(self, conversation_id: UUID, uploaded: list[UploadedFile]) -> list[dict[str, Any]]:
-        """完整上传后原子登记独立附件，数据库失败时清理本次原文件。"""
+        """仅在仍有效会话原子登记上传，删除中拒绝登记，数据库失败清理本次原文件。"""
         stored: list[Path] = []
         rows: list[dict[str, Any]] = []
         try:
             with self.database.connect() as connection:
-                if not connection.execute('SELECT id FROM conversations WHERE id=%s FOR KEY SHARE', (conversation_id,)).fetchone():
+                if not connection.execute('SELECT id FROM conversations WHERE id=%s AND NOT deleting FOR KEY SHARE', (conversation_id,)).fetchone():
                     raise LookupError('会话不存在。')
                 for item in uploaded:
                     identifier = uuid4()
@@ -68,11 +68,11 @@ class AttachmentService:
         return rows
 
     def process(self, attachment_id: UUID) -> None:
-        """验证图片或按文档格式解析文字，保存真实位置、覆盖和缺口，失败不成为可用资料。"""
+        """解析后在写入事务重核 processing 身份；删除中及晚到结果不能恢复片段或文件状态。"""
         info: dict[str, Any] = {}
         try:
             with self.database.connect() as connection:
-                row = connection.execute('SELECT filename FROM attachments WHERE id=%s', (attachment_id,)).fetchone()
+                row = connection.execute("SELECT filename FROM attachments WHERE id=%s AND status='processing'", (attachment_id,)).fetchone()
             if row is None:
                 return
             path = self.directory / str(attachment_id)
@@ -80,6 +80,8 @@ class AttachmentService:
             if extension in {'.png', '.jpg', '.jpeg'}:
                 metadata = validate_image(path, extension)
                 with self.database.connect() as connection:
+                    if not connection.execute("SELECT id FROM attachments WHERE id=%s AND status='processing' FOR UPDATE",(attachment_id,)).fetchone():
+                        return
                     connection.execute("INSERT INTO attachment_chunks (attachment_id,ordinal,location,content) VALUES (%s,1,'图片本身','图片本身；未执行 OCR 或预先文字提取。')", (attachment_id,))
                     connection.execute("UPDATE attachments SET status='ready',image_metadata=%s,error=NULL WHERE id=%s AND status='processing'", (Jsonb(metadata), attachment_id))
                 return
@@ -97,16 +99,18 @@ class AttachmentService:
                     raise ValueError('文件包含二进制控制字符，不能作为文本读取。')
                 chunks = self.text_chunks(text)
             with self.database.connect() as connection:
+                if not connection.execute("SELECT id FROM attachments WHERE id=%s AND status='processing' FOR UPDATE",(attachment_id,)).fetchone():
+                    return
                 for ordinal, (location, content) in enumerate(chunks, 1):
                     connection.execute('INSERT INTO attachment_chunks (attachment_id,ordinal,location,content) VALUES (%s,%s,%s,%s)', (attachment_id, ordinal, location, content))
                 connection.execute("UPDATE attachments SET status='ready', error=NULL,parse_info=%s WHERE id=%s AND status='processing'", (Jsonb(info),attachment_id))
         except (UnicodeDecodeError, ValueError, OSError) as error:
             message = str(error) if isinstance(error, ValueError) and not isinstance(error, UnicodeDecodeError) else '无法读取文字；请上传 UTF-8 编码的 TXT 或 Markdown 文件。'
             with self.database.connect() as connection:
-                connection.execute("UPDATE attachments SET status='failed', error=%s,parse_info=%s WHERE id=%s", (message,Jsonb(info),attachment_id))
+                connection.execute("UPDATE attachments SET status='failed', error=%s,parse_info=%s WHERE id=%s AND status='processing'", (message,Jsonb(info),attachment_id))
         except Exception:
             with self.database.connect() as connection:
-                connection.execute("UPDATE attachments SET status='failed', error='文件处理失败，请重新上传。' WHERE id=%s", (attachment_id,))
+                connection.execute("UPDATE attachments SET status='failed', error='文件处理失败，请重新上传。' WHERE id=%s AND status='processing'", (attachment_id,))
 
     @staticmethod
     def text_chunks(text: str) -> list[tuple[str, str]]:
@@ -134,16 +138,16 @@ class AttachmentService:
         return chunks
 
     def list_attachments(self, conversation_id: UUID) -> list[dict[str, Any]]:
-        """列出当前会话附件的持久状态，不暴露本机路径。"""
+        """列出仍有效会话附件的持久状态，删除中不能重新获取资料。"""
         with self.database.connect() as connection:
-            if not connection.execute('SELECT id FROM conversations WHERE id=%s', (conversation_id,)).fetchone():
+            if not connection.execute('SELECT id FROM conversations WHERE id=%s AND NOT deleting', (conversation_id,)).fetchone():
                 raise LookupError('会话不存在。')
             return connection.execute('SELECT * FROM attachments WHERE conversation_id=%s ORDER BY created_at,id', (conversation_id,)).fetchall()
 
     def file(self, conversation_id: UUID, attachment_id: UUID) -> tuple[Path, str]:
-        """按会话再次授权本机原文件读取，永不接受调用者指定的磁盘路径。"""
+        """按仍有效会话与附件授权下载；删除中即使文件尚在也不能读取，路径仅由 UUID 决定。"""
         with self.database.connect() as connection:
-            row = connection.execute('SELECT filename FROM attachments WHERE conversation_id=%s AND id=%s', (conversation_id, attachment_id)).fetchone()
+            row = connection.execute("SELECT a.filename FROM attachments a JOIN conversations c ON c.id=a.conversation_id WHERE a.conversation_id=%s AND a.id=%s AND a.status<>'deleting' AND NOT c.deleting", (conversation_id, attachment_id)).fetchone()
         path = self.directory / str(attachment_id)
         if row is None or not path.is_file():
             raise LookupError('当前会话中没有这个附件。')
@@ -232,11 +236,12 @@ class AttachmentService:
         return cleaned, used
 
     def save_citations(self, message_id: UUID, conversation_id: UUID, material: AttachmentContext) -> None:
-        """核验完整或部分回答的出处，已停止回答保持冻结文字不再补写提示。"""
+        """与来源删除串行保存出处，失效操作不再写回引用；普通停止仍保留已显示部分文字。"""
         with self.database.connect() as connection:
-            row = connection.execute('SELECT content,status FROM messages WHERE id=%s AND conversation_id=%s', (message_id, conversation_id)).fetchone()
-        if row is None:
-            return
-        content, citations = self.resolve(conversation_id, str(row['content']), material)
-        with self.database.connect() as connection:
+            if not connection.execute('SELECT id FROM conversations WHERE id=%s AND NOT deleting FOR SHARE',(conversation_id,)).fetchone():
+                return
+            row = connection.execute('SELECT m.content,m.status,o.invalidated FROM messages m JOIN cloud_operations o ON o.id=m.operation_id WHERE m.id=%s AND m.conversation_id=%s FOR SHARE OF o', (message_id, conversation_id)).fetchone()
+            if row is None or row['invalidated']:
+                return
+            content, citations = self.resolve(conversation_id, str(row['content']), material)
             connection.execute("UPDATE messages SET content=CASE WHEN status='stopped' THEN content ELSE %s END,citations=%s WHERE id=%s", (content, Jsonb(citations), message_id))

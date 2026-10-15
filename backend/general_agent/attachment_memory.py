@@ -27,22 +27,22 @@ class AttachmentMemory:
         self.database=candidates.database
 
     def selected(self, conversation_id: UUID, message_id: UUID, content: str) -> list[UUID]:
-        """优先本条选择，其次具名已发送文件，否则当前会话已发送资料；不读取未发送上传。"""
+        """先按本条选择、具名或已发送集合确定范围，再核验可用性；失效选择不得回退到其他文件。"""
         with self.database.connect() as connection:
-            rows=connection.execute("SELECT a.id,a.filename,EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id AND ma.message_id=%s) AS current FROM attachments a WHERE a.conversation_id=%s AND a.status='ready' AND EXISTS(SELECT 1 FROM message_attachments ma JOIN messages m ON m.id=ma.message_id WHERE ma.attachment_id=a.id AND m.position<=(SELECT position FROM messages WHERE id=%s)) ORDER BY a.created_at,a.id",(message_id,conversation_id,message_id)).fetchall()
+            rows=connection.execute("SELECT a.id,a.filename,a.status,EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id AND ma.message_id=%s) AS current FROM attachments a WHERE a.conversation_id=%s AND EXISTS(SELECT 1 FROM message_attachments ma JOIN messages m ON m.id=ma.message_id WHERE ma.attachment_id=a.id AND m.position<=(SELECT position FROM messages WHERE id=%s)) ORDER BY a.created_at,a.id",(message_id,conversation_id,message_id)).fetchall()
         current=[row for row in rows if row['current']]
         named=[row for row in rows if row['filename'] in content]
         if not current and re.search(r'\.(?:txt|md|pdf|docx|png|jpe?g)\b',content,re.IGNORECASE) and not named:
             raise ValueError('指定文件尚未在当前会话发送或已经不可用，请重新选择并发送。')
         chosen=current or named or rows
-        if any(not (self.candidates.memory.directory/'attachments'/str(row['id'])).is_file() for row in chosen):
+        if any(row['status']!='ready' or not (self.candidates.memory.directory/'attachments'/str(row['id'])).is_file() for row in chosen):
             raise ValueError('附件原文件已经不可用，请重新上传并发送后提取。')
         if len(chosen)>5:
             raise ValueError('附件记忆范围超过五个文件，请勾选最多五个或在请求中指定文件名。')
         return [row['id'] for row in chosen]
 
     def prepare(self, conversation_id: UUID, message_id: UUID, settings: StoredSettings, operation: OperationContext) -> str:
-        """明确提取先核验旧来源抑制，提交时再次检查；完成检查点复用且不继续普通回答。"""
+        """明确提取先核验旧来源抑制，提交时锁会话并重核来源；完成检查点复用且不继续普通回答。"""
         with self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(uuid5(message_id,'candidate-discovery').int % (2**63-1),))
@@ -76,6 +76,7 @@ class AttachmentMemory:
                     if allowed[item['source_key']]['location']!='图片本身' and item['quote'] not in allowed[item['source_key']]['excerpt']:
                         raise ValueError('附件候选原文无法核验。')
                 with self.database.connect() as connection:
+                    self.candidates.memory.guard_source(connection,conversation_id,message_id,operation)
                     active=connection.execute('SELECT cancelled FROM cloud_operations WHERE id=%s FOR UPDATE',(operation.operation_id,)).fetchone()
                     suppressed=connection.execute('SELECT message_id FROM memory_source_suppressions WHERE message_id=%s',(message_id,)).fetchone()
                     if active is None or active['cancelled'] or suppressed:
