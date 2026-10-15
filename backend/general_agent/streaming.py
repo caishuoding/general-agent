@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 from general_agent.calls import CallGateway
 from general_agent.provider import ModelFailure
 from general_agent.settings import StoredSettings
+from general_agent.search import SearchAwaiting
 
 
 class StreamingChat:
@@ -27,9 +28,10 @@ class StreamingChat:
         self.lock = Lock()
 
     def recover(self) -> None:
-        """撤销中断尝试的后续动作，保留暂停步骤，并将不确定保存标为可重试核对。"""
+        """撤销中断尝试的搜索与后续动作，保留待确认和预算暂停步骤，不把中断报为成功。"""
         with self.database.connect() as connection:
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE,approved=FALSE WHERE id IN (SELECT operation_id FROM messages WHERE status='generating')")
+            connection.execute("UPDATE search_requests SET status='failed',error='应用重启中断了搜索，请重新发起。' WHERE operation_id IN (SELECT operation_id FROM messages WHERE status='generating') AND status IN ('planning','approved')")
             connection.execute("UPDATE messages SET status = 'failed', error = '应用重启中断了回答，可以重试。' WHERE status = 'generating'")
             connection.execute("UPDATE model_calls SET status = 'failed',finished_at=CURRENT_TIMESTAMP WHERE status = 'generating'")
             connection.execute("UPDATE model_calls SET finished_at=CURRENT_TIMESTAMP WHERE status = 'stopped' AND finished_at IS NULL")
@@ -88,7 +90,7 @@ class StreamingChat:
         return new_id
 
     def execute(self, conversation_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
-        """完成当前可信动作后核验实际读图、准备记忆及资料；暂停重用记忆检查点并重核出处。"""
+        """完成可信动作后执行明确搜索或资料回答；预算暂停重用已完成步骤并重核出处。"""
         material = AttachmentContext()
         failure: str | None = None
         try:
@@ -99,16 +101,20 @@ class StreamingChat:
                 with self.database.connect() as connection:
                     connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (local,message_id))
             else:
-                material = self.attachments.prepare(conversation_id, user_id, str(rows[-1]['content']), settings=settings)
-                memory_material = self.execution.prepare_answer(user_id,str(rows[-1]["content"]),operation,call_id)
+                web_material = self.execution.search.prepare(conversation_id,user_id,str(rows[-1]['content']),settings,operation)
+                if web_material is None:
+                    material = self.attachments.prepare(conversation_id, user_id, str(rows[-1]['content']), settings=settings)
+                    memory_material = self.execution.prepare_answer(user_id,str(rows[-1]["content"]),operation,call_id)
+                else:
+                    memory_material = web_material
                 reserved = self.execution.chat_reservation(str(rows[-1]["content"]), call_id) or self.model.budget.reserve(operation, settings)
                 for chunk in self.model.bind(operation).stream(settings, memory_material + material.messages + [{"role": str(row["role"]), "content": str(row["content"])} for row in rows], reserved, message_id):
                     if chunk.content:
                         with self.database.connect() as connection:
                             connection.execute("UPDATE messages SET content = content || %s WHERE id = %s AND status = 'generating'", (chunk.content, message_id))
-        except BudgetPaused as paused:
+        except (BudgetPaused,SearchAwaiting) as paused:
             with self.database.connect() as connection:
-                connection.execute("UPDATE messages SET status='paused',budget_pause=%s WHERE id=%s AND status='generating'", (Jsonb(paused.public()),message_id))
+                connection.execute("UPDATE messages SET status='paused',budget_pause=%s WHERE id=%s AND status='generating'", (Jsonb(paused.public()) if isinstance(paused,BudgetPaused) else None,message_id))
             return
         except ValueError as error:
             failure = str(error)
@@ -116,7 +122,10 @@ class StreamingChat:
             failure = str(error)
         except Exception:
             failure = "回答执行中断，已保留部分内容，可以重试。"
+        if failure:
+            self.execution.search.fail(operation,failure)
         self.attachments.save_citations(message_id, conversation_id, material)
+        self.execution.search.save_sources(message_id, operation)
         with self.database.connect() as connection:
             connection.execute("UPDATE messages SET status = %s, error = %s WHERE id = %s AND status = 'generating'", ("failed" if failure else "complete", failure, message_id))
             connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE id=%s AND status='reserved'", (call_id,))
@@ -138,8 +147,10 @@ class StreamingChat:
             thread.start()
 
     def stop(self, conversation_id: UUID, message_id: UUID) -> None:
-        """冻结正在生成的回答，并保留已发出请求继续回传用量的机会。"""
-        self.message(conversation_id, message_id)
+        """冻结回答并撤销未用搜索许可；已发出的请求仍可回传真实用量。"""
+        message=self.message(conversation_id, message_id)
+        if message.get('operation_id'):
+            self.execution.search.cancel(message['operation_id'])
         with self.database.connect() as connection:
             connection.execute("UPDATE messages SET status = 'stopped',budget_pause=NULL WHERE id = %s AND status IN ('generating','paused')", (message_id,))
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE,approved=FALSE WHERE id IN (SELECT operation_id FROM messages WHERE id=%s)", (message_id,))

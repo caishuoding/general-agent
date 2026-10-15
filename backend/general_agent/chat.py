@@ -11,6 +11,7 @@ from general_agent.calls import CallGateway
 from general_agent.execution import ChatExecution
 from general_agent.provider import ModelFailure
 from general_agent.settings import StoredSettings
+from general_agent.search import SearchAwaiting
 
 
 class ChatService:
@@ -22,7 +23,7 @@ class ChatService:
         self.attachments = attachments
 
     def send(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, attachment_ids: list[UUID] | None = None) -> None:
-        """绑定当前授权及资料后准备相关记忆；实际读图才核验能力，暂停保留稳定身份。"""
+        """绑定当前授权并分别执行明确联网或当前资料回答；暂停、来源和真实失败均持久化。"""
         self.attachments.validate(conversation_id, attachment_ids or [])
         user_id, answer_id = uuid4(), uuid4()
         with self.database.connect() as connection:
@@ -41,19 +42,25 @@ class ChatService:
         try:
             response = self.execution.prepare(conversation_id,user_id,content,operation,reserved)
             if response is None:
-                material = self.attachments.prepare(conversation_id, user_id, content, settings=settings)
-                memory_material = self.execution.prepare_answer(user_id,content,operation,reserved)
+                web_material = self.execution.search.prepare(conversation_id,user_id,content,settings,operation)
+                if web_material is None:
+                    material = self.attachments.prepare(conversation_id, user_id, content, settings=settings)
+                    memory_material = self.execution.prepare_answer(user_id,content,operation,reserved)
+                else:
+                    memory_material = web_material
                 response = self.model.bind(operation).complete(settings,memory_material + material.messages + [{'role':str(row['role']),'content':str(row['content'])} for row in rows],self.execution.chat_reservation(content,reserved)).content
-        except BudgetPaused as paused:
+        except (BudgetPaused,SearchAwaiting) as paused:
             with self.database.connect() as connection:
-                connection.execute("UPDATE messages SET status='paused',budget_pause=%s WHERE id=%s AND status='generating'", (Jsonb(paused.public()),answer_id))
+                connection.execute("UPDATE messages SET status='paused',budget_pause=%s WHERE id=%s AND status='generating'", (Jsonb(paused.public()) if isinstance(paused,BudgetPaused) else None,answer_id))
             return
         except Exception as error:
             failure = error if isinstance(error,ModelFailure) else ModelFailure(str(error) if isinstance(error,ValueError) else '记忆操作未完成，可以重试核对。')
             response = str(failure)
+            self.execution.search.fail(operation,response)
+        response, web_sources = self.execution.search.resolve(operation, response)
         response, citations = self.attachments.resolve(conversation_id, response, material)
         with self.database.connect() as connection:
-            connection.execute("UPDATE messages SET content=%s,status=%s,error=%s,citations=%s WHERE id=%s AND status='generating'", (response,'failed' if failure else 'complete',str(failure) if failure else None,Jsonb(citations),answer_id))
+            connection.execute("UPDATE messages SET content=%s,status=%s,error=%s,citations=%s,web_sources=%s WHERE id=%s AND status='generating'", (response,'failed' if failure else 'complete',str(failure) if failure else None,Jsonb(citations),Jsonb(web_sources),answer_id))
             connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE id=%s AND status='reserved'", (reserved,))
         if failure:
             raise failure

@@ -14,10 +14,10 @@ export function BudgetPanel({ settings, usage, onUsageChanged }: Props) {
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // 获取预算和当前连接，自动提供当前聊天与嵌入模型的价格输入项。
+  // 获取预算和聊天、嵌入、搜索连接，分别提供token与credits单价。
   async function load() {
-    const [saved, totals, embedding] = await Promise.all([api<Budget>("/settings/budget"), api<Summary>("/usage/summary"), api<Settings>("/settings/embedding")]);
-    for (const config of [settings, embedding]) {
+    const [saved, totals, embedding, search] = await Promise.all([api<Budget>("/settings/budget"), api<Summary>("/usage/summary"), api<Settings>("/settings/embedding"), api<Settings>("/settings/search")]);
+    for (const config of [settings, embedding, search]) {
       if (config.model && !saved.prices.some(
         // 价格只匹配相同服务地址和模型，不继承其他模型的单价。
         (price) => price.base_url === config.base_url && price.model === config.model,
@@ -43,7 +43,7 @@ export function BudgetPanel({ settings, usage, onUsageChanged }: Props) {
     try {
       const prices = budget.prices.map(
         // 保留模型身份，只更新用户明确填写的单价。
-        (price, index) => ({ ...price, input_per_million: data.get(`${index}-input`) || null, output_per_million: data.get(`${index}-output`) || null, per_credit: price.per_credit }),
+        (price, index) => ({ ...price, input_per_million: data.get(`${index}-input`) || null, output_per_million: data.get(`${index}-output`) || null, per_credit: data.has(`${index}-credit`) ? data.get(`${index}-credit`) || null : price.per_credit }),
       );
       await api("/settings/budget", { method: "PUT", body: JSON.stringify({ monthly_limit: data.get("monthly_limit") || null, prices }) });
       await load(); onUsageChanged(await api<Usage[]>("/usage")); setNotice("预算与单价已保存。暂停的请求可以重新检查。");
@@ -51,18 +51,19 @@ export function BudgetPanel({ settings, usage, onUsageChanged }: Props) {
     finally { setBusy(false); }
   }
 
-  // 展示按模型独立填写的输入与输出单价，嵌入只要求输入单价。
+  // 按实际计量类型展示价格，Tavily可填写每credit单价而不是token单价。
   function renderPrice(price: Price, index: number) {
     return <fieldset key={`${price.base_url}:${price.model}`} className="price-fields">
       <legend>{price.model}</legend><p className="field-help">{price.base_url}</p>
+      {price.model === "tavily-basic" ? <label>{price.model} 每 credit 单价<input name={`${index}-credit`} aria-label={`${price.model} 每 credit 单价`} type="number" min="0" step="any" defaultValue={price.per_credit ?? ""} placeholder="未知" /></label> : <>
       <label>{price.model} 输入单价<input name={`${index}-input`} aria-label={`${price.model} 输入单价`} type="number" min="0" step="any" defaultValue={price.input_per_million ?? ""} placeholder="未知" /></label>
-      <label>{price.model} 输出单价<input name={`${index}-output`} aria-label={`${price.model} 输出单价`} type="number" min="0" step="any" defaultValue={price.output_per_million ?? ""} placeholder="嵌入可留空" /></label>
+      <label>{price.model} 输出单价<input name={`${index}-output`} aria-label={`${price.model} 输出单价`} type="number" min="0" step="any" defaultValue={price.output_per_million ?? ""} placeholder="嵌入可留空" /></label></>}
     </fieldset>;
   }
 
   return <div className="settings-card budget-card">
     <div className="card-heading"><h3>用量与月度预算</h3><span className="small-label">本应用估算</span></div>
-    <p className="field-help">金额均为人民币元，单价单位为元 / 百万 token。若服务商使用其他币种，请先自行换算。估算费用不等于服务商实际账单，也不是服务商扣费上限。</p>
+    <p className="field-help">金额均为人民币元，模型单价为元 / 百万 token，Tavily 单价为元 / credit。若服务商使用其他币种，请先自行换算。估算费用不等于服务商实际账单，也不是服务商扣费上限。</p>
     {summary && <div className="monthly-summary" data-testid="monthly-summary">
       <strong>{summary.month} · 上海时区</strong>
       <p>{summary.estimated_cost === null ? `费用未知；已知部分 ¥${summary.known_cost}` : `本月估算费用 ¥${summary.estimated_cost}`}</p>

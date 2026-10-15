@@ -54,7 +54,7 @@ class Database:
             return row
 
     def decorate_message(self, row: dict[str, Any]) -> dict[str, Any]:
-        """补齐消息的附件身份与真实记忆动作，停止或失败不会抹去已完成保存。"""
+        """补齐附件、记忆及明确搜索真实状态，失败不会抹去已完成步骤。"""
         with self.connect() as connection:
             row['attachment_ids'] = [item['attachment_id'] for item in connection.execute('SELECT attachment_id FROM message_attachments WHERE message_id=%s ORDER BY attachment_id', (row['id'],)).fetchall()]
         if row['role'] == 'assistant' and row.get('reply_to'):
@@ -63,6 +63,7 @@ class Database:
         else:
             row['memory_action'] = None
         with self.connect() as connection:
+            row['search_action'] = connection.execute('SELECT id,query,status,error,revision,sources,purpose,expires_at FROM search_requests WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
             row['memory_recall'] = connection.execute('SELECT status,match_count AS count,detail FROM memory_recalls WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
         return row
 
