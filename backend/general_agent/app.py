@@ -18,11 +18,13 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 
+from general_agent.capabilities import Capability, CapabilityResult, CapabilityService
 from general_agent.chat import ChatService
 from general_agent.database import Database
+from general_agent.embedding import EmbeddingConfiguration, EmbeddingIndexConflict
 from general_agent.provider import ModelClient, ModelFailure
 from general_agent.streaming import StreamingChat
-from general_agent.settings import PublicSettings, SettingsInput, SettingsStore
+from general_agent.settings import (PublicSettings, SettingsInput, SettingsStore, EmbeddingSettingsInput, EmbeddingSettingsStore, PublicEmbeddingSettings)
 
 
 class ConversationInput(BaseModel):
@@ -57,7 +59,8 @@ class ConversationDetail(Conversation):
 
 class UsageRecord(BaseModel):
     id: UUID
-    conversation_id: UUID
+    conversation_id: UUID | None
+    purpose: str
     model: str
     status: str
     prompt_tokens: int | None
@@ -67,13 +70,17 @@ class UsageRecord(BaseModel):
 
 
 def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None) -> FastAPI:
-    """创建应用，测试可指定真实数据库、配置目录和外部 HTTP 替身。"""
+    """创建聊天及能力配置应用，测试可指定真实数据库、配置目录和外部 HTTP 替身。"""
     database = Database(database_url or os.environ.get(
         "DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/general_agent"
     ))
     settings = SettingsStore(data_dir or Path(os.environ.get("APP_DATA_DIR", ".local")))
-    chat = ChatService(database, ModelClient(model_transport))
-    streaming = StreamingChat(database, ModelClient(model_transport))
+    embedding_settings = EmbeddingSettingsStore(settings.directory)
+    embedding_configuration = EmbeddingConfiguration(database, embedding_settings)
+    model = ModelClient(model_transport)
+    chat = ChatService(database, model)
+    capabilities = CapabilityService(database, model, settings, embedding_settings)
+    streaming = StreamingChat(database, model)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -121,6 +128,34 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
             return settings.save(body)
         except ValueError as error:
             raise HTTPException(422, str(error)) from None
+
+    @app.get("/api/settings/capabilities", response_model=dict[Capability, CapabilityResult])
+    def get_capabilities() -> dict[Capability, CapabilityResult]:
+        """展示当前已保存配置的独立能力结果，旧版本结果不会冒充当前能力。"""
+        return capabilities.results()
+
+    @app.post("/api/settings/capabilities/{capability}", response_model=CapabilityResult)
+    def check_capability(capability: Capability) -> CapabilityResult:
+        """发起一项可能产生费用的真实能力检查，失败也保留结果与用量。"""
+        try:
+            return capabilities.check(capability)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
+
+    @app.get("/api/settings/embedding", response_model=PublicEmbeddingSettings)
+    def get_embedding_settings() -> PublicEmbeddingSettings:
+        """读取独立嵌入配置，始终隐藏完整密钥。"""
+        return embedding_configuration.public()
+
+    @app.put("/api/settings/embedding", response_model=PublicEmbeddingSettings)
+    def save_embedding_settings(body: EmbeddingSettingsInput) -> PublicEmbeddingSettings:
+        """保存独立嵌入配置，已有索引时拒绝未经重建的向量空间变更。"""
+        try:
+            return embedding_configuration.save(body, settings.read())
+        except EmbeddingIndexConflict as error:
+            raise HTTPException(409, str(error)) from None
+        except ValueError:
+            raise HTTPException(422, "请检查嵌入地址、密钥和维度；复用连接前请先保存聊天配置。") from None
 
     @app.post("/api/conversations", status_code=201, response_model=Conversation)
     def create_conversation(body: ConversationInput) -> Conversation:

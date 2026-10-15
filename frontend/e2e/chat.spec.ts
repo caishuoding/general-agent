@@ -10,9 +10,9 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
     page.getByRole("heading", { name: "个人对话空间" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  await page.getByLabel("API 地址").fill(modelUrl);
-  await page.getByLabel("模型名称").fill("controlled-model");
-  await page.getByLabel("API 密钥").fill("browser-test-key");
+  await page.getByLabel("API 地址", { exact: true }).fill(modelUrl);
+  await page.getByLabel("模型名称", { exact: true }).fill("controlled-model");
+  await page.getByLabel("API 密钥", { exact: true }).fill("browser-test-key");
   await page.getByRole("button", { name: "保存配置" }).click();
   await expect(page.getByRole("status")).toContainText("配置已保存");
   await page.getByRole("button", { name: "新建会话" }).click();
