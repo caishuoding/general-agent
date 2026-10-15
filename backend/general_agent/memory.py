@@ -46,10 +46,11 @@ class MemoryService:
             return connection.execute('SELECT * FROM memory_actions WHERE id=%s', (uuid5(message_id,'explicit-memory:0'),)).fetchone()
 
     def list(self) -> list[dict[str, Any]]:
-        """展示消息、附件及更正来源；只有已完整提交的事实才从正式存储核验。"""
+        """展示未删除条目、清理状态及消息/附件/更正来源，正式有效事实再从 SDK 核验。"""
         with self.database.connect() as connection:
-            rows = connection.execute('SELECT a.*, c.title AS conversation_title FROM memory_actions a JOIN conversations c ON c.id=a.conversation_id ORDER BY a.created_at DESC,a.id').fetchall()
+            rows = connection.execute("SELECT a.*, c.title AS conversation_title FROM memory_actions a JOIN conversations c ON c.id=a.conversation_id WHERE a.status <> 'deleted' ORDER BY a.created_at DESC,a.id").fetchall()
             for row in rows:
+                row["deletion"] = connection.execute('SELECT status,error FROM memory_deletions WHERE action_id=%s',(row['id'],)).fetchone()
                 row['attachment_sources']=connection.execute('SELECT s.* FROM attachment_memory_candidates s JOIN memory_candidates c ON c.id=s.candidate_id WHERE c.memory_action_id=%s',(row['id'],)).fetchall()
                 row["updates"] = connection.execute("SELECT u.*,c.title AS conversation_title FROM memory_updates u LEFT JOIN conversations c ON c.id=u.source_conversation_id WHERE action_id=%s ORDER BY u.created_at,u.id",(row["id"],)).fetchall()
         if not rows or not any(row["status"] == "complete" for row in rows):
@@ -67,8 +68,13 @@ class MemoryService:
                         row['fact'] = entry['memory']
         return rows
 
+    def source_suppressed(self, message_id: UUID) -> bool:
+        """只抑制旧消息再次发现；同源未删除的独立候选仍可单独确认。"""
+        with self.database.connect() as connection:
+            return connection.execute('SELECT message_id FROM memory_source_suppressions WHERE message_id=%s',(message_id,)).fetchone() is not None
+
     def save(self, conversation_id: UUID, message_id: UUID, fact: str, operation: OperationContext, reserved: UUID | None = None, action_id: UUID | None = None, validate_source: Callable[[], None] | None = None) -> dict[str, Any]:
-        """以稳定动作登记批准并复用部分向量；附件在嵌入回传后和发布前重新核验来源。"""
+        """按稳定身份核对部分提交并重验附件来源；删除墓碑优先，迟到结果不能恢复旧批准。"""
         if validate_source:
             validate_source()
         action_id = action_id or uuid5(message_id, 'explicit-memory:0')
@@ -78,11 +84,13 @@ class MemoryService:
             lock.execute("INSERT INTO memory_actions(id,message_id,conversation_id,operation_id,fact,status) VALUES(%s,%s,%s,%s,%s,'pending') ON CONFLICT(id) DO NOTHING", (action_id,message_id,conversation_id,operation.operation_id,fact))
             existing = lock.execute('SELECT * FROM memory_actions WHERE id=%s',(action_id,)).fetchone()
             assert existing is not None
+            if existing['status'] in ('deleting','deleted'):
+                raise ValueError('该长期记忆已删除，旧保存批准已失效。')
             if existing['fact'] != fact:
                 raise ValueError('保存内容与原批准不一致，请重新明确具体事实。')
             if existing['status'] == 'complete':
                 return existing
-            lock.execute("UPDATE memory_actions SET status='saving',error=NULL,operation_id=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s", (operation.operation_id,action_id))
+            lock.execute("UPDATE memory_actions SET status='saving',error=NULL,operation_id=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status NOT IN ('deleting','deleted')", (operation.operation_id,action_id))
             try:
                 settings = self.embedding.verified()
                 self.embedding.bind_index('personal_memories', settings)
@@ -102,13 +110,15 @@ class MemoryService:
                         memory.db.add_history(memory_id, None, fact, 'ADD', created_at=entry['created_at'], role='user')
                 if validate_source:
                     validate_source()
-                lock.execute("UPDATE memory_actions SET status='complete',memory_id=%s,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s", (memory_id,action_id))
+                changed=lock.execute("UPDATE memory_actions SET status='complete',memory_id=%s,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status NOT IN ('deleting','deleted') RETURNING id", (memory_id,action_id)).fetchone()
+                if changed is None:
+                    raise ValueError('该长期记忆已删除，迟到的保存未生效。')
             except BudgetPaused:
-                lock.execute("UPDATE memory_actions SET status='pending',error='等待预算许可，尚未确认保存。' WHERE id=%s", (action_id,))
+                lock.execute("UPDATE memory_actions SET status='pending',error='等待预算许可，尚未确认保存。' WHERE id=%s AND status NOT IN ('deleting','deleted')", (action_id,))
                 raise
             except Exception as error:
                 detail = str(error) if isinstance(error, (ModelFailure, ValueError)) else '记忆保存未完成，请重试；重试会先核对已有写入。'
-                lock.execute("UPDATE memory_actions SET status='failed',error=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s", (detail,action_id))
+                lock.execute("UPDATE memory_actions SET status='failed',error=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status NOT IN ('deleting','deleted')", (detail,action_id))
                 raise ValueError(detail) from None
             result = lock.execute('SELECT * FROM memory_actions WHERE id=%s',(action_id,)).fetchone()
             assert result is not None

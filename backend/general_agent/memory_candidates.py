@@ -74,7 +74,9 @@ class MemoryCandidates:
             self.discover_source(conversation_id,message_id,settings,operation)
 
     def discover_source(self, conversation_id: UUID, message_id: UUID, settings: StoredSettings, operation: OperationContext) -> None:
-        """仅发送当前获准事实并原子核验停止状态后存检查点；失败可见，普通回答仍可继续。"""
+        """仅发送当前获准事实；旧来源抑制与取消状态核验防止删除后重新提出候选。"""
+        if self.memory.source_suppressed(message_id):
+            return
         source=self.source(message_id,conversation_id)
         if not candidate_eligible(source['content']):
             return
@@ -100,7 +102,8 @@ class MemoryCandidates:
                     raise ValueError('候选事实、人物归属或原文引用无法核验。')
             with self.database.connect() as connection:
                 active=connection.execute('SELECT cancelled FROM cloud_operations WHERE id=%s FOR UPDATE',(operation.operation_id,)).fetchone()
-                if active is None or active['cancelled']:
+                suppressed=connection.execute('SELECT message_id FROM memory_source_suppressions WHERE message_id=%s',(message_id,)).fetchone()
+                if active is None or active['cancelled'] or suppressed:
                     raise ValueError('候选提取已停止，未提交候选。')
                 for index,item in enumerate(items):
                     target=targets.get(item.get('target_id'))
@@ -114,7 +117,7 @@ class MemoryCandidates:
             self.discovery_state(message_id,operation,'failed',detail)
 
     def confirm(self, identifier: UUID, operation: OperationContext) -> dict[str, Any]:
-        """确认绑定具体候选及人物；消息和附件分别核验来源，多事实独立保存且不覆盖旧目标版本。"""
+        """按候选身份、人物及消息/附件来源提交；删除失效优先，同源其他事实独立。"""
         with self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(identifier.int % (2**63-1),))
@@ -143,7 +146,9 @@ class MemoryCandidates:
                 if not valid:
                     lock.execute("UPDATE memory_candidates SET status='expired',error='目标记忆已变化，旧候选未覆盖新事实。' WHERE id=%s",(identifier,))
                     raise ValueError('目标记忆已变化，请重新核对具体事实。')
-            lock.execute("UPDATE memory_candidates SET status='saving',approved_at=coalesce(approved_at,CURRENT_TIMESTAMP),error=NULL WHERE id=%s",(identifier,))
+            accepted=lock.execute("UPDATE memory_candidates SET status='saving',approved_at=coalesce(approved_at,CURRENT_TIMESTAMP),error=NULL WHERE id=%s AND status NOT IN ('expired','rejected') RETURNING id",(identifier,)).fetchone()
+            if accepted is None:
+                raise ValueError('候选已失效，旧批准不能继续提交。')
             try:
                 if row['target_id'] is not None:
                     MemoryCorrection(self.memory).apply(row['target_id'],row['fact'],row['target_version'],update_id,operation,row['source_message_id'],row['source_conversation_id'])
@@ -151,13 +156,15 @@ class MemoryCandidates:
                 else:
                     saved=self.memory.save(row['source_conversation_id'],row['source_message_id'],row['fact'],operation,action_id=uuid5(identifier,'confirmed-memory'),validate_source=validate_source if row['source_kind']=='attachment' else None)
                     action_id=saved['id']
-                lock.execute("UPDATE memory_candidates SET status='confirmed',memory_action_id=%s,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s",(action_id,identifier))
+                lock.execute("UPDATE memory_candidates SET status='confirmed',memory_action_id=%s,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status='saving' RETURNING id",(action_id,identifier)).fetchone()
+                if self.get(identifier)['status']!='confirmed':
+                    raise ValueError('相关记忆已删除，旧候选已失效。')
             except BudgetPaused:
-                lock.execute("UPDATE memory_candidates SET status='paused',error='已确认，提交等待预算许可。' WHERE id=%s",(identifier,))
+                lock.execute("UPDATE memory_candidates SET status='paused',error='已确认，提交等待预算许可。' WHERE id=%s AND status='saving'",(identifier,))
                 raise
             except Exception as error:
                 detail=str(error) if isinstance(error,(ModelFailure,ValueError)) else '候选提交未完成，请重试核对。'
-                lock.execute("UPDATE memory_candidates SET status='failed',error=%s WHERE id=%s",(detail,identifier))
+                lock.execute("UPDATE memory_candidates SET status='failed',error=%s WHERE id=%s AND status='saving'",(detail,identifier))
                 raise ValueError(detail) from None
         return self.get(identifier)
 

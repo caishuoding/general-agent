@@ -27,6 +27,7 @@ from general_agent.capabilities import Capability, CapabilityResult, CapabilityS
 from general_agent.chat import ChatService
 from general_agent.execution import ChatExecution
 from general_agent.memory import MemoryService
+from general_agent.memory_deletion_api import deletion_router
 from general_agent.memory_candidates_api import candidates_router
 from general_agent.memory_correction import MemoryCorrection
 from general_agent.memory_correction_api import correction_router
@@ -135,6 +136,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     app.include_router(attachment_router(attachments))
     app.include_router(correction_router(MemoryCorrection(memory)))
     app.include_router(candidates_router(execution.candidates,settings,execution.attachment_memory))
+    app.include_router(deletion_router(execution.deletion))
     app.state.calls = model
     app.state.budget = budget
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])

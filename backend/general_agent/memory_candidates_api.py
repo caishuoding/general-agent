@@ -61,8 +61,10 @@ def candidates_router(candidates: MemoryCandidates, settings_store: SettingsStor
 
     @router.post('/api/conversations/{conversation_id}/messages/{message_id}/memory-candidates/retry')
     def retry_discovery(conversation_id: UUID, message_id: UUID, operation_id: UUID | None = Header(default=None,alias='X-Operation-ID')) -> JSONResponse:
-        """显式重试原用户事实或已授权附件提取，绑定配置和来源，完成检查点不再次计费。"""
+        """明确重试原消息或附件提取；已忘记来源拒绝发现，其余完成检查点不再次计费。"""
         try:
+            if candidates.memory.source_suppressed(message_id):
+                raise ValueError('该来源的记忆已被忘记，不能用旧来源重新识别。')
             source=candidates.source(message_id,conversation_id)
             settings=settings_store.read()
             if settings is None or not (candidate_eligible(source['content']) or attachment_memory_intent(source['content'])):

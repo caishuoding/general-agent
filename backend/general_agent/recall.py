@@ -32,9 +32,16 @@ class MemoryRecall:
             return connection.execute('SELECT * FROM memory_recalls WHERE operation_id=%s',(operation.operation_id,)).fetchone()
 
     def record(self, operation: OperationContext, user_id: UUID, status: str, detail: str, matches: list[dict[str, Any]] | None = None, revision: str | None = None) -> None:
-        """只存来源标识、版本和安全状态，避免在检查点遗留可被删除的事实副本。"""
+        """只存标识和版本；与删除原子核对有效事实及取消状态，避免迟到材料绕过失效。"""
         hits=matches or []
         with self.database.connect() as connection:
+            for match in hits:
+                valid=connection.execute("SELECT id FROM memory_actions WHERE id=%s AND memory_id=%s AND version=%s AND status='complete' FOR SHARE",(match['action_id'],match['memory_id'],match['version'])).fetchone()
+                if valid is None:
+                    raise ValueError('召回的记忆已变化，旧材料不能继续使用。')
+            active=connection.execute('SELECT cancelled FROM cloud_operations WHERE id=%s FOR UPDATE',(operation.operation_id,)).fetchone()
+            if active is None or active['cancelled']:
+                raise ValueError('原操作已失效，未保存迟到的召回检查点。')
             connection.execute('INSERT INTO memory_recalls(operation_id,message_id,status,matches,match_count,detail,embedding_revision) VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(operation_id) DO UPDATE SET status=EXCLUDED.status,matches=EXCLUDED.matches,match_count=EXCLUDED.match_count,detail=EXCLUDED.detail,embedding_revision=EXCLUDED.embedding_revision,updated_at=CURRENT_TIMESTAMP',(operation.operation_id,user_id,status,Jsonb(hits),len(hits),detail,revision))
 
     def prepare(self, user_id: UUID, query: str, operation: OperationContext, reserved: UUID | None, skip: bool = False) -> list[ModelMessage]:

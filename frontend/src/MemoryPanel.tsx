@@ -4,11 +4,12 @@ import { api, errorMessage, type AttachmentMemorySource, type MemoryAction, type
 type Props = { onSource: (conversationId: string, messageId: string) => void };
 type Entry = MemoryAction & { conversation_title: string; version: number; updates: MemoryUpdate[]; attachment_sources: AttachmentMemorySource[] };
 
-// 读取真实记忆和更正状态，支持按条目编辑、显式重试并查看原始及更正来源。
+// 读取真实记忆和清理状态，支持编辑、忘记、恢复失败操作并查看原聊天来源。
 export function MemoryPanel({ onSource }: Props) {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [revision, setRevision] = useState(0);
   const [editing, setEditing] = useState<Entry | null>(null);
   const [fact, setFact] = useState("");
@@ -66,14 +67,25 @@ export function MemoryPanel({ onSource }: Props) {
     catch (failure) { setError(errorMessage(failure)); }
     finally { setBusy(null); reload(); }
   }
-  // 展示每次更正的批准来源，管理页操作与聊天消息分别标记。
+  // 明确点击只删除选中长期记忆；原聊天保留，失败显示停用状态并可重试本地清理。
+  async function forgetEntry(event: MouseEvent<HTMLButtonElement>) {
+    const identifier = event.currentTarget.dataset.entry;
+    if (!identifier) return;
+    setBusy(identifier); setError(""); setNotice(""); setEditing(null);
+    try {
+      const result = await api<{ detail: string }>(`/memories/${identifier}`, { method: "DELETE" });
+      setNotice(result.detail);
+    } catch (failure) { setError(errorMessage(failure)); }
+    finally { setBusy(null); reload(); }
+  }
+  // 展示每次更正的批准来源与正文清理状态，管理页操作和聊天来源分别标记。
   function renderUpdate(update: MemoryUpdate) {
     return <div className="memory-update-source" key={update.id}>
-      <span>{update.source_kind === "management" ? "管理页更正" : `聊天更正：${update.conversation_title || "原会话"}`} · {update.status === "complete" ? "已完成" : "未完成"}</span>
+      <span>{update.source_kind === "management" ? "管理页更正" : `聊天更正：${update.conversation_title || "原会话"}`} · {update.status === "deleted" ? "正文已清除" : update.status === "complete" ? "已完成" : "未完成"}</span>
       {update.source_message_id && update.source_conversation_id && <button onClick={openSource} data-conversation={update.source_conversation_id} data-message={update.source_message_id}>查看更正消息</button>}
     </div>;
   }
-  // 每个条目展示真实有效性；未完成更正展示目标正文而不把旧值冒充当前事实。
+  // 删除中的条目不再展示事实，显式提供清理重试；其余条目按真实更正状态展示。
   function renderEntry(entry: Entry) {
     // 文件下载同时核验原会话，人物沿用用户批准的精确预览。
     function renderAttachmentSource(source: AttachmentMemorySource) {
@@ -81,15 +93,17 @@ export function MemoryPanel({ onSource }: Props) {
     }
     const update = entry.updates.at(-1);
     const changing = busy === entry.id;
-    const unfinished = update && update.status !== "complete";
+    const unfinished = update && update.status !== "complete" && update.status !== "deleted";
     return <article className="memory-entry" data-testid="memory-entry" key={entry.id}>
-      <div className={`memory-status ${changing ? "pending" : entry.status}`}>{changing ? "正在更正，尚未确认完成" : entry.status === "complete" ? "已保存" : unfinished ? "更正未完成 · 旧事实已停止召回" : entry.status === "failed" ? "保存未完成" : "等待保存"}</div>
+      <div className={`memory-status ${changing ? "pending" : entry.status}`}>{changing ? "正在处理，尚未确认完成" : entry.status === "deleting" ? "已停止召回 · 清理未完成" : entry.status === "complete" ? "已保存" : unfinished ? "更正未完成 · 旧事实已停止召回" : entry.status === "failed" ? "保存未完成" : "等待保存"}</div>
       <p className="memory-fact">{unfinished ? update.fact : entry.fact}</p>
+      {entry.deletion?.error && <p className="message-error" role="status">{entry.deletion.error}</p>}
       {entry.error && <p className="message-error" role="status">{entry.error}</p>}
       {editing?.id === entry.id ? <form className="memory-edit" onSubmit={saveEdit}>
         <label>新的记忆事实<textarea value={fact} onChange={changeFact} maxLength={5000} disabled={changing} required /></label>
         <div><button className="retry-button" type="submit" disabled={changing || !fact.trim()}>保存更正</button><button type="button" onClick={cancelEdit} disabled={changing}>取消编辑</button></div>
       </form> : <div className="memory-edit-actions">
+        <button className="retry-button" onClick={forgetEntry} data-entry={entry.id} disabled={!!busy}>{entry.status === "deleting" ? "重试清理记忆" : "忘记这条记忆"}</button>
         {entry.status === "complete" && <button className="retry-button" onClick={openEdit} data-entry={entry.id} disabled={!!busy}>编辑记忆</button>}
         {unfinished && update.status !== "saving" && <button className="retry-button" onClick={retryUpdate} data-update={update.id} data-entry={entry.id} disabled={!!busy}>重试更正</button>}
       </div>}
@@ -102,10 +116,11 @@ export function MemoryPanel({ onSource }: Props) {
   }
   return <section className="memory-management page-scroll">
     <div className="eyebrow">关于你的长期记忆</div><h2>已批准的长期记忆</h2>
-    <p className="memory-intro">明确说“请记住：具体事实”即可保存。可在这里编辑，或发送“更正记忆：旧事实 =&gt; 新事实”；目标不明确时会先澄清。</p>
+    <p className="memory-intro">明确说“请记住：具体事实”即可保存。忘记会清除长期记忆及派生副本，原聊天仍保留。可在这里编辑，或发送“更正记忆：旧事实 =&gt; 新事实”；目标不明确时会先澄清。</p>
     <button className="retry-button" onClick={reload} disabled={loading || !!busy}>刷新记忆</button>
     {loading && <p role="status">正在读取记忆…</p>}
     {error && <p role="alert">{error}</p>}
+    {notice && <p role="status">{notice}</p>}
     {!loading && !error && !entries.length && <p className="memory-empty">还没有保存的记忆。你可以试试：“请记住：我喜欢简洁的中文回答”。</p>}
     <div className="memory-list">{entries.map(renderEntry)}</div>
   </section>;
