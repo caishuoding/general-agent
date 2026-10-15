@@ -894,6 +894,8 @@ td {
 .search-confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .search-status { margin: 8px 0; font-size: 12px; color: #64765b; }
 
+.history-sources .source-button { color: #426348; text-decoration: underline; text-align: left; overflow-wrap: anywhere; padding-top: 6px; }
+
 .attachment-person { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 12px 0; }
 .attachment-person label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
 .attachment-person select, .attachment-person input { padding: 8px; border: 1px solid var(--border, #d9ded8); border-radius: 6px; background: white; color: #263b31; }
