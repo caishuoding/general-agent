@@ -345,3 +345,34 @@ def test_stopped_attachment_extraction_does_not_publish_late_candidates(database
         assert client.post(retry).status_code==200
         assert len(client.get(f'/api/conversations/{conversation}').json()['messages'][-1]['memory_candidates'])==2
         assert attempts==2
+
+
+def test_history_lookup_does_not_authorize_attachment_extraction_and_next_explicit_request_does(database_url: str, tmp_path: Path) -> None:
+    """合入历史分支后，旧提取指令与当前附带文件不会触发候选；下一条明确提取仍正常工作。"""
+    from test_search import reply
+    extracted=0
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """检查历史材料不混入当前附件，真正提取单独计数并沿原受控服务响应。"""
+        nonlocal extracted
+        payload=json.loads(request.content)
+        if request.url.path.endswith('/chat/completions'):
+            if 'attachment_memory_discovery' in payload['messages'][0]['content']:
+                extracted+=1
+                return attachment_provider(request)
+            if any(isinstance(message['content'],str) and message['content'].startswith('实际历史聊天结果\n') for message in payload['messages']):
+                assert '陈敏住在杭州' not in str(payload)
+                return reply(payload,'找到旧提取指令；它不是当前保存授权。')
+        return recall_provider(request)
+
+    with TestClient(create_app(database_url,tmp_path,httpx.MockTransport(provider)),base_url='http://127.0.0.1:8000') as client:
+        old=configure_memory(client)
+        client.post(f'/api/conversations/{old}/messages',json={'content':'操作记录：请从附件提取记忆（旧指令）'})
+        current=client.post('/api/conversations',json={}).json()['id']
+        file=client.post(f'/api/conversations/{current}/attachments',files={'files':('当前.txt','陈敏住在杭州。陈敏喜欢乌龙茶。'.encode())}).json()[0]
+        answer=client.post(f'/api/conversations/{current}/messages',json={'content':'查找旧聊天：提取记忆','attachment_ids':[file['id']]}).json()['messages'][-1]
+        assert answer['history_search']['status']=='complete' and extracted==0
+        assert answer['memory_candidates']==[] and answer['memory_discovery'] is None
+        answer=client.post(f'/api/conversations/{current}/messages',json={'content':'请从附件提取记忆'}).json()['messages'][-1]
+        assert answer['history_search'] is None and len(answer['memory_candidates'])==2 and extracted==1
+        assert client.get('/api/memories').json()==[]

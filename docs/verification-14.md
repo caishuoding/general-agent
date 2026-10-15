@@ -29,6 +29,7 @@ TXT/Markdown、文本 PDF、DOCX 使用现有可信文字片段与位置；PDF �
 - 新 `tests/test_attachment_memory.py`：真实 PostgreSQL/pgvector、真实 Mem0 SDK、受控外部 HTTP。覆盖 TXT/PDF/DOCX/图片、当前范围、跨会话隔离、人物澄清、未批准不可召回、逐项确认/拒绝、重复提交、来源在嵌入途中丢失、失败与重试、提取及保存分别预算暂停/重启、否定和材料注入、伪造引文、停止后迟到结果。
 - 浏览器 `pnpm --dir frontend test:attachment-memory`：默认端口 18112/18113，可通过 TEST_APP_PORT/TEST_MODEL_PORT 覆盖。实际上传→原文件出处→人物澄清→仅更新预览→确认一项/拒绝另一项→刷新→正式记忆来源，1 项通过，截图已人工检查。
 - 前端构建通过；`test_attachment_memory.py`、`test_memory_candidates.py`、`test_memory.py`、`test_mem0_adapter.py`、`test_images.py` 共 37 项通过（37.43 秒）；完整 mypy 60 个源文件通过，TypeScript 通过。
+- 已合入任务 16 集成 `fd20732`：历史查询在 `reserve_first` / `prepare` 最先保持只读，附件明确提取保持独立。合并后附件、历史与直接保存资料组合 20 项通过（19.25 秒），新增交叉用例核对旧提取指令和当前附带文件不会授权候选；下一条当前明确请求仍可提取。附件/历史/原消息候选浏览器共 4 项通过，完整 mypy 62 个源文件、TypeScript 与构建通过。
 - 数据库/浏览器测试均通过共享串行锁，使用 15433 下本次测试创建的随机数据库，不读取真实配置或操作主服务。
 
 真实云端附件提取质量、图片识别、嵌入服务兼容与实际费用均 **待验**。本轮未读取实际密钥、未发送付费请求；受控测试不代表真实服务已验收。
