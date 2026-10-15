@@ -46,9 +46,11 @@ class MemoryService:
             return connection.execute('SELECT * FROM memory_actions WHERE message_id=%s', (message_id,)).fetchone()
 
     def list(self) -> list[dict[str, Any]]:
-        """展示操作状态和来源；已完成事实再次从 Mem0 正式存储核验。"""
+        """展示原来源与更正来源；只有已完整提交的事实才从正式存储核验。"""
         with self.database.connect() as connection:
             rows = connection.execute('SELECT a.*, c.title AS conversation_title FROM memory_actions a JOIN conversations c ON c.id=a.conversation_id ORDER BY a.created_at DESC,a.id').fetchall()
+            for row in rows:
+                row["updates"] = connection.execute("SELECT u.*,c.title AS conversation_title FROM memory_updates u LEFT JOIN conversations c ON c.id=u.source_conversation_id WHERE action_id=%s ORDER BY u.created_at,u.id",(row["id"],)).fetchall()
         if not rows or not any(row["status"] == "complete" for row in rows):
             return rows
         settings = self.embedding.store.read()

@@ -29,7 +29,7 @@ class StreamingChat:
         self.lock = Lock()
 
     def recover(self) -> None:
-        """撤销中断尝试，保留暂停及已完成资料；仅释放确实中断回答关联的未确认文档步骤。"""
+        """撤销中断尝试，保留暂停；按原身份核对保存更正，并仅释放中断回答关联文档步骤。"""
         with self.database.connect() as connection:
             interrupted = connection.execute("SELECT id,document_job_id FROM messages WHERE status IN ('generating','stopped') AND document_job_id IS NOT NULL").fetchall()
             for message in interrupted:
@@ -40,7 +40,8 @@ class StreamingChat:
             connection.execute("UPDATE model_calls SET status = 'failed',finished_at=CURRENT_TIMESTAMP WHERE status = 'generating'")
             connection.execute("UPDATE model_calls SET finished_at=CURRENT_TIMESTAMP WHERE status = 'stopped' AND finished_at IS NULL")
             connection.execute("UPDATE model_calls SET status = 'cancelled',finished_at=CURRENT_TIMESTAMP WHERE status = 'reserved'")
-            connection.execute("UPDATE memory_actions SET status='failed',error='应用重启中断了保存，请重试核对已有写入。' WHERE status='saving'")
+            connection.execute("UPDATE memory_updates SET status='failed',error='应用重启中断了更正，请重试核对已有写入。' WHERE status='saving'")
+            connection.execute("UPDATE memory_actions SET status='failed',error='应用重启中断了记忆同步，请重试核对已有写入。' WHERE status='saving'")
 
     def start(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, attachment_ids: list[UUID] | None = None) -> UUID:
         """校验并绑定附件到原用户消息，预留真实首步后执行共同动作与资料回答。"""

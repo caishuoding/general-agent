@@ -64,3 +64,39 @@ def test_mem0_pg_lifecycle_score_metadata_and_no_sqlite(database_url: str, tmp_p
         assert len(client.get('/api/usage').json()) == 6
         assert os.environ['MEM0_TELEMETRY'] == 'False'
         assert not list(tmp_path.rglob('*.db'))
+
+
+def test_correction_repeated_values_repair_current_history_and_preserve_metadata(database_url: str, tmp_path: Path) -> None:
+    """同一旧新值组合再次出现时核对本次历史时间，而不是把旧更正误当本次已提交。"""
+    import psycopg
+    from test_memory_recall import recall_provider
+    app=create_app(database_url,tmp_path,httpx.MockTransport(recall_provider))
+    with TestClient(app,base_url='http://127.0.0.1:8000') as client:
+        source=configure_memory(client)
+        client.post(f'/api/conversations/{source}/messages',json={'content':'请记住：我住在杭州'})
+        original=client.get('/api/memories').json()[0]
+        path=f"/api/memories/{original['id']}"
+        assert client.put(path,json={'fact':'我住在苏州','expected_version':1}).status_code==200
+        assert client.put(path,json={'fact':'我住在杭州','expected_version':2}).status_code==200
+        with psycopg.connect(database_url) as connection:
+            connection.execute("CREATE FUNCTION reject_repeated_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'history unavailable'; END $$")
+            connection.execute('CREATE TRIGGER reject_repeated_update BEFORE INSERT ON mem0_history FOR EACH ROW EXECUTE FUNCTION reject_repeated_update()')
+        assert client.put(path,json={'fact':'我住在苏州','expected_version':3}).status_code==409
+        failed=client.get('/api/memories').json()[0]['updates'][-1]
+        with psycopg.connect(database_url) as connection:
+            connection.execute('DROP TRIGGER reject_repeated_update ON mem0_history')
+        assert client.post(f"/api/memory-updates/{failed['id']}/retry").status_code==200
+        database=Database(database_url)
+        embedding=EmbeddingConfiguration(database,EmbeddingSettingsStore(tmp_path))
+        service=MemoryService(database,embedding,app.state.calls,tmp_path)
+        with service.session(embedding.verified()) as sdk:
+            current=sdk.get(original['memory_id'])
+            history=sdk.history(original['memory_id'])
+            assert current['user_id']=='local-person'
+            assert current['metadata']['source_message_id']==original['message_id']
+            assert current['metadata']['source_conversation_id']==source
+            assert current['metadata']['correction_id']==failed['id']
+            assert len(history)==4
+            assert history[-1]['updated_at']==current['updated_at']
+            assert history[-1]['old_memory']=='我住在杭州' and history[-1]['new_memory']=='我住在苏州'
+        assert len(client.get('/api/usage').json())==5

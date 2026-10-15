@@ -7,6 +7,7 @@ from uuid import UUID
 from general_agent.budget import OperationContext
 from general_agent.calls import CallGateway
 from general_agent.memory import MemoryService
+from general_agent.memory_correction import MemoryCorrection, correction_intent
 from general_agent.recall import MemoryRecall
 from general_agent.provider import ModelMessage
 from general_agent.settings import StoredSettings
@@ -48,10 +49,11 @@ class ChatExecution:
         """绑定本地动作模块及唯一云端调用边界。"""
         self.calls, self.memory = calls, memory
         self.recall = MemoryRecall(memory)
+        self.correction = MemoryCorrection(memory)
 
     def embedding_revision(self, content: str) -> str | None:
-        """保存或召回涉及嵌入时绑定版本，暂停尝试不能沿用修改前的配置批准。"""
-        embedding = self.memory.embedding.store.read() if explicit_intent(content).fact or self.recall.available() else None
+        """保存、更正或召回涉及嵌入时绑定版本，暂停尝试不能沿用修改前的配置批准。"""
+        embedding = self.memory.embedding.store.read() if explicit_intent(content).fact or correction_intent(content) is not None or self.recall.available() else None
         return embedding.revision if embedding else None
 
     def same_embedding_revision(self, expected: str | None) -> bool:
@@ -64,7 +66,10 @@ class ChatExecution:
         return [content, settings.revision, self.embedding_revision(content)]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """只预留下一条真实调用；全文任务先落范围和进度，再由其检查点预留分段预算。"""
+        """预留真实下一次调用；更正先停用旧值，全文先落范围和进度后逐段申请预算。"""
+        if correction_intent(content) is not None:
+            # 更正先持久化目标版本并停用旧值，再在步骤内申请预算。
+            return None
         intent = explicit_intent(content)
         if intent.clarification:
             return None
@@ -104,7 +109,9 @@ class ChatExecution:
         return reserved if row and row['unit']=='chat_tokens' else None
 
     def prepare(self, conversation_id: UUID, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None) -> str | None:
-        """执行明确批准的本地动作并返回确定回执；空值表示继续普通回答。"""
+        """执行当前明确保存或更正并返回真实回执；空值表示继续普通回答。"""
+        if correction_intent(content) is not None:
+            return self.correction.chat(content,user_id,conversation_id,operation)
         intent = explicit_intent(content)
         if intent.clarification:
             return intent.clarification

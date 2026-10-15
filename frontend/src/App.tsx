@@ -352,7 +352,7 @@ export function App() {
     return <details className="file-citation" key={citation.key} open><summary>[{citation.key}] <a href={`/api/conversations/${conversation?.id}/attachments/${citation.attachment_id}/file`} download>{citation.filename} · {citation.location}</a></summary><blockquote>{citation.excerpt}</blockquote></details>;
   }
 
-  // 展示回答、记忆动作、全文资料进度及预算暂停和出处，保留停止及重试入口。
+  // 展示回答、记忆召回和更正、全文资料进度及预算暂停和出处，保留停止及重试入口。
   function renderMessage(message: Message) {
     return (
       <article
@@ -372,6 +372,9 @@ export function App() {
         <div className="message-content">{message.content}</div>
         {message.document_progress && <DocumentProgress progress={message.document_progress} status={message.status} />}
         {message.memory_recall && message.memory_recall.status !== "skipped" && <div data-testid="memory-recall" className={`memory-recall ${message.memory_recall.status}`} role="status">{message.memory_recall.detail}</div>}
+        {message.memory_update && <div className={`memory-action ${message.memory_update.status}`} role="status">
+          {message.memory_update.status === "complete" ? `已更正 · ${message.memory_update.fact}` : `记忆更正未完成 · ${message.memory_update.error || "正在同步；旧事实已停止召回。"}`}
+        </div>}
         {message.memory_action && <div className={`memory-action ${message.memory_action.status}`} role="status">
           {message.memory_action.status === "complete" ? `已保存 · ${message.memory_action.fact}` : message.memory_action.status === "failed" ? `记忆保存未完成 · ${message.memory_action.error || "可以重试核对。"}` : "记忆正在处理，尚未确认保存。"}
         </div>}
