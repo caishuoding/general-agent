@@ -5,7 +5,9 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from general_agent.database import Database
-from general_agent.budget import OperationContext
+from general_agent.budget import BudgetPaused, OperationContext
+from general_agent.execution import ChatExecution
+from psycopg.types.json import Jsonb
 from general_agent.calls import CallGateway
 from general_agent.provider import ModelFailure
 from general_agent.settings import StoredSettings
@@ -14,34 +16,37 @@ from general_agent.settings import StoredSettings
 class StreamingChat:
     """协调持久化的生成尝试与后台模型请求，每段文字提交后即可重新读取。"""
 
-    def __init__(self, database: Database, model: CallGateway) -> None:
+    def __init__(self, database: Database, model: CallGateway, execution: ChatExecution) -> None:
         """绑定数据库与模型边界，并跟踪本进程的工作线程。"""
         self.database = database
         self.model = model
+        self.execution = execution
         self.threads: set[Thread] = set()
         self.lock = Lock()
 
     def recover(self) -> None:
-        """重启时中断遗留生成并终结已停止调用的等待用量状态，缺失费用继续保持未知。"""
+        """撤销中断尝试的后续动作，保留暂停步骤，并将不确定保存标为可重试核对。"""
         with self.database.connect() as connection:
+            connection.execute("UPDATE cloud_operations SET cancelled=TRUE,approved=FALSE WHERE id IN (SELECT operation_id FROM messages WHERE status='generating')")
             connection.execute("UPDATE messages SET status = 'failed', error = '应用重启中断了回答，可以重试。' WHERE status = 'generating'")
             connection.execute("UPDATE model_calls SET status = 'failed',finished_at=CURRENT_TIMESTAMP WHERE status = 'generating'")
             connection.execute("UPDATE model_calls SET finished_at=CURRENT_TIMESTAMP WHERE status = 'stopped' AND finished_at IS NULL")
             connection.execute("UPDATE model_calls SET status = 'cancelled',finished_at=CURRENT_TIMESTAMP WHERE status = 'reserved'")
+            connection.execute("UPDATE memory_actions SET status='failed',error='应用重启中断了保存，请重试核对已有写入。' WHERE status='saving'")
 
     def start(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext) -> UUID:
-        """先原子保存用户消息和生成记录，随后启动模型请求。"""
+        """预留实际首个步骤后保存用户消息与操作身份，随后执行共用编排。"""
         message_id = uuid4()
         with self.database.connect() as connection:
             found = connection.execute("SELECT id FROM conversations WHERE id = %s FOR NO KEY UPDATE", (conversation_id,)).fetchone()
             if found is None:
                 raise LookupError("会话不存在。")
-            if connection.execute("SELECT id FROM messages WHERE conversation_id = %s AND status = 'generating'", (conversation_id,)).fetchone():
+            if connection.execute("SELECT id FROM messages WHERE conversation_id = %s AND status IN ('generating','paused')", (conversation_id,)).fetchone():
                 raise ValueError("本会话正在生成回答，请先停止或等待完成。")
-            call_id = self.model.budget.reserve(operation, settings)
+            call_id = self.execution.reserve_first(content, settings, operation)
             user_id = uuid4()
             connection.execute("INSERT INTO messages (id, conversation_id, role, content, status) VALUES (%s, %s, 'user', %s, 'complete')", (user_id, conversation_id, content))
-            connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to) VALUES (%s, %s, 'assistant', '', 'generating', %s)", (message_id, conversation_id, user_id))
+            connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to, operation_id, model_revision, embedding_revision) VALUES (%s, %s, 'assistant', '', 'generating', %s, %s, %s, %s)", (message_id, conversation_id, user_id, operation.operation_id, settings.revision,self.execution.embedding_revision(content)))
             connection.execute("UPDATE conversations SET title = %s WHERE id = %s AND title = '新会话'", (content[:40], conversation_id))
             connection.execute("UPDATE model_calls SET assistant_message_id=%s WHERE id=%s", (message_id, call_id))
         thread = Thread(target=self.execute, args=(conversation_id, message_id, user_id, settings, operation, call_id), daemon=True)
@@ -66,8 +71,10 @@ class StreamingChat:
                 if original is None:
                     raise ValueError("无法找到原用户消息。")
                 user_id = original["id"]
-            call_id = self.model.budget.reserve(operation, settings)
-            connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to) VALUES (%s, %s, 'assistant', '', 'generating', %s)", (new_id, conversation_id, user_id))
+            source = connection.execute("SELECT content FROM messages WHERE id=%s", (user_id,)).fetchone()
+            assert source is not None
+            call_id = self.execution.reserve_first(source["content"], settings, operation, user_id)
+            connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to, operation_id, model_revision, embedding_revision) VALUES (%s, %s, 'assistant', '', 'generating', %s, %s, %s, %s)", (new_id, conversation_id, user_id, operation.operation_id, settings.revision,self.execution.embedding_revision(source['content'])))
             connection.execute("UPDATE model_calls SET assistant_message_id=%s WHERE id=%s", (new_id, call_id))
         thread = Thread(target=self.execute, args=(conversation_id, new_id, user_id, settings, operation, call_id), daemon=True)
         with self.lock:
@@ -76,30 +83,58 @@ class StreamingChat:
             thread.start()
         return new_id
 
-    def execute(self, conversation_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID) -> None:
-        """消费统一网关的预留流式调用，消息更新失败不回滚已经记录的云端用量。"""
+    def execute(self, conversation_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
+        """先完成可信用户动作，再继续回答；持久化步骤预算暂停与真实失败。"""
         failure: str | None = None
         try:
             with self.database.connect() as connection:
                 rows = connection.execute("SELECT role, content FROM messages WHERE conversation_id = %s AND status = 'complete' AND position <= (SELECT position FROM messages WHERE id = %s) ORDER BY position", (conversation_id, user_id)).fetchall()
-            for chunk in self.model.bind(operation).stream(settings, [{"role": str(row["role"]), "content": str(row["content"])} for row in rows], call_id, message_id):
-                if chunk.content:
-                    with self.database.connect() as connection:
-                        connection.execute("UPDATE messages SET content = content || %s WHERE id = %s AND status = 'generating'", (chunk.content, message_id))
+            local = self.execution.prepare(conversation_id, user_id, str(rows[-1]['content']), operation, call_id)
+            if local is not None:
+                with self.database.connect() as connection:
+                    connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (local,message_id))
+            else:
+                reserved = self.execution.chat_reservation(str(rows[-1]["content"]), call_id) or self.model.budget.reserve(operation, settings)
+                for chunk in self.model.bind(operation).stream(settings, [{"role": str(row["role"]), "content": str(row["content"])} for row in rows], reserved, message_id):
+                    if chunk.content:
+                        with self.database.connect() as connection:
+                            connection.execute("UPDATE messages SET content = content || %s WHERE id = %s AND status = 'generating'", (chunk.content, message_id))
+        except BudgetPaused as paused:
+            with self.database.connect() as connection:
+                connection.execute("UPDATE messages SET status='paused',budget_pause=%s WHERE id=%s AND status='generating'", (Jsonb(paused.public()),message_id))
+            return
+        except ValueError as error:
+            failure = str(error)
         except ModelFailure as error:
             failure = str(error)
         except Exception:
             failure = "回答执行中断，已保留部分内容，可以重试。"
         with self.database.connect() as connection:
             connection.execute("UPDATE messages SET status = %s, error = %s WHERE id = %s AND status = 'generating'", ("failed" if failure else "complete", failure, message_id))
-            connection.execute("UPDATE model_calls SET status = (SELECT status FROM messages WHERE id = %s) WHERE id = %s AND status <> 'cancelled'", (message_id, call_id))
+            connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE id=%s AND status='reserved'", (call_id,))
+
+    def resume(self, conversation_id: UUID, message_id: UUID, settings: StoredSettings) -> None:
+        """恢复同一持久化暂停尝试；配置变更后要求显式新尝试以免挪用批准。"""
+        with self.database.connect() as connection:
+            row = connection.execute("SELECT m.*,o.purpose FROM messages m JOIN cloud_operations o ON o.id=m.operation_id WHERE m.id=%s AND m.conversation_id=%s FOR UPDATE OF m", (message_id,conversation_id)).fetchone()
+            if row is None or row['status'] != 'paused':
+                raise ValueError('该回答没有等待预算，不能重复恢复。')
+            original = connection.execute('SELECT content FROM messages WHERE id=%s',(row['reply_to'],)).fetchone()
+            if row['model_revision'] != settings.revision or original is None or row['embedding_revision'] != self.execution.embedding_revision(original['content']):
+                raise ValueError('模型或嵌入配置已变更，请停止当前回答后重试。')
+            operation = OperationContext(row['operation_id'],row['purpose'],conversation_id)
+            connection.execute("UPDATE messages SET status='generating',budget_pause=NULL,error=NULL WHERE id=%s", (message_id,))
+        thread = Thread(target=self.execute, args=(conversation_id,message_id,row['reply_to'],settings,operation,None), daemon=True)
+        with self.lock:
+            self.threads.add(thread)
+            thread.start()
 
     def stop(self, conversation_id: UUID, message_id: UUID) -> None:
         """冻结正在生成的回答，并保留已发出请求继续回传用量的机会。"""
         self.message(conversation_id, message_id)
         with self.database.connect() as connection:
-            connection.execute("UPDATE messages SET status = 'stopped' WHERE id = %s AND status = 'generating'", (message_id,))
-            connection.execute("UPDATE cloud_operations SET cancelled=TRUE,approved=FALSE WHERE id IN (SELECT operation_id FROM model_calls WHERE assistant_message_id=%s)", (message_id,))
+            connection.execute("UPDATE messages SET status = 'stopped',budget_pause=NULL WHERE id = %s AND status IN ('generating','paused')", (message_id,))
+            connection.execute("UPDATE cloud_operations SET cancelled=TRUE,approved=FALSE WHERE id IN (SELECT operation_id FROM messages WHERE id=%s)", (message_id,))
             connection.execute("UPDATE model_calls SET status = 'stopped' WHERE assistant_message_id = %s AND status = 'generating' AND EXISTS (SELECT 1 FROM messages WHERE id = %s AND status = 'stopped')", (message_id, message_id))
 
     def close(self) -> None:
@@ -116,4 +151,4 @@ class StreamingChat:
             row = connection.execute("SELECT * FROM messages WHERE conversation_id = %s AND id = %s AND role = 'assistant'", (conversation_id, message_id)).fetchone()
             if row is None:
                 raise LookupError("回答不存在。")
-            return row
+            return self.database.decorate_message(row)

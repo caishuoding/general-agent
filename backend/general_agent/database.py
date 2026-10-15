@@ -50,8 +50,17 @@ class Database:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM conversations WHERE id = %s", (conversation_id,)).fetchone()
             if row is not None:
-                row["messages"] = connection.execute("SELECT * FROM messages WHERE conversation_id = %s ORDER BY position", (conversation_id,)).fetchall()
+                row["messages"] = [self.decorate_message(message) for message in connection.execute("SELECT * FROM messages WHERE conversation_id = %s ORDER BY position", (conversation_id,)).fetchall()]
             return row
+
+    def decorate_message(self, row: dict[str, Any]) -> dict[str, Any]:
+        """把真实记忆动作附在助手快照，答案停止或失败不会抹去已完成的保存。"""
+        if row['role'] == 'assistant' and row.get('reply_to'):
+            with self.connect() as connection:
+                row['memory_action'] = connection.execute('SELECT * FROM memory_actions WHERE message_id=%s', (row['reply_to'],)).fetchone()
+        else:
+            row['memory_action'] = None
+        return row
 
     def list_usage(self) -> list[dict[str, Any]]:
         """返回最近的调用记录，未取得的用量保留为空值。"""

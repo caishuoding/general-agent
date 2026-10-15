@@ -6,7 +6,7 @@ test("预算暂停允许一次能力检查且展示未知费用",
 async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  await page.getByLabel("API 地址", { exact: true }).fill("http://127.0.0.1:18087/v1");
+  await page.getByLabel("API 地址", { exact: true }).fill(`http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18087"}/v1`);
   await page.getByLabel("模型名称", { exact: true }).fill("controlled-budget");
   await page.getByLabel("API 密钥", { exact: true }).fill("browser-test-key");
   await page.getByRole("button", { name: "保存配置", exact: true }).click();

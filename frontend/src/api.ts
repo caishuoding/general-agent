@@ -4,11 +4,14 @@ export type Settings = {
   api_key_configured: boolean;
 };
 export type Conversation = { id: string; title: string; created_at: string };
+export type MemoryAction = { id: string; fact: string; status: "pending" | "saving" | "complete" | "failed"; memory_id: string | null; message_id: string; conversation_id: string; error: string | null; created_at: string };
 export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  status: "generating" | "complete" | "stopped" | "failed";
+  status: "generating" | "paused" | "complete" | "stopped" | "failed";
+  memory_action: MemoryAction | null;
+  budget_pause: { detail: string; operation_id: string; pause_id: string } | null;
   reply_to: string | null;
   error: string | null;
   created_at: string;

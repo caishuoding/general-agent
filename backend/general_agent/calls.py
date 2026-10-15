@@ -46,9 +46,9 @@ class BoundCalls:
         else:
             budget.record(call_id, TokenUsage(), "complete")
 
-    def complete(self, settings: StoredSettings, messages: list[dict[str, str]]) -> Completion:
-        """检查预算并记录同步文字请求的实际用量后返回回答。"""
-        with self.call(settings, "chat_tokens") as call_id:
+    def complete(self, settings: StoredSettings, messages: list[dict[str, str]], reserved: UUID | None = None) -> Completion:
+        """复用可选首步预留，检查预算并记录同步文字请求的实际用量。"""
+        with self.call(settings, "chat_tokens", reserved) as call_id:
             result = self.gateway.provider.complete(settings, messages)
             self.gateway.budget.record(call_id, result.usage)
             return result
@@ -60,9 +60,9 @@ class BoundCalls:
             self.gateway.budget.record(call_id, usage)
             return usage
 
-    def embed(self, settings: StoredEmbeddingSettings, texts: list[str]) -> Embedding:
-        """按一次批量嵌入 HTTP 调用记录输入用量，缺少输出用量不会误判嵌入费用。"""
-        with self.call(settings, "embedding_tokens") as call_id:
+    def embed(self, settings: StoredEmbeddingSettings, texts: list[str], reserved: UUID | None = None) -> Embedding:
+        """复用可选首步预留，按实际批量嵌入记录输入用量，不要求不存在的输出用量。"""
+        with self.call(settings, "embedding_tokens", reserved) as call_id:
             result = self.gateway.provider.embed(settings, texts)
             self.gateway.budget.record(call_id, result.usage)
             return result

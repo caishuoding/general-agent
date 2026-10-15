@@ -1,7 +1,10 @@
 name: general-agent
 services:
   db:
-    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    image: general-agent-postgres:17-vector0.8.7
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
     environment:
       POSTGRES_USER: general_agent
       POSTGRES_PASSWORD: local-development-only

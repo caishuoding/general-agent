@@ -824,3 +824,21 @@ td {
 .price-fields legend { font-weight: 600; }
 .price-fields .field-help { overflow-wrap: anywhere; }
 .usage-purpose { display: block; color: #68716a; font-size: 11px; }
+
+.memory-management { padding: 48px max(28px, calc((100% - 880px) / 2)); }
+.memory-management h2 { font-size: 28px; font-weight: 500; margin: 10px 0; }
+.memory-intro, .memory-empty { color: #6d756c; margin-bottom: 22px; }
+.memory-list { display: grid; gap: 16px; margin-top: 20px; }
+.memory-entry { padding: 24px; border: 1px solid #dfe4d9; border-radius: 14px; background: #fffefa; }
+.memory-status { color: #796341; font-size: 12px; margin-bottom: 8px; }
+.memory-status.complete { color: #426348; }
+.memory-fact { font-size: 17px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.memory-source { display: flex; gap: 16px; justify-content: space-between; flex-wrap: wrap; margin-top: 20px; color: #70796e; }
+.memory-source button { color: #426348; text-decoration: underline; }
+.memory-entry time { font-size: 12px; color: #879082; }
+.memory-action { margin-top: 14px; padding: 10px 14px; background: #f3f2e9; border-radius: 8px; font-size: 13px; }
+.memory-action.complete { background: #edf4e9; color: #46634a; }
+.memory-action.failed { color: #925543; }
+.run-budget { margin-top: 16px; padding: 16px; border: 1px solid #d7caa7; border-radius: 10px; background: #faf5e8; }
+.run-budget .retry-button { margin-right: 10px; }
+.source-highlight { outline: 2px solid #bdcdb6; outline-offset: 8px; border-radius: 10px; }

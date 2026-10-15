@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -22,6 +23,8 @@ from general_agent.budget import BudgetInput, BudgetPaused, BudgetService, Opera
 from general_agent.calls import CallGateway
 from general_agent.capabilities import Capability, CapabilityResult, CapabilityService
 from general_agent.chat import ChatService
+from general_agent.execution import ChatExecution
+from general_agent.memory import MemoryService
 from general_agent.database import Database
 from general_agent.embedding import EmbeddingConfiguration, EmbeddingIndexConflict
 from general_agent.provider import ModelClient, ModelFailure
@@ -53,6 +56,8 @@ class Message(BaseModel):
     created_at: datetime
     reply_to: UUID | None = None
     error: str | None = None
+    memory_action: dict[str, Any] | None = None
+    budget_pause: dict[str, str] | None = None
 
 
 class ConversationDetail(Conversation):
@@ -90,9 +95,11 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     embedding_configuration = EmbeddingConfiguration(database, embedding_settings)
     budget = BudgetService(database)
     model = CallGateway(budget, ModelClient(model_transport))
-    chat = ChatService(database, model)
+    memory = MemoryService(database, embedding_configuration, model, settings.directory)
+    execution = ChatExecution(model, memory)
+    chat = ChatService(database, model, execution)
     capabilities = CapabilityService(database, model, settings, embedding_settings)
-    streaming = StreamingChat(database, model)
+    streaming = StreamingChat(database, model, execution)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -170,6 +177,32 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         except ValueError as error:
             raise HTTPException(409, str(error)) from None
 
+    def perform_run(purpose: str, scope: object, operation_id: UUID | None, conversation_id: UUID, action: Callable[[OperationContext], None], status: int = 202) -> JSONResponse:
+        """幂等受理仅关联稳定回答身份，初始 202 不会冻结后续预算批准或最终结果。"""
+        try:
+            with budget.operation(purpose, scope, operation_id, conversation_id) as (operation, previous):
+                with database.connect() as connection:
+                    existing = connection.execute('SELECT id FROM messages WHERE operation_id=%s', (operation.operation_id,)).fetchone()
+                if existing is None:
+                    action(operation)
+                return JSONResponse(get_conversation(conversation_id).model_dump(mode='json'),status_code=status)
+        except ModelFailure as error:
+            return JSONResponse({'detail':str(error)},status_code=502)
+        except BudgetPaused as paused:
+            return JSONResponse(paused.public(),status_code=402)
+        except LookupError as error:
+            raise HTTPException(404,str(error)) from None
+        except ValueError as error:
+            raise HTTPException(409,str(error)) from None
+
+    @app.get('/api/memories')
+    def list_memories() -> list[dict[str, Any]]:
+        """展示明确批准事实、原始会话与消息来源，以及实际保存状态。"""
+        try:
+            return memory.list()
+        except Exception:
+            raise HTTPException(503,'记忆存储暂时不可读取，请检查 PostgreSQL/pgvector 后重试。') from None
+
     @app.post("/api/settings/capabilities/{capability}")
     def check_capability(capability: Capability, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
         """将能力检查绑定到配置版本，暂停批准只恢复同一个能力和配置。"""
@@ -210,6 +243,10 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     def cancel_operation(operation_id: UUID) -> dict[str, str]:
         """撤回该操作后续调用许可，已经发生的用量仍可继续记录。"""
         budget.cancel(OperationContext(operation_id, ""))
+        with database.connect() as connection:
+            row = connection.execute('SELECT id,conversation_id FROM messages WHERE operation_id=%s',(operation_id,)).fetchone()
+        if row:
+            streaming.stop(row['conversation_id'],row['id'])
         return {"status": "cancelled"}
 
     @app.get("/api/settings/embedding", response_model=PublicEmbeddingSettings)
@@ -247,29 +284,27 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.post("/api/conversations/{conversation_id}/messages")
     def send_message(conversation_id: UUID, body: MessageInput, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
-        """同步对话也经过操作范围校验和预算网关，重复提交复用已保存结果。"""
+        """同步入口执行共同动作并读取真实结果；重复提交只读取原尝试。"""
         saved = settings.read()
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
 
-        def send(operation: OperationContext) -> BaseModel:
+        def send(operation: OperationContext) -> None:
             """在同一操作中完成同步回答及公开会话读取。"""
             chat.send(conversation_id, body.content, saved, operation)
-            return get_conversation(conversation_id)
-        return perform("chat", [body.content, saved.revision], operation_id, conversation_id, send)
+        return perform_run("chat", execution.scope(body.content,saved), operation_id, conversation_id, send, 200)
 
     @app.post("/api/conversations/{conversation_id}/runs", status_code=202)
     def start_stream(conversation_id: UUID, body: MessageInput, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
-        """启动前预留一次可计量调用，预算暂停时不会保存未发送的消息。"""
+        """只预留本次执行的真实首步，后续步骤暂停通过持久化答案快照恢复。"""
         saved = settings.read()
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
 
-        def start(operation: OperationContext) -> BaseModel:
+        def start(operation: OperationContext) -> None:
             """把显式操作传给后台线程，使停止和用量收尾仍属于同一执行。"""
             streaming.start(conversation_id, body.content, saved, operation)
-            return get_conversation(conversation_id)
-        return perform("chat_stream", [body.content, saved.revision], operation_id, conversation_id, start, 202)
+        return perform_run("chat_stream", execution.scope(body.content,saved), operation_id, conversation_id, start)
 
     @app.post("/api/conversations/{conversation_id}/messages/{message_id}/retry", status_code=202)
     def retry_stream(conversation_id: UUID, message_id: UUID, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
@@ -278,11 +313,29 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
 
-        def retry(operation: OperationContext) -> BaseModel:
+        def retry(operation: OperationContext) -> None:
             """仅为当前会话允许重试的原回答创建一个新尝试。"""
             streaming.retry(conversation_id, message_id, saved, operation)
-            return get_conversation(conversation_id)
-        return perform("chat_retry", [str(message_id), saved.revision], operation_id, conversation_id, retry, 202)
+        try:
+            source = streaming.message(conversation_id,message_id)
+        except LookupError as error:
+            raise HTTPException(404,str(error)) from None
+        with database.connect() as connection:
+            original = connection.execute('SELECT content FROM messages WHERE id=%s',(source['reply_to'],)).fetchone()
+        scope = [str(message_id), execution.scope(str(original['content']) if original else '',saved)]
+        return perform_run("chat_retry", scope, operation_id, conversation_id, retry)
+
+    @app.post('/api/conversations/{conversation_id}/messages/{message_id}/resume', response_model=ConversationDetail)
+    def resume_stream(conversation_id: UUID, message_id: UUID) -> ConversationDetail:
+        """继续同一预算暂停步骤，读取当前配置但不挪用旧批准到新模型。"""
+        saved = settings.read()
+        if saved is None:
+            raise HTTPException(409,'请先在设置中配置模型。')
+        try:
+            streaming.resume(conversation_id,message_id,saved)
+        except ValueError as error:
+            raise HTTPException(409,str(error)) from None
+        return get_conversation(conversation_id)
 
     @app.post("/api/conversations/{conversation_id}/messages/{message_id}/stop", response_model=ConversationDetail)
     def stop_stream(conversation_id: UUID, message_id: UUID) -> ConversationDetail:
