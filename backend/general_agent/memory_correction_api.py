@@ -1,6 +1,5 @@
 """管理页明确编辑入口，操作批准绑定条目、版本、正文和嵌入配置。"""
 
-from typing import Any
 from uuid import UUID, uuid5
 
 from fastapi import APIRouter, Header, HTTPException
