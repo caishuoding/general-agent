@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import psycopg
 from psycopg.rows import dict_row
@@ -54,16 +54,19 @@ class Database:
             return row
 
     def decorate_message(self, row: dict[str, Any]) -> dict[str, Any]:
-        """补齐附件及真实记忆保存、更正状态，停止或失败不会抹去已完成动作。"""
+        """补齐附件、候选发现及真实记忆保存更正状态，停止或失败不抹去完成步骤。"""
         with self.connect() as connection:
             row['attachment_ids'] = [item['attachment_id'] for item in connection.execute('SELECT attachment_id FROM message_attachments WHERE message_id=%s ORDER BY attachment_id', (row['id'],)).fetchall()]
         if row['role'] == 'assistant' and row.get('reply_to'):
             with self.connect() as connection:
-                row['memory_action'] = connection.execute('SELECT * FROM memory_actions WHERE message_id=%s', (row['reply_to'],)).fetchone()
+                row['memory_action'] = connection.execute('SELECT * FROM memory_actions WHERE id=%s', (uuid5(row['reply_to'],'explicit-memory:0'),)).fetchone()
         else:
             row['memory_action'] = None
         with self.connect() as connection:
-            row['memory_update'] = connection.execute('SELECT * FROM memory_updates WHERE source_message_id=%s',(row.get('reply_to'),)).fetchone() if row['role']=='assistant' else None
+            connection.execute("UPDATE memory_candidates SET status='expired',error='候选已过期，请重新明确具体事实。' WHERE source_message_id=%s AND status IN ('pending','paused','failed') AND expires_at<=CURRENT_TIMESTAMP",(row.get('reply_to'),))
+            row['memory_candidates'] = connection.execute('SELECT * FROM memory_candidates WHERE source_message_id=%s ORDER BY created_at,id',(row.get('reply_to'),)).fetchall() if row['role']=='assistant' else []
+            row['memory_discovery'] = connection.execute('SELECT status,error FROM memory_discoveries WHERE message_id=%s',(row.get('reply_to'),)).fetchone() if row['role']=='assistant' else None
+            row['memory_update'] = connection.execute('SELECT * FROM memory_updates WHERE id=%s',(uuid5(row['reply_to'],'explicit-correction:0'),)).fetchone() if row['role']=='assistant' and row.get('reply_to') else None
             row['memory_recall'] = connection.execute('SELECT status,match_count AS count,detail FROM memory_recalls WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
         return row
 

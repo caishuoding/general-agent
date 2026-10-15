@@ -20,11 +20,12 @@ import {
 import { AttachmentPanel } from "./AttachmentPanel";
 import { BudgetPrompt } from "./BudgetPrompt";
 import { SettingsPanel } from "./SettingsPanel";
+import { MemoryCandidates } from "./MemoryCandidates";
 import { MemoryPanel } from "./MemoryPanel";
 
 type Screen = "chat" | "settings" | "memory";
 
-// 展示会话、记忆动作、资料出处及预算执行状态，并隔离过期异步响应。
+// 展示会话、记忆候选与正式动作、资料出处及预算状态，并隔离过期异步响应。
 export function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(
@@ -328,6 +329,14 @@ export function App() {
     }
   }
 
+  // 候选操作后读取当前会话，保留草稿并防止切换后的旧结果覆盖新会话。
+  async function refreshConversation() {
+    const id = activeId.current;
+    if (!id) return;
+    const result = await api<ConversationDetail>(`/conversations/${id}`);
+    if (activeId.current === id) setConversation(result);
+  }
+
   // 将每个会话渲染为可访问的切换按钮。
   function renderConversation(item: Conversation) {
     return (
@@ -351,7 +360,7 @@ export function App() {
     return <details className="file-citation" key={citation.key} open><summary>[{citation.key}] <a href={`/api/conversations/${conversation?.id}/attachments/${citation.attachment_id}/file`} download>{citation.filename} · {citation.location}</a></summary><blockquote>{citation.excerpt}</blockquote></details>;
   }
 
-  // 展示回答、真实记忆召回及保存更正状态、预算暂停和可信出处，保留停止及重试入口。
+  // 展示回答、候选确认、正式记忆状态、预算暂停和可信出处，保留停止及重试入口。
   function renderMessage(message: Message) {
     return (
       <article
@@ -376,6 +385,7 @@ export function App() {
         {message.memory_action && <div className={`memory-action ${message.memory_action.status}`} role="status">
           {message.memory_action.status === "complete" ? `已保存 · ${message.memory_action.fact}` : message.memory_action.status === "failed" ? `记忆保存未完成 · ${message.memory_action.error || "可以重试核对。"}` : "记忆正在处理，尚未确认保存。"}
         </div>}
+        {message.role === "assistant" && conversation && <MemoryCandidates message={message} conversationId={conversation.id} onChanged={refreshConversation} />}
         {message.status === "paused" && message.budget_pause && <section className="run-budget" aria-label="回答等待预算">
           <strong>后续云端请求已暂停</strong><p>{message.budget_pause.detail}</p><p>已完成的记忆操作会保留。批准仅允许下一次调用。</p>
           <button className="retry-button" data-action="resume" data-approve="true" data-message={message.id} onClick={changeRun} disabled={changingRun}>仅允许下一次云端调用并继续</button>

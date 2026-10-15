@@ -54,13 +54,13 @@ class MemoryCorrection:
         return row
 
     def chat(self, content: str, message_id: UUID, conversation_id: UUID, operation: OperationContext) -> str:
-        """先恢复原消息更正，否则只接受明确标识或唯一完整旧事实，并记录新消息来源。"""
+        """只恢复原消息的明确更正身份；候选更正独立，目标仍须明确标识或唯一完整旧事实。"""
         intent=correction_intent(content)
         assert intent is not None
         if not intent.target:
             return '请指定具体记忆和新事实，例如“更正记忆：我住在杭州 => 我住在苏州”，或在长期记忆页面编辑。'
         with self.database.connect() as connection:
-            previous=connection.execute('SELECT * FROM memory_updates WHERE source_message_id=%s',(message_id,)).fetchone()
+            previous=connection.execute('SELECT * FROM memory_updates WHERE id=%s',(uuid5(message_id,'explicit-correction:0'),)).fetchone()
             if previous:
                 entry_id,version=previous['action_id'],previous['target_version']-1
             else:

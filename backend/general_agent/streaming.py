@@ -27,13 +27,16 @@ class StreamingChat:
         self.lock = Lock()
 
     def recover(self) -> None:
-        """撤销中断尝试的后续动作，保留暂停步骤，保存和更正均按未完成状态重试核对。"""
+        """撤销中断尝试，保留预算暂停；记忆提交和候选发现按未完成状态供显式重试。"""
         with self.database.connect() as connection:
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE,approved=FALSE WHERE id IN (SELECT operation_id FROM messages WHERE status='generating')")
             connection.execute("UPDATE messages SET status = 'failed', error = '应用重启中断了回答，可以重试。' WHERE status = 'generating'")
             connection.execute("UPDATE model_calls SET status = 'failed',finished_at=CURRENT_TIMESTAMP WHERE status = 'generating'")
             connection.execute("UPDATE model_calls SET finished_at=CURRENT_TIMESTAMP WHERE status = 'stopped' AND finished_at IS NULL")
             connection.execute("UPDATE model_calls SET status = 'cancelled',finished_at=CURRENT_TIMESTAMP WHERE status = 'reserved'")
+            connection.execute("UPDATE cloud_operations SET cancelled=TRUE,approved=FALSE WHERE id IN (SELECT operation_id FROM memory_candidate_operations JOIN memory_candidates ON candidate_id=memory_candidates.id WHERE status='saving') OR id IN (SELECT operation_id FROM memory_discoveries WHERE status='pending') AND pause_id IS NULL")
+            connection.execute("UPDATE memory_candidates SET status='failed',error='应用重启中断了候选提交，请重试核对已有写入。' WHERE status='saving'")
+            connection.execute("UPDATE memory_discoveries SET status='failed',error='应用重启中断了候选识别，可以重试。' WHERE status='pending' AND operation_id IN (SELECT id FROM cloud_operations WHERE cancelled)")
             connection.execute("UPDATE memory_updates SET status='failed',error='应用重启中断了更正，请重试核对已有写入。' WHERE status='saving'")
             connection.execute("UPDATE memory_actions SET status='failed',error='应用重启中断了记忆同步，请重试核对已有写入。' WHERE status='saving'")
 
@@ -89,13 +92,13 @@ class StreamingChat:
         return new_id
 
     def execute(self, conversation_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
-        """完成当前可信动作后核验实际读图、准备记忆及资料；暂停重用记忆检查点并重核出处。"""
+        """执行当前授权和候选发现，再核验读图及相关记忆资料；暂停复用已完成步骤。"""
         material = AttachmentContext()
         failure: str | None = None
         try:
             with self.database.connect() as connection:
                 rows = connection.execute("SELECT role, content FROM messages WHERE conversation_id = %s AND status = 'complete' AND position <= (SELECT position FROM messages WHERE id = %s) ORDER BY position", (conversation_id, user_id)).fetchall()
-            local = self.execution.prepare(conversation_id, user_id, str(rows[-1]['content']), operation, call_id)
+            local = self.execution.prepare(conversation_id, user_id, str(rows[-1]['content']), operation, call_id, settings)
             if local is not None:
                 with self.database.connect() as connection:
                     connection.execute("UPDATE messages SET content=%s WHERE id=%s AND status='generating'", (local,message_id))

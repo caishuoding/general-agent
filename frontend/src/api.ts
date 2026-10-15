@@ -6,6 +6,7 @@ export type Settings = {
 export type Conversation = { id: string; title: string; created_at: string };
 export type MemoryAction = { id: string; fact: string; status: "pending" | "saving" | "complete" | "failed"; memory_id: string | null; message_id: string; conversation_id: string; error: string | null; created_at: string };
 export type MemoryUpdate = { id: string; action_id: string; fact: string; status: "pending" | "saving" | "complete" | "failed"; error: string | null; target_version: number; source_kind: "management" | "chat"; source_message_id: string | null; source_conversation_id: string | null; conversation_title?: string | null };
+export type MemoryCandidate = { id: string; fact: string; subject: "user"; source_message_id: string; source_conversation_id: string; source_quote: string; target_id: string | null; target_version: number | null; target_fact: string | null; status: "pending" | "saving" | "paused" | "failed" | "confirmed" | "rejected" | "expired"; approved_at: string | null; expires_at: string; error: string | null };
 export type DocumentParseInfo = { format?: string; total_units?: number; readable_units?: number; coverage?: string; missing_units?: string[]; limitations?: string[] };
 export type Attachment = { id: string; filename: string; size: number; status: "processing" | "ready" | "failed"; error: string | null; parse_info?: DocumentParseInfo; image_metadata: { format: string; mime: string; width: number; height: number } | null };
 export type FileCitation = { key: string; attachment_id: string; filename: string; location: string; excerpt: string };
@@ -16,6 +17,8 @@ export type Message = {
   status: "generating" | "paused" | "complete" | "stopped" | "failed";
   memory_action: MemoryAction | null;
   memory_update: MemoryUpdate | null;
+  memory_candidates: MemoryCandidate[];
+  memory_discovery: { status: "pending" | "complete" | "failed"; error: string | null } | null;
   memory_recall: { status: "pending" | "complete" | "failed" | "skipped" | "unavailable"; count: number; detail: string } | null;
   budget_pause: { detail: string; operation_id: string; pause_id: string } | null;
   attachment_ids: string[];

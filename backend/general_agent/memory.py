@@ -41,9 +41,9 @@ class MemoryService:
             memory.close()
 
     def action(self, message_id: UUID) -> dict[str, Any] | None:
-        """返回原用户消息的真实保存状态，重复回答不生成第二个业务身份。"""
+        """只返回原用户明确保存动作，候选确认的多个独立身份不会混入回答重试。"""
         with self.database.connect() as connection:
-            return connection.execute('SELECT * FROM memory_actions WHERE message_id=%s', (message_id,)).fetchone()
+            return connection.execute('SELECT * FROM memory_actions WHERE id=%s', (uuid5(message_id,'explicit-memory:0'),)).fetchone()
 
     def list(self) -> list[dict[str, Any]]:
         """展示原来源与更正来源；只有已完整提交的事实才从正式存储核验。"""
@@ -66,14 +66,14 @@ class MemoryService:
                         row['fact'] = entry['memory']
         return rows
 
-    def save(self, conversation_id: UUID, message_id: UUID, fact: str, operation: OperationContext, reserved: UUID | None = None) -> dict[str, Any]:
-        """先登记批准动作；复用或修复已落向量，防止历史失败后盲目重复 add。"""
-        action_id = uuid5(message_id, 'explicit-memory:0')
+    def save(self, conversation_id: UUID, message_id: UUID, fact: str, operation: OperationContext, reserved: UUID | None = None, action_id: UUID | None = None) -> dict[str, Any]:
+        """以明确动作或候选身份登记批准；复用部分提交向量，并允许同来源多个独立事实。"""
+        action_id = action_id or uuid5(message_id, 'explicit-memory:0')
         with self.database.connect() as lock:
             lock.autocommit = True
             lock.execute('SELECT pg_advisory_lock(%s)', (action_id.int % (2**63 - 1),))
-            lock.execute("INSERT INTO memory_actions(id,message_id,conversation_id,operation_id,fact,status) VALUES(%s,%s,%s,%s,%s,'pending') ON CONFLICT(message_id) DO NOTHING", (action_id,message_id,conversation_id,operation.operation_id,fact))
-            existing = self.action(message_id)
+            lock.execute("INSERT INTO memory_actions(id,message_id,conversation_id,operation_id,fact,status) VALUES(%s,%s,%s,%s,%s,'pending') ON CONFLICT(id) DO NOTHING", (action_id,message_id,conversation_id,operation.operation_id,fact))
+            existing = lock.execute('SELECT * FROM memory_actions WHERE id=%s',(action_id,)).fetchone()
             assert existing is not None
             if existing['fact'] != fact:
                 raise ValueError('保存内容与原批准不一致，请重新明确具体事实。')
@@ -105,6 +105,6 @@ class MemoryService:
                 detail = str(error) if isinstance(error, (ModelFailure, ValueError)) else '记忆保存未完成，请重试；重试会先核对已有写入。'
                 lock.execute("UPDATE memory_actions SET status='failed',error=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s", (detail,action_id))
                 raise ValueError(detail) from None
-            result = self.action(message_id)
+            result = lock.execute('SELECT * FROM memory_actions WHERE id=%s',(action_id,)).fetchone()
             assert result is not None
             return result
