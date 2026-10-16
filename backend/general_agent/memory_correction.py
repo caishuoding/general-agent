@@ -74,8 +74,8 @@ class MemoryCorrection:
         result=self.apply(entry_id,intent.fact,version,uuid5(message_id,'explicit-correction:0'),operation,message_id,conversation_id)
         return '已更正长期记忆：'+str(result['fact'])
 
-    def apply(self, action_id: UUID, fact: str, expected_version: int, identifier: UUID, operation: OperationContext, source_message_id: UUID | None = None, source_conversation_id: UUID | None = None) -> dict[str, Any]:
-        """先取得空间租约并拒绝维护期写入，再接受新版本；租约覆盖 SDK 与成功发布。"""
+    def apply(self, action_id: UUID, fact: str, expected_version: int, identifier: UUID, operation: OperationContext, source_message_id: UUID | None = None, source_conversation_id: UUID | None = None, cached: dict[str, list[float]] | None = None) -> dict[str, Any]:
+        """按版本更新并支持原生已计量向量，空间租约覆盖 SDK 写入及来源核验。"""
         with self.memory.embedding.spaces.lease(), self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(action_id.int % (2**63-1),))
@@ -106,7 +106,7 @@ class MemoryCorrection:
                 lock.execute("UPDATE memory_updates SET status='saving',operation_id=%s,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status<>'deleted'",(operation.operation_id,identifier))
                 lock.execute("UPDATE memory_actions SET status='saving',error='正在同步更正，旧事实已停止召回。' WHERE id=%s AND status NOT IN ('deleting','deleted')",(action_id,))
                 settings=self.memory.embedding.verified(leased=True)
-                with self.memory.session(settings,operation) as sdk:
+                with self.memory.session(settings,operation,cached=cached) as sdk:
                     current=sdk.get(str(entry['memory_id']))
                     if current is None or current.get('user_id')!='local-person':
                         raise ValueError('原正式记忆不存在或身份不符，未更正。')

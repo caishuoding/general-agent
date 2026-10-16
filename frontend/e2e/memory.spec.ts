@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-// 从真实聊天保存并在管理页核对来源，刷新后还能处理持久化预算暂停。
+// 从真实聊天明确保存，在新版管理页核对来源和持久化预算恢复。
 test("明确记忆、来源跳转和保存后的预算恢复", async ({ page }) => {
   const base = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18089"}/v1`;
   await page.request.put("/api/settings", { data: { base_url: base, model: "chat", api_key: "browser-test-only" } });
@@ -11,7 +11,7 @@ test("明确记忆、来源跳转和保存后的预算恢复", async ({ page }) 
   await page.getByRole("button", { name: "发送消息" }).click();
   await expect(page.getByText("已保存长期记忆：我喜欢简洁的中文回答", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "长期记忆", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "已批准的长期记忆" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "长期记忆" })).toBeVisible();
   await expect(page.getByTestId("memory-entry")).toHaveCount(1);
   await expect(page.getByTestId("memory-entry")).toContainText("我喜欢简洁的中文回答");
   await page.screenshot({ path: "test-results/memory-management.png", fullPage: true });

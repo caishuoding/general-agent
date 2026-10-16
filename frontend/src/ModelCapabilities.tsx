@@ -137,7 +137,7 @@ export function ModelCapabilities({ settings, onUsageChanged }: Props) {
   return <>
     <div className="settings-card">
       <div className="card-heading"><h3>嵌入连接</h3><span className="small-label">独立模型与维度</span></div>
-      <p className="field-help">嵌入服务用于已批准长期记忆；附件和历史消息采用本机文字检索。聊天模型不一定支持嵌入接口。</p>
+      <p className="field-help">嵌入服务用于长期记忆；Mem0 自动提取复用当前聊天模型。附件和历史消息采用本机文字检索。聊天模型不一定支持嵌入接口。</p>
       {embedding ? <form key={`${embedding.base_url}:${embedding.model}:${embedding.dimensions}`} onSubmit={saveEmbedding}>
         <label className="checkbox-field"><input type="checkbox" checked={reuse} onChange={changeReuse} disabled={!settings.api_key_configured || busy !== null} />复用已保存聊天服务的地址与密钥</label>
         <label htmlFor="embedding-base-url">嵌入 API 地址</label>

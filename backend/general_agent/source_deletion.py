@@ -78,9 +78,11 @@ class SourceDeletion:
         return self.resume(identifier)
 
     def invalidate(self, connection: Any, identifier: UUID) -> None:
-        """撤回来源关联的旧调用、候选与引用，不抹除单附件所属会话的已完成聊天正文。"""
+        """撤回来源关联的旧调用、自动记忆缓存及引用，保留单附件所属会话的已完成正文。"""
         row=connection.execute('SELECT * FROM source_deletions WHERE id=%s',(identifier,)).fetchone()
         message_ids=row['message_ids']
+        connection.execute('DELETE FROM memory_native_steps WHERE message_id=ANY(%s)',(message_ids,))
+        connection.execute("UPDATE memory_tool_runs SET result='{}' WHERE message_id=ANY(%s)",(message_ids,))
         operations={item['operation_id'] for item in connection.execute('SELECT operation_id FROM messages WHERE (id=ANY(%s) OR reply_to=ANY(%s)) AND operation_id IS NOT NULL',(message_ids,message_ids)).fetchall()}
         for table,column,ids in [('memory_candidate_operations','candidate_id',row['candidate_ids']),('memory_discovery_operations','message_id',message_ids)]:
             operations.update(item['operation_id'] for item in connection.execute(f'SELECT operation_id FROM {table} WHERE {column}=ANY(%s)',(ids,)).fetchall())

@@ -25,6 +25,7 @@ export type Message = {
   memory_update: MemoryUpdate | null;
   memory_candidates: MemoryCandidate[];
   memory_discovery: { status: "pending" | "complete" | "failed"; error: string | null } | null;
+  automatic_memory?: { status: string; detail: string } | null;
   memory_recall: { status: "pending" | "complete" | "failed" | "skipped" | "unavailable"; count: number; detail: string } | null;
   document_progress?: DocumentProcessing | null;
   budget_pause: { detail: string; operation_id: string; pause_id: string } | null;

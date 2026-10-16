@@ -19,6 +19,8 @@ from general_agent.summary import DocumentSummary, SummaryPreparation, summary_m
 from general_agent.attachments import AttachmentContext
 from general_agent.history import HistoryContext, HistorySearch, history_query
 from general_agent.search import SearchService, search_query
+from general_agent.native_memory import AutomaticMemory
+from general_agent.memory_tools import MemoryTools, memory_tool_intent
 
 
 @dataclass(frozen=True)
@@ -64,7 +66,7 @@ class ChatExecution:
     """共用批准动作和回答准备；传输、线程及答案尝试留给聊天入口。"""
 
     def __init__(self, calls: CallGateway, memory: MemoryService, search: SearchService) -> None:
-        """绑定共同动作与唯一材料路由，全文检查点和查询优先级由同步及流式入口共享。"""
+        """绑定自动记忆、工具和材料路由，所有聊天入口共用同一执行流程。"""
         self.calls, self.memory = calls, memory
         self.recall = MemoryRecall(memory)
         self.search = search
@@ -74,12 +76,15 @@ class ChatExecution:
         self.deletion = MemoryDeletion(memory)
         self.attachment_memory = AttachmentMemory(self.candidates, search.attachments)
         self.documents = DocumentSummary(memory.database,calls,search.attachments)
+        self.automatic = AutomaticMemory(memory)
+        self.memory_tools = MemoryTools(memory)
 
     def embedding_revision(self, content: str) -> str | None:
-        """本地删除与只读历史不绑定嵌入，其余记忆动作按配置版本约束暂停恢复。"""
-        if history_query(content) is not None or deletion_intent(content) is not None:
+        """本地删除和历史不绑定嵌入，自动记忆及工具恢复绑定当时配置。"""
+        deletion = deletion_intent(content)
+        if history_query(content) is not None or deletion is not None and deletion.target:
             return None
-        embedding = self.memory.embedding.store.read() if explicit_intent(content).fact or correction_intent(content) is not None or self.recall.available() else None
+        embedding = self.memory.embedding.store.read()
         return embedding.revision if embedding else None
 
     def same_embedding_revision(self, expected: str | None) -> bool:
@@ -93,7 +98,7 @@ class ChatExecution:
         return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
     def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """本地删除不申请预算，历史与附件候选先登记状态，其余预留真实首步。"""
+        """明确旧格式动作保留快捷路径，自动记忆与工具在各步骤申请真实预算。"""
         if history_query(content) is not None or deletion_intent(content) is not None or attachment_memory_intent(content):
             return None
         if correction_intent(content) is not None:
@@ -115,6 +120,8 @@ class ChatExecution:
             return self.calls.budget.reserve(operation, embedding, 'embedding_tokens')
         if candidate_eligible(content) or search_query(content):
             return None
+        if self.automatic.eligible(content) and self.memory.embedding.store.read() is not None or memory_tool_intent(content):
+            return None
         if self.recall.available():
             try:
                 embedding = self.memory.embedding.verified()
@@ -124,14 +131,16 @@ class ChatExecution:
         return None if summary_mode(content) else self.calls.budget.reserve(operation, settings)
 
     def prepare_answer(self, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None) -> list[ModelMessage]:
-        """提供正式相关记忆及候选授权提示；当前个人表达不得被回答模型声称为自动保存。"""
+        """提供正式相关记忆及原生自动处理结果，回答只能根据实际状态声称已记住。"""
         if explicit_intent(content).fact:
             return []
         with self.memory.database.connect() as connection:
             row=connection.execute('SELECT unit,status FROM model_calls WHERE id=%s',(reserved,)).fetchone() if reserved else None
         material=self.recall.prepare(user_id,content,operation,reserved,skip=bool(row and row['unit']=='chat_tokens'))
-        if candidate_eligible(content):
-            material.append({'role':'system','content':'当前用户消息的自动记忆识别仅能提出候选，不代表已保存或更正。不要声称自动记住了这条信息；是否写入长期记忆以应用确认卡片的真实状态为准，待确认候选需要用户点击批准。'})
+        with self.memory.database.connect() as connection:
+            native = connection.execute('SELECT status,detail FROM memory_native_runs WHERE message_id=%s', (user_id,)).fetchone()
+        if native:
+            material.append({'role':'system','content':'本次自动记忆真实状态：'+native['detail']+'。只有真实完成的变更才可声称已记住；不要要求逐条确认，也不要自行宣称其他记忆变化。'})
         return material
 
     def prepare_response(self, conversation_id: UUID, user_id: UUID, message_id: UUID, settings: StoredSettings, operation: OperationContext, reserved: UUID | None, rows: list[dict[str, Any]]) -> AnswerPreparation:
@@ -164,14 +173,16 @@ class ChatExecution:
         return reserved if row and row['unit']=='chat_tokens' and row['status']=='reserved' else None
 
     def prepare(self, conversation_id: UUID, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None, settings: StoredSettings | None = None) -> str | None:
-        """历史保持只读；本地删除优先，附件明确提取先预览，其余保存、更正及个人事实沿授权执行。"""
+        """保留明确动作快捷路径，记忆工具或 Mem0 处理普通聊天，资料总结不参与自动提取。"""
         if history_query(content) is not None:
             return None
-        if deletion_intent(content) is not None:
+        deletion = deletion_intent(content)
+        correction = correction_intent(content)
+        if deletion is not None and deletion.target:
             return self.deletion.chat(content,user_id)
         if attachment_memory_intent(content) and settings is not None:
             return self.attachment_memory.prepare(conversation_id,user_id,settings,operation)
-        if correction_intent(content) is not None:
+        if correction is not None and correction.target:
             return self.correction.chat(content,user_id,conversation_id,operation)
         intent = explicit_intent(content)
         if intent.clarification:
@@ -179,6 +190,15 @@ class ChatExecution:
         if intent.fact:
             saved = self.memory.save(conversation_id, user_id, intent.fact, operation, reserved)
             return None if intent.answer else '已保存长期记忆：' + str(saved['fact'])
-        if settings is not None:
-            self.candidates.discover(conversation_id,user_id,settings,operation)
+        if settings is not None and search_query(content) is None and summary_mode(content) is None:
+            if memory_tool_intent(content):
+                handled = self.memory_tools.prepare(conversation_id,user_id,content,settings,operation)
+                if handled is not None:
+                    return handled
+                if deletion is not None:
+                    return self.deletion.chat(content,user_id)
+                if correction is not None:
+                    return self.correction.chat(content,user_id,conversation_id,operation)
+            if self.automatic.eligible(content) and (self.memory.embedding.store.read() is not None or candidate_eligible(content)):
+                self.automatic.process(conversation_id,user_id,content,settings,operation)
         return None

@@ -56,7 +56,7 @@ class Database:
             return row
 
     def decorate_message(self, row: dict[str, Any]) -> dict[str, Any]:
-        """补齐附件人物预览、正式动作与真实来源；历史摘录每次从仍有效消息重建。"""
+        """补齐自动记忆、旧候选及真实来源状态，历史摘录只从仍有效消息重建。"""
         with self.connect() as connection:
             row['attachment_ids'] = [item['attachment_id'] for item in connection.execute('SELECT attachment_id FROM message_attachments WHERE message_id=%s ORDER BY attachment_id', (row['id'],)).fetchall()]
         if row['role'] == 'assistant' and row.get('reply_to'):
@@ -70,6 +70,7 @@ class Database:
             for candidate in row['memory_candidates']:
                 candidate['attachment_source']=connection.execute('SELECT * FROM attachment_memory_candidates WHERE candidate_id=%s',(candidate['id'],)).fetchone()
             row['memory_discovery'] = connection.execute('SELECT status,error FROM memory_discoveries WHERE message_id=%s',(row.get('reply_to'),)).fetchone() if row['role']=='assistant' else None
+            row['automatic_memory'] = connection.execute('SELECT status,detail FROM memory_native_runs WHERE message_id=%s',(row.get('reply_to'),)).fetchone() if row['role']=='assistant' else None
             row['memory_update'] = connection.execute('SELECT * FROM memory_updates WHERE id=%s',(uuid5(row['reply_to'],'explicit-correction:0'),)).fetchone() if row['role']=='assistant' and row.get('reply_to') else None
             row['search_action'] = connection.execute('SELECT id,query,status,error,revision,sources,purpose,expires_at FROM search_requests WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
             row['memory_recall'] = connection.execute('SELECT status,match_count AS count,detail FROM memory_recalls WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()

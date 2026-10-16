@@ -72,17 +72,17 @@ class MemoryDeletion:
                 connection.execute('INSERT INTO memory_delete_requests(message_id,action_id) VALUES(%s,%s)',(message_id,identifier))
         return str(self.delete(identifier)['detail'])
 
-    def delete(self, action_id: UUID) -> dict[str, Any]:
-        """先停用并清除业务正文，再取得空间及动作锁清所有登记集合和历史；失败保持可重试。"""
+    def delete(self, action_id: UUID, active_operation: UUID | None = None, expected_version: int | None = None) -> dict[str, Any]:
+        """停用并清全部副本；原生或工具删除保留当前执行身份，其他旧操作全部失效。"""
         with self.database.connect() as connection:
-            if not self.begin(connection,action_id):
+            if not self.begin(connection,action_id,active_operation,expected_version):
                 return self.result(action_id)
         with self.memory.embedding.spaces.lease(maintenance=True), self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(action_id.int % (2**63-1),))
             try:
                 with lock.transaction():
-                    self.clear_dependents(lock,action_id)
+                    self.clear_dependents(lock,action_id,active_operation)
                 self.purge_sdk(action_id)
                 with lock.transaction():
                     lock.execute("UPDATE memory_actions SET status='deleted',memory_id=NULL,fact='',error=NULL WHERE id=%s",(action_id,))
@@ -92,20 +92,22 @@ class MemoryDeletion:
                 raise ValueError('记忆清理未完成，请重试；该条目仍停止召回。') from None
         return self.result(action_id)
 
-    def begin(self, connection: Any, action_id: UUID) -> bool:
-        """在调用方事务内立即停用指定记忆；来源删除复用此边界，实际 SDK 清理由 delete 接续。"""
+    def begin(self, connection: Any, action_id: UUID, active_operation: UUID | None = None, expected_version: int | None = None) -> bool:
+        """事务内停用并清派生正文，允许发起删除的当前工具回合返回真实结果。"""
         entry=connection.execute('SELECT * FROM memory_actions WHERE id=%s FOR UPDATE',(action_id,)).fetchone()
         if entry is None:
             raise LookupError('记忆条目不存在。')
         if entry['status']=='deleted':
             return False
+        if expected_version is not None and entry['status'] != 'deleting' and entry['version'] != expected_version:
+            raise ValueError('记忆版本已变化，未删除；请重新查找具体条目。')
         connection.execute("INSERT INTO memory_deletions(action_id,status,memory_ids) VALUES(%s,'pending',%s) ON CONFLICT(action_id) DO UPDATE SET status='pending',error=NULL,updated_at=CURRENT_TIMESTAMP",(action_id,[entry['memory_id']] if entry['memory_id'] else []))
         connection.execute("UPDATE memory_actions SET status='deleting',fact='',version=version+CASE WHEN status='deleting' THEN 0 ELSE 1 END,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s",(action_id,))
-        self.clear_dependents(connection,action_id)
+        self.clear_dependents(connection,action_id,active_operation)
         return True
 
-    def clear_dependents(self, connection: Any, action_id: UUID) -> None:
-        """在停用事务内清正文、全部旧许可及派生结果；同源其他事实保持独立。"""
+    def clear_dependents(self, connection: Any, action_id: UUID, active_operation: UUID | None = None) -> None:
+        """清正文、旧许可及原生缓存，原来源标记为已忘记；当前删除回合仅保留执行身份。"""
         action=connection.execute('SELECT message_id,operation_id FROM memory_actions WHERE id=%s',(action_id,)).fetchone()
         updates=connection.execute('SELECT * FROM memory_updates WHERE action_id=%s',(action_id,)).fetchall()
         sources=({action['message_id']} if action['message_id'] else set()) | {row['source_message_id'] for row in updates if row['source_message_id']}
@@ -122,6 +124,14 @@ class MemoryDeletion:
         operations.update(row['operation_id'] for row in recalls)
         searches=connection.execute("SELECT operation_id FROM search_requests WHERE sources @> %s",(Jsonb([{'kind':'memory','id':str(action_id)}]),)).fetchall()
         operations.update(row['operation_id'] for row in searches)
+        observed = connection.execute('SELECT message_id FROM memory_tool_observations WHERE action_id=%s',(action_id,)).fetchall()
+        observed_sources = sources | {row['message_id'] for row in observed}
+        operations.update(row['operation_id'] for row in connection.execute('SELECT operation_id FROM memory_tool_runs WHERE message_id=ANY(%s)',(list(observed_sources),)).fetchall())
+        operations.update(row['operation_id'] for row in connection.execute('SELECT operation_id FROM memory_native_runs WHERE message_id=ANY(%s)',(list(observed_sources),)).fetchall())
+        connection.execute('DELETE FROM memory_native_steps WHERE message_id=ANY(%s)',(list(observed_sources),))
+        connection.execute("UPDATE memory_native_runs SET status='skipped',detail='相关长期记忆已忘记；本次旧输入不再自动提取。' WHERE message_id=ANY(%s)",(list(sources),))
+        connection.execute("UPDATE memory_tool_runs SET result='{}' WHERE message_id=ANY(%s)",(list(observed_sources),))
+        operations.discard(active_operation)
         jobs=[row['document_job_id'] for row in connection.execute('SELECT DISTINCT document_job_id FROM messages WHERE operation_id=ANY(%s) AND document_job_id IS NOT NULL',(list(operations),)).fetchall()]
         operations.update(row['operation_id'] for row in connection.execute('SELECT operation_id FROM messages WHERE document_job_id=ANY(%s) AND operation_id IS NOT NULL',(jobs,)).fetchall())
         connection.execute("UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,approved=FALSE,result=NULL,response_status=NULL,pause_id=NULL,reason=NULL WHERE id=ANY(%s)",(list(operations),))

@@ -29,6 +29,7 @@ from general_agent.capabilities import Capability, CapabilityResult, CapabilityS
 from general_agent.chat import ChatService
 from general_agent.execution import ChatExecution
 from general_agent.memory import MemoryService
+from general_agent.native_memory_api import native_memory_router
 from general_agent.memory_deletion_api import deletion_router
 from general_agent.memory_candidates_api import candidates_router
 from general_agent.memory_correction import MemoryCorrection
@@ -70,6 +71,7 @@ class Message(BaseModel):
     error: str | None = None
     memory_candidates: list[dict[str, Any]] = Field(default_factory=list)
     memory_discovery: dict[str, Any] | None = None
+    automatic_memory: dict[str, Any] | None = None
     memory_action: dict[str, Any] | None = None
     memory_update: dict[str, Any] | None = None
     memory_recall: dict[str, Any] | None = None
@@ -109,7 +111,7 @@ class UsageRecord(BaseModel):
 
 
 def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None) -> FastAPI:
-    """创建聊天、资料、搜索与可恢复来源删除应用，测试可指定隔离数据库、目录和 HTTP 替身。"""
+    """创建聊天、自动记忆和资料应用，测试可指定隔离数据库、目录及模型 HTTP 替身。"""
     database = Database(database_url or os.environ.get(
         "DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/general_agent"
     ))
@@ -147,6 +149,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     app.include_router(source_deletion_router(source_deletion))
     app.include_router(correction_router(MemoryCorrection(memory)))
     app.include_router(candidates_router(execution.candidates,settings,execution.attachment_memory))
+    app.include_router(native_memory_router(execution.automatic,settings))
     app.include_router(deletion_router(execution.deletion))
     app.state.calls = model
     app.state.budget = budget

@@ -41,7 +41,7 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
   ).toBeVisible();
   await page.getByRole("button", { name: "长期记忆", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "已批准的长期记忆" }),
+    page.getByRole("heading", { name: "长期记忆", exact: true }),
   ).toBeVisible();
 });
 

@@ -4,7 +4,7 @@ import os
 from collections.abc import Iterator, Callable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, List
 from uuid import UUID, uuid5
 
 from general_agent.budget import BudgetPaused, OperationContext
@@ -15,7 +15,7 @@ from general_agent.provider import ModelFailure
 from general_agent.settings import StoredEmbeddingSettings
 
 if TYPE_CHECKING:
-    from general_agent.mem0_adapter import PgMemory
+    from general_agent.mem0_adapter import NativeMutations, PgMemory
 
 
 class MemoryService:
@@ -26,8 +26,8 @@ class MemoryService:
         self.database, self.embedding, self.calls, self.directory = database, embedding, calls, directory
 
     @contextmanager
-    def session(self, settings: StoredEmbeddingSettings, operation: OperationContext | None = None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None, collection: str | None = None) -> Iterator['PgMemory']:
-        """按受控空间打开 SDK，租约覆盖真实读写；业务写入另保持租约至发布结束。"""
+    def session(self, settings: StoredEmbeddingSettings, operation: OperationContext | None = None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None, collection: str | None = None, llm: Any = None, mutations: 'NativeMutations | None' = None, cached: dict[str, list[float]] | None = None) -> Iterator['PgMemory']:
+        """打开受控 SDK 会话，可注入原生推理与动作记录，租约覆盖真实读写。"""
         os.environ['MEM0_TELEMETRY'] = 'False'
         os.environ['MEM0_DIR'] = str(self.directory / 'mem0-runtime')
         from general_agent.mem0_adapter import PgMemory
@@ -36,7 +36,7 @@ class MemoryService:
             with self.database.connect() as connection:
                 connection.autocommit = True
                 connection.execute('SELECT pg_advisory_lock(91402705)')
-                memory = PgMemory(self.database, settings, self.calls.bind(operation) if operation else None, reserved,before_write,physical)
+                memory = PgMemory(self.database, settings, self.calls.bind(operation) if operation else None, reserved,before_write,physical,llm,mutations,cached)
             try:
                 yield memory
             finally:
@@ -104,8 +104,8 @@ class MemoryService:
         if active is None or active['cancelled'] or active['invalidated']:
             raise ValueError('操作已停止或来源已删除，旧批准不能继续提交。')
 
-    def save(self, conversation_id: UUID, message_id: UUID, fact: str, operation: OperationContext, reserved: UUID | None = None, action_id: UUID | None = None, validate_source: Callable[[], None] | None = None) -> dict[str, Any]:
-        """按稳定身份核对部分提交；空间租约覆盖注册至发布，先拒绝维护期新写入，删除墓碑优先。"""
+    def save(self, conversation_id: UUID, message_id: UUID, fact: str, operation: OperationContext, reserved: UUID | None = None, action_id: UUID | None = None, validate_source: Callable[[], None] | None = None, cached: dict[str, List[float]] | None = None) -> dict[str, Any]:
+        """按稳定身份核对部分提交，可复用原生向量；空间租约至发布结束，删除墓碑优先。"""
         if validate_source:
             validate_source()
         action_id = action_id or uuid5(message_id, 'explicit-memory:0')
@@ -127,7 +127,7 @@ class MemoryService:
             try:
                 settings = self.embedding.verified(leased=True)
                 self.embedding.bind_index('personal_memories', settings)
-                with self.session(settings, operation, reserved,validate_source) as memory:
+                with self.session(settings, operation, reserved,validate_source,cached=cached) as memory:
                     rows = memory.vector_store.list(filters={'action_id': str(action_id), 'user_id': 'local-person'}, limit=2)[0]
                     if len(rows) > 1:
                         raise ValueError('发现重复的正式记忆，需先核对存储，未继续保存。')

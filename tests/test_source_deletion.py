@@ -275,9 +275,10 @@ def test_parser_late_result_cannot_restore_chunks_during_failed_file_cleanup(dat
 
 
 def test_unapproved_change_candidate_does_not_make_other_conversation_memory_a_source(database_url: str, tmp_path: Path) -> None:
-    """未批准或已拒绝的变更仅引用目标，不构成正式来源，删除候选会话不得误删旧记忆。"""
+    """升级前未批准或已拒绝的变更不构成正式来源，删除其会话不得误删旧记忆。"""
     import json
     from test_memory_recall import recall_provider
+    from test_memory_candidates import seed_legacy_candidate
 
     def provider(request: httpx.Request) -> httpx.Response:
         """将当前用户变化提为候选，保持正式目标来自服务端白名单。"""
@@ -294,7 +295,8 @@ def test_unapproved_change_candidate_does_not_make_other_conversation_memory_a_s
         kept=client.get('/api/memories').json()[0]
         for reject in (False,True):
             other=client.post('/api/conversations',json={}).json()['id']
-            candidate=client.post(f'/api/conversations/{other}/messages',json={'content':'最近在杭州'}).json()['messages'][-1]['memory_candidates'][0]
+            answer=client.post(f'/api/conversations/{other}/messages',json={'content':'最近在杭州'}).json()['messages'][-1]
+            candidate=seed_legacy_candidate(database_url,other,answer['reply_to'],'最近在杭州',kept)
             assert candidate['target_id']==kept['id']
             if reject:
                 client.post(f"/api/memory-candidates/{candidate['id']}/reject")

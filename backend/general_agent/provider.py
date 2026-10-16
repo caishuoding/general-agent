@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Iterator
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 import httpx
 from pydantic import BaseModel, Field, StrictInt, FiniteFloat
@@ -67,6 +67,12 @@ class Embedding(BaseModel):
 
 class Completion(BaseModel):
     content: str = Field(min_length=1)
+    usage: TokenUsage
+
+
+class ToolReply(BaseModel):
+    """保留标准工具回合及推理字段，下一回合按服务端原样回传。"""
+    message: dict[str, Any]
     usage: TokenUsage
 
 
@@ -213,6 +219,38 @@ class ModelClient:
         if not isinstance(payload, dict):
             raise ModelFailure("服务未返回有效 JSON 对象，请检查接口兼容性。", usage)
         return payload, usage
+
+    def structured(self, settings: StoredSettings, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, json_mode: bool = False) -> ToolReply:
+        """发送 JSON 或真实函数调用回合，验证协议并保留 DeepSeek 所需的推理续传字段。"""
+        body: dict[str, object] = {"messages": messages, "stream": False}
+        if tools is not None:
+            body.update(tools=tools, tool_choice="auto", parallel_tool_calls=False)
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        payload, usage = self.request(settings, "/chat/completions", body)
+        try:
+            message = payload["choices"][0]["message"]  # type: ignore[index]
+            if not isinstance(message, dict) or message.get("role", "assistant") != "assistant":
+                raise ValueError("无效角色")
+            content = message.get("content")
+            calls = message.get("tool_calls", [])
+            if content is not None and not isinstance(content, str):
+                raise ValueError("无效正文")
+            if not isinstance(calls, list) or len(calls) > 8 or (not content and not calls):
+                raise ValueError("空响应或工具过多")
+            identifiers: set[str] = set()
+            for call in calls:
+                if not isinstance(call.get("id"), str) or not call["id"] or call["id"] in identifiers or call.get("type") != "function":
+                    raise ValueError("无效工具身份")
+                identifiers.add(call["id"])
+                function = call["function"]
+                if not isinstance(function["name"], str) or not isinstance(function["arguments"], str) or not isinstance(json.loads(function["arguments"]), dict):
+                    raise ValueError("无效工具参数")
+            result = {key: value for key, value in message.items() if key in ("content", "tool_calls", "reasoning_content")}
+            result["role"] = "assistant"
+            return ToolReply(message=result, usage=usage)
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            raise ModelFailure("模型未返回有效的记忆或工具响应，请检查模型能力后重试。", usage) from None
 
     def probe(self, settings: StoredSettings, capability: Literal["text", "image", "tools"]) -> TokenUsage:
         """分别发送文字、图片或工具请求，验证文字内容及工具调用标识和参数。"""

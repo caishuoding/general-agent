@@ -465,8 +465,8 @@ def test_model_only_then_dimension_only_changes_and_key_rotation(database_url: s
 
 
 def test_unconfirmed_candidate_stays_pending_and_can_confirm_after_rebuild(database_url: str, tmp_path: Path) -> None:
-    """候选不作为重建来源，维护期间点击确认不改变批准状态，完成后仍可单独确认。"""
-    from test_memory_candidates import candidate_provider
+    """升级前候选不作为重建来源，维护中确认不改变状态，完成后可单独确认。"""
+    from test_memory_candidates import candidate_provider, seed_legacy_candidate
     def provider(request: httpx.Request) -> httpx.Response:
         """仅当前消息发现返回候选，所有嵌入仍由重建测试的外部协议提供。"""
         if request.url.path.endswith('/embeddings'):
@@ -476,7 +476,7 @@ def test_unconfirmed_candidate_stays_pending_and_can_confirm_after_rebuild(datab
         cid=configure_memory(client)
         client.post(f'/api/conversations/{cid}/messages',json={'content':'请记住：我喜欢茶'})
         answer=client.post(f'/api/conversations/{cid}/messages',json={'content':'我喜欢简洁的中文回答'}).json()['messages'][-1]
-        candidate=answer['memory_candidates'][0]
+        candidate=seed_legacy_candidate(database_url,cid,answer['reply_to'],'我喜欢简洁的中文回答')
         client.put('/api/settings/budget',json={'monthly_limit':'0'})
         identifier=str(uuid4())
         client.post('/api/settings/embedding/rebuilds',json={'id':identifier,'target':target(),'confirmed':True})

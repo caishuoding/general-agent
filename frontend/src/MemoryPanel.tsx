@@ -4,7 +4,7 @@ import { api, errorMessage, type AttachmentMemorySource, type MemoryAction, type
 type Props = { onSource: (conversationId: string, messageId: string) => void };
 type Entry = MemoryAction & { conversation_title: string | null; version: number; updates: MemoryUpdate[]; attachment_sources: AttachmentMemorySource[] };
 
-// 读取真实记忆和清理状态，支持编辑、忘记、恢复失败操作并查看原聊天来源。
+// 展示 Mem0 自动保存及明确保存的真实记忆，保留编辑、忘记、恢复和来源入口。
 export function MemoryPanel({ onSource }: Props) {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -115,8 +115,8 @@ export function MemoryPanel({ onSource }: Props) {
     </article>;
   }
   return <section className="memory-management page-scroll">
-    <div className="eyebrow">关于你的长期记忆</div><h2>已批准的长期记忆</h2>
-    <p className="memory-intro">明确说“请记住：具体事实”即可保存。忘记会清除长期记忆及派生副本，原聊天仍保留。可在这里编辑，或发送“更正记忆：旧事实 =&gt; 新事实”；目标不明确时会先澄清。</p>
+    <div className="eyebrow">关于你的长期记忆</div><h2>长期记忆</h2>
+    <p className="memory-intro">Mem0 会自动整理对话中的偏好和事实，无需逐条确认。你可以在这里查看、编辑和删除，也可以直接说“把我的居住地改成苏州”或“忘记我的咖啡偏好”。忘记会清除长期记忆及派生副本，原聊天仍保留；目标不明确时会先澄清。</p>
     <button className="retry-button" onClick={reload} disabled={loading || !!busy}>刷新记忆</button>
     {loading && <p role="status">正在读取记忆…</p>}
     {error && <p role="alert">{error}</p>}

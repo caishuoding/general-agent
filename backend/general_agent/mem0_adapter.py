@@ -5,7 +5,7 @@ import logging
 import os
 import re
 from importlib.metadata import version
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 # 必须在首次导入 SDK 前禁用遥测；临时目录由 MemoryService 在懒加载前配置。
@@ -29,6 +29,22 @@ logging.getLogger('mem0.vector_stores.pgvector').disabled = True
 
 COLLECTION = 'personal_memories'
 PERSON = 'local-person'
+
+
+class NativeMutations(Protocol):
+    """承接原生 Mem0 决策的持久化动作，保留应用来源、删除和恢复规则。"""
+
+    def create(self, fact: str, embeddings: dict[str, list[float]]) -> str:
+        """保存原生提取的事实并返回正式 Mem0 标识。"""
+        ...
+
+    def update(self, memory_id: str, fact: str, embeddings: dict[str, list[float]]) -> None:
+        """更新原生决策指定的记忆，保留原来源与版本。"""
+        ...
+
+    def delete(self, memory_id: str) -> None:
+        """清除原生决策指定的记忆及其派生记录。"""
+        ...
 
 
 class PgHistory:
@@ -70,16 +86,21 @@ class PgHistory:
 class MeteredEmbedding(EmbeddingBase):
     """用操作专属网关替换默认嵌入客户端，SDK 内部线程仍携带预算身份。"""
 
-    def __init__(self, settings: StoredEmbeddingSettings, calls: BoundCalls | None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None) -> None:
-        """保存配置、可选预留和来源守卫；只读会话不具有发出云请求的权限。"""
+    def __init__(self, settings: StoredEmbeddingSettings, calls: BoundCalls | None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None, cached: dict[str, list[float]] | None = None) -> None:
+        """保存配置和来源守卫；原生同次写入复用已计量向量，只读会话禁止外发。"""
         super().__init__(BaseEmbedderConfig(model=settings.model, embedding_dims=settings.dimensions))
         self.settings, self.calls, self.reserved = settings, calls, reserved
         self.before_write=before_write
+        self.cached = cached or {}
 
     def embed(self, text: str, memory_action: str | None = None) -> list[float]:
         """先计量实际嵌入，再核验取消和可选来源守卫，失效时不继续写入正式记忆。"""
         if self.calls is None:
             raise ValueError('只读记忆会话不能发出嵌入请求。')
+        if text in self.cached:
+            if self.before_write:
+                self.before_write()
+            return self.cached[text]
         reserved, self.reserved = self.reserved, None
         result = self.calls.embed(self.settings, [text], reserved)
         with self.calls.gateway.budget.database.connect() as connection:
@@ -92,19 +113,22 @@ class MeteredEmbedding(EmbeddingBase):
 
 
 class DisabledInference:
-    """本产品只向 Mem0 提交已批准正文，拒绝其默认自动提取模型路径。"""
+    """管理、召回和原样写入不需要 LLM；原生自动记忆会注入已配置的聊天模型。"""
 
     def generate_response(self, *args: Any, **kwargs: Any) -> str:
-        """若误用 infer=True 则立即拒绝，不实例化或调用默认云端模型。"""
-        raise ValueError('请先由应用确认具体事实；禁止 Mem0 自动推断写入。')
+        """避免维护操作意外使用 SDK 默认模型或环境凭据。"""
+        raise ValueError('本次记忆会话未绑定聊天模型，不能进行自动提取。')
 
 
 class SimilarityPGVector(PGVector):
     """将该版本官方 PGVector 距离转换为 Mem0 约定的相似度。"""
+    allowed_ids: set[str] | None = None
 
     def search(self, query: str, vectors: list[float], limit: int = 5, filters: dict[str, Any] | None = None) -> list[OutputData]:
-        """复用官方查询并将 cosine distance 转为越大越相关的分数。"""
+        """转换相似度，原生自动写入仅允许读取调用开始时有效的业务记忆。"""
         rows = super().search(query, vectors, limit, filters)
+        if self.allowed_ids is not None:
+            rows = [row for row in rows if str(row.id) in self.allowed_ids]
         for row in rows:
             if row.score is not None:
                 row.score = 1.0 - row.score
@@ -114,17 +138,18 @@ class SimilarityPGVector(PGVector):
 class PgMemory(Memory):
     """锁定版本，仅接管生命周期；add/get/search/update/delete 复用真实 OSS SDK。"""
 
-    def __init__(self, database: Database, settings: StoredEmbeddingSettings, calls: BoundCalls | None = None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None, collection: str = COLLECTION) -> None:
-        """显式注入受控集合、历史、计量和可选来源守卫，构造失败也关闭自建连接池。"""
+    def __init__(self, database: Database, settings: StoredEmbeddingSettings, calls: BoundCalls | None = None, reserved: UUID | None = None, before_write: Callable[[], None] | None = None, collection: str = COLLECTION, llm: Any = None, mutations: NativeMutations | None = None, cached: dict[str, list[float]] | None = None) -> None:
+        """绑定受控集合、计量、可选原生 LLM 和动作记录，构造失败释放连接。"""
         if collection != COLLECTION and not re.fullmatch(r'memory_space_[0-9a-f]{32}',collection):
             raise ValueError('不允许使用未受控的记忆集合名。')
         if version('mem0ai') != '1.0.11':
             raise RuntimeError('Mem0 版本不符，必须先重新验证 PostgreSQL 兼容层。')
         self.config = MemoryConfig(vector_store={'provider': 'pgvector', 'config': {'connection_string': database.url, 'collection_name': collection, 'embedding_model_dims': settings.dimensions, 'hnsw': False}}, llm={'provider': 'openai', 'config': {'enable_vision': False}})
-        self.custom_fact_extraction_prompt = None
+        self.custom_fact_extraction_prompt: str | None = None
         self.custom_update_memory_prompt = None
-        self.embedding_model = MeteredEmbedding(settings, calls, reserved,before_write)
-        self.llm = DisabledInference()
+        self.embedding_model: Any = MeteredEmbedding(settings, calls, reserved,before_write,cached)
+        self.llm = llm if llm is not None else DisabledInference()
+        self.mutations = mutations
         self.db = PgHistory(database)
         self.collection_name = collection
         self.api_version = self.config.version
@@ -138,6 +163,24 @@ class PgMemory(Memory):
         except BaseException:
             self.close()
             raise
+
+    def _create_memory(self, data: str, existing_embeddings: dict[str, list[float]], metadata: dict[str, Any] | None = None) -> str:
+        """原生 ADD 决策交给来源账本，普通维护仍使用 SDK 原生向量写入。"""
+        if self.mutations is not None:
+            return self.mutations.create(data, existing_embeddings)
+        return str(super()._create_memory(data, existing_embeddings, metadata))
+
+    def _update_memory(self, memory_id: str, data: str, existing_embeddings: dict[str, list[float]], metadata: dict[str, Any] | None = None) -> Any:
+        """原生 UPDATE 决策复用版本与来源管理，管理页更新继续走 SDK。"""
+        if self.mutations is not None:
+            return self.mutations.update(memory_id, data, existing_embeddings)
+        return super()._update_memory(memory_id, data, existing_embeddings, metadata)
+
+    def _delete_memory(self, memory_id: str, existing_memory: Any = None) -> Any:
+        """原生 DELETE 决策复用完整删除流程，维护清理继续调用 SDK。"""
+        if self.mutations is not None:
+            return self.mutations.delete(memory_id)
+        return super()._delete_memory(memory_id, existing_memory)
 
     def update(self, memory_id: str, data: str, metadata: dict[str, Any] | None = None) -> Any:
         """修复 1.0.11 更新会丢失来源的行为；身份键始终沿用已有正式条目。"""

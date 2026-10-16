@@ -24,6 +24,7 @@ import { AttachmentPanel } from "./AttachmentPanel";
 import { SearchCard } from "./SearchCard";
 import { BudgetPrompt } from "./BudgetPrompt";
 import { SettingsPanel } from "./SettingsPanel";
+import { AutomaticMemory } from "./AutomaticMemory";
 import { MemoryCandidates } from "./MemoryCandidates";
 import { MemoryPanel } from "./MemoryPanel";
 
@@ -409,7 +410,7 @@ export function App() {
     return <details className="file-citation" key={citation.key} open><summary>[{citation.key}] <a href={`/api/conversations/${conversation?.id}/attachments/${citation.attachment_id}/file`} download>{citation.filename} · {citation.location}</a></summary><blockquote>{citation.excerpt}</blockquote></details>;
   }
 
-  // 展示回答、历史与资料出处、记忆和搜索动作，保留暂停及重试入口。
+  // 展示回答、出处和自动记忆真实状态，保留暂停及重试入口。
   function renderMessage(message: Message) {
     return (
       <article
@@ -429,6 +430,7 @@ export function App() {
         <div className="message-content">{message.content}</div>
         {message.document_progress && <DocumentProgress progress={message.document_progress} status={message.status} />}
         {message.memory_recall && message.memory_recall.status !== "skipped" && <div data-testid="memory-recall" className={`memory-recall ${message.memory_recall.status}`} role="status">{message.memory_recall.detail}</div>}
+        {conversation && <AutomaticMemory message={message} conversationId={conversation.id} onChanged={refreshConversation} />}
         {message.memory_update && <div className={`memory-action ${message.memory_update.status}`} role="status">
           {message.memory_update.status === "deleted" ? "相关长期记忆已忘记；原聊天仍保留。" : message.memory_update.status === "complete" ? `已更正 · ${message.memory_update.fact}` : `记忆更正未完成 · ${message.memory_update.error || "正在同步；旧事实已停止召回。"}`}
         </div>}

@@ -2,11 +2,11 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from general_agent.budget import BudgetService, OperationContext, Unit
-from general_agent.provider import Completion, Embedding, ModelClient, ModelMessage, ModelFailure, StreamChunk, TokenUsage
+from general_agent.provider import Completion, Embedding, ModelClient, ModelMessage, ModelFailure, StreamChunk, TokenUsage, ToolReply
 from general_agent.settings import StoredEmbeddingSettings, StoredSettings
 
 
@@ -50,6 +50,13 @@ class BoundCalls:
         """复用可选预留并关联回答尝试，检查预算及记录同步文字、视觉或分段请求的实际用量。"""
         with self.call(settings, "chat_tokens", reserved, assistant_message_id) as call_id:
             result = self.gateway.provider.complete(settings, messages)
+            self.gateway.budget.record(call_id, result.usage)
+            return result
+
+    def structured(self, settings: StoredSettings, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, json_mode: bool = False) -> ToolReply:
+        """让 Mem0 推理与智能体工具回合复用聊天配置、预算和真实用量记录。"""
+        with self.call(settings, "chat_tokens") as call_id:
+            result = self.gateway.provider.structured(settings, messages, tools, json_mode)
             self.gateway.budget.record(call_id, result.usage)
             return result
 

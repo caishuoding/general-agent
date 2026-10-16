@@ -46,9 +46,9 @@ def test_delete_memory_preserves_chat_and_other_entries_without_cloud_calls(data
 
 
 def test_deleted_candidate_and_old_source_cannot_restore_but_sibling_can_confirm(database_url: str, tmp_path: Path) -> None:
-    """删除同源候选之一后，旧卡与旧发现失效，另一个独立候选仍可明确确认。"""
+    """升级前同源候选之一被删后旧卡失效，另一个旧候选仍可明确确认。"""
     import json
-    from test_memory_candidates import candidate_provider
+    from test_memory_candidates import candidate_provider, seed_legacy_candidate
     from uuid import uuid4
     def provider(request: httpx.Request) -> httpx.Response:
         """仅在外部模型边界为同一当前消息提出两个独立事实。"""
@@ -60,8 +60,8 @@ def test_deleted_candidate_and_old_source_cannot_restore_but_sibling_can_confirm
     with TestClient(create_app(database_url,tmp_path,httpx.MockTransport(provider)),base_url='http://127.0.0.1:8000') as client:
         source=configure_memory(client)
         answer=client.post(f'/api/conversations/{source}/messages',json={'content':'我喜欢中文回答。我住在苏州'}).json()['messages'][-1]
-        first=next(row for row in answer['memory_candidates'] if row['fact']=='我喜欢中文回答')
-        second=next(row for row in answer['memory_candidates'] if row['fact']=='我住在苏州')
+        first=seed_legacy_candidate(database_url,source,answer['reply_to'],'我喜欢中文回答')
+        second=seed_legacy_candidate(database_url,source,answer['reply_to'],'我住在苏州')
         assert client.post(f"/api/memory-candidates/{first['id']}/confirm").status_code==200
         entry=client.get('/api/memories').json()[0]
         headers={'X-Operation-ID':str(uuid4())}

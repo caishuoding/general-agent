@@ -1,74 +1,58 @@
 import { test, expect } from "@playwright/test";
 
-// 从候选卡片核对原文、刷新和拒绝，再确认预算许可及新会话的实际记忆效果。
-test("候选经确认才在新会话使用，拒绝和刷新保持真实状态", async ({ page }) => {
+// 原生自动保存不显示确认卡，刷新后仍可查看编辑，并通过自然语言工具修改和删除。
+test("自动记忆无需确认，页面管理和对话工具共用同一条目", async ({ page }) => {
   const base = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18109"}/v1`;
   await page.request.put("/api/settings", { data: { base_url: base, model: "chat", api_key: "test-only" } });
   await page.request.put("/api/settings/embedding", { data: { base_url: base, model: "embed", dimensions: 3, api_key: "test-only" } });
   expect((await (await page.request.post("/api/settings/capabilities/embedding")).json()).status).toBe("passed");
   await page.goto("/");
-  await page.getByLabel("消息", { exact: true }).fill("我喜欢简洁的中文回答");
+  await page.getByLabel("消息", { exact: true }).fill("我住在杭州");
   await page.getByRole("button", { name: "发送消息" }).click();
-  const card = page.getByTestId("memory-candidate");
-  await expect(card).toContainText("待确认 · 新增长期记忆");
-  await expect(card).toContainText("归属：你");
-  await expect(card).toContainText("来源原文：我喜欢简洁的中文回答");
+  await expect(page.getByTestId("automatic-memory")).toContainText("新增 1 条");
+  await expect(page.getByTestId("memory-candidate")).toHaveCount(0);
   await page.reload();
-  await expect(card).toContainText("待确认");
-  const firstConversation = (await page.request.get("/api/conversations")).json();
-  const source = (await firstConversation)[0].id;
-  await page.getByRole("button", { name: "新建会话" }).click();
-  await page.getByLabel("消息", { exact: true }).fill("按我的偏好回答");
+  await expect(page.getByTestId("automatic-memory")).toContainText("新增 1 条");
+  await page.getByRole("button", { name: "长期记忆", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "长期记忆", exact: true })).toBeVisible();
+  await expect(page.getByTestId("memory-entry")).toHaveCount(1);
+  await page.getByRole("button", { name: "编辑记忆" }).click();
+  await page.getByLabel("新的记忆事实").fill("我住在南京");
+  await page.getByRole("button", { name: "保存更正" }).click();
+  await expect(page.getByTestId("memory-entry")).toContainText("我住在南京");
+  await page.getByRole("button", { name: "查看原消息" }).click();
+  await page.getByLabel("消息", { exact: true }).fill("把我的居住地改成苏州");
   await page.getByRole("button", { name: "发送消息" }).click();
-  await expect(page.getByText("普通测试回答。", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "我喜欢简洁的中文回答", exact: false }).click();
-  await page.request.put("/api/settings/budget", { data: { monthly_limit: "0" } });
-  await card.getByRole("button", { name: "确认保存" }).click();
-  await expect(page.getByRole("dialog", { name: "云端请求已暂停" })).toBeVisible();
-  await expect(card).not.toContainText("已确认并保存");
-  await page.getByRole("button", { name: "仅允许下一次云端调用" }).click();
-  await expect(card).toContainText("已确认并保存");
+  await expect(page.getByText("已更新这条长期记忆。", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "长期记忆", exact: true }).click();
+  await expect(page.getByTestId("memory-entry")).toContainText("我住在苏州");
+  await page.screenshot({ path: "test-results/native-memory-tools.png", fullPage: true });
+  await page.getByRole("button", { name: "查看原消息" }).click();
+  await page.getByLabel("消息", { exact: true }).fill("忘掉我住在哪里这件事");
+  await page.getByRole("button", { name: "发送消息" }).click();
+  await expect(page.getByText("已忘记这条长期记忆；原聊天仍保留。", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "长期记忆", exact: true }).click();
+  await expect(page.getByTestId("memory-entry")).toHaveCount(0);
   await page.reload();
-  await expect(card).toContainText("已确认并保存");
-  await page.request.put("/api/settings/budget", { data: { monthly_limit: null } });
-  await page.getByRole("button", { name: "新建会话" }).click();
-  await page.getByLabel("消息", { exact: true }).fill("按我的偏好回答");
-  await page.getByRole("button", { name: "发送消息" }).click();
-  await expect(page.getByText("根据已批准记忆：我喜欢简洁的中文回答。", { exact: true })).toBeVisible();
-  await page.getByLabel("消息", { exact: true }).fill("我住在苏州");
-  await page.getByRole("button", { name: "发送消息" }).click();
-  await expect(card).toContainText("待确认");
-  await card.getByRole("button", { name: "拒绝" }).click();
-  await expect(card).toContainText("已拒绝，未保存");
-  await page.reload();
-  await expect(card).toContainText("已拒绝，未保存");
-  await expect(card.getByRole("button", { name: "确认保存" })).toHaveCount(0);
-  expect((await (await page.request.get("/api/memories")).json()).length).toBe(1);
-  expect((await (await page.request.get(`/api/conversations/${source}`)).json()).messages.at(-1).memory_candidates[0].status).toBe("confirmed");
-  await page.screenshot({ path: "test-results/candidates-rejected.png", fullPage: true });
+  expect((await (await page.request.get("/api/memories")).json()).length).toBe(0);
 });
 
-// 含义不明的地点变化显示明确旧目标和新事实，只有卡片确认才正式更新。
-test("变更卡片展示目标条目及当前消息原文", async ({ page }) => {
+// 自动提取失败不冒充保存，修改服务配置后可直接重试原消息，无需再次发送或批准。
+test("自动记忆失败后可独立重试", async ({ page }) => {
   const base = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18109"}/v1`;
-  await page.request.put("/api/settings", { data: { base_url: base, model: "chat", api_key: "test-only" } });
+  await page.request.put("/api/settings", { data: { base_url: base, model: "bad-json", api_key: "test-only" } });
   await page.request.put("/api/settings/embedding", { data: { base_url: base, model: "embed", dimensions: 3, api_key: "test-only" } });
   expect((await (await page.request.post("/api/settings/capabilities/embedding")).json()).status).toBe("passed");
-  const source = (await (await page.request.post("/api/conversations", { data: {} })).json()).id;
-  await page.request.post(`/api/conversations/${source}/messages`, { data: { content: "请记住：我住在苏州" } });
+  await page.request.post("/api/conversations", { data: {} });
   await page.goto("/");
-  await page.getByRole("button", { name: "新建会话" }).click();
-  await page.getByLabel("消息", { exact: true }).fill("最近在杭州");
+  await page.getByLabel("消息", { exact: true }).fill("我住在杭州");
   await page.getByRole("button", { name: "发送消息" }).click();
-  const card = page.getByTestId("memory-candidate");
-  await expect(card).toContainText("待确认 · 变更长期记忆");
-  await expect(card).toContainText("目标条目：我住在苏州");
-  await expect(card).toContainText("来源原文：最近在杭州");
-  await expect(card).toContainText("我住在杭州");
-  await card.scrollIntoViewIfNeeded();
-  await card.screenshot({ path: "test-results/candidate-change-card.png" });
-  await card.getByRole("button", { name: "确认变更" }).click();
-  await expect(card).toContainText("已确认并更新");
+  await expect(page.getByTestId("automatic-memory").last()).toContainText("自动记忆未完成");
+  await expect(page.getByRole("button", { name: "重试自动记忆" })).toBeVisible();
+  await page.request.put("/api/settings", { data: { base_url: base, model: "chat", api_key: "test-only" } });
+  await page.getByRole("button", { name: "重试自动记忆" }).click();
+  await expect(page.getByTestId("automatic-memory").last()).toContainText("新增 1 条");
+  await expect(page.getByRole("button", { name: "重试自动记忆" })).toHaveCount(0);
   await page.getByRole("button", { name: "长期记忆", exact: true }).click();
-  await expect(page.getByTestId("memory-entry").filter({ hasText: "我住在杭州" })).toHaveCount(1);
+  await expect(page.getByTestId("memory-entry")).toContainText("我住在杭州");
 });
