@@ -1,11 +1,15 @@
 """提取文档中可读取的文字及真实位置，保留没有覆盖的内容说明。"""
 
+import ctypes
 import os
 import subprocess
 import sys
+from ctypes import Structure
+from ctypes import wintypes
 from tempfile import TemporaryFile
 from time import monotonic, sleep
 from pathlib import Path
+from typing import NamedTuple
 from zipfile import ZipFile
 from xml.etree import ElementTree
 
@@ -17,7 +21,79 @@ from docx.text.paragraph import Paragraph
 from pydantic import BaseModel, Field
 from pypdf import PdfReader, filters
 
+from general_agent.document_limits import (
+    MAX_DOCUMENT_CPU_SECONDS,
+    MAX_DOCUMENT_OUTPUT_BYTES,
+    MAX_DOCUMENT_RSS_BYTES,
+)
+
 MAX_TEXT_CHARACTERS = 2_000_000
+
+
+class _FileTime(Structure):
+    """描述 Windows 进程时间计数器的两个 32 位部分。"""
+
+    _fields_ = [('low', wintypes.DWORD), ('high', wintypes.DWORD)]
+
+
+class _ProcessMemoryCounters(Structure):
+    """接收 Windows GetProcessMemoryInfo 返回的工作集统计。"""
+
+    _fields_ = [
+        ('cb', wintypes.DWORD), ('page_fault_count', wintypes.DWORD),
+        ('peak_working_set_size', ctypes.c_size_t), ('working_set_size', ctypes.c_size_t),
+        ('quota_peak_paged_pool_usage', ctypes.c_size_t), ('quota_paged_pool_usage', ctypes.c_size_t),
+        ('quota_peak_non_paged_pool_usage', ctypes.c_size_t), ('quota_non_paged_pool_usage', ctypes.c_size_t),
+        ('pagefile_usage', ctypes.c_size_t), ('peak_pagefile_usage', ctypes.c_size_t),
+    ]
+
+
+class _ProcessUsage(NamedTuple):
+    """保存文档工作进程的工作集字节和累计 CPU 秒数。"""
+
+    rss_bytes: int
+    cpu_seconds: float
+
+
+def _file_time_seconds(value: _FileTime) -> float:
+    """将 Windows 的 100 纳秒 FILETIME 计数转换为秒。"""
+    return float((int(value.high) << 32) | int(value.low)) / 10_000_000
+
+
+def _windows_process_usage(process_id: int) -> _ProcessUsage | None:
+    """读取 Windows 子进程的工作集字节和累计 CPU 秒数。"""
+    loader = getattr(ctypes, 'WinDLL', None)
+    if loader is None:
+        return None
+    kernel32 = loader('kernel32', use_last_error=True)
+    psapi = loader('psapi', use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(_FileTime), ctypes.POINTER(_FileTime),
+        ctypes.POINTER(_FileTime), ctypes.POINTER(_FileTime),
+    ]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    psapi.GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(_ProcessMemoryCounters), wintypes.DWORD,
+    ]
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x1000, False, process_id)
+    if not handle:
+        return None
+    try:
+        counters = _ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        created, exited, kernel, user = _FileTime(), _FileTime(), _FileTime(), _FileTime()
+        if not psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            return None
+        if not kernel32.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
+            return None
+        return _ProcessUsage(int(counters.working_set_size), _file_time_seconds(kernel) + _file_time_seconds(user))
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 class DocumentInfo(BaseModel):
@@ -150,7 +226,13 @@ def parse_docx(path: Path) -> ParsedDocument:
 def parse_document(path: Path, extension: str) -> ParsedDocument:
     """隔离解析并监控实际内存及墙钟时间，异常子进程不能拖住应用线程或回显原始错误。"""
     info = DocumentInfo(format=extension.lstrip('.'))
-    environment = {'PYTHONPATH': str(Path(__file__).resolve().parents[1]), 'PATH': os.environ.get('PATH', ''), 'LANG': 'en_US.UTF-8'}
+    environment = {
+        'PYTHONPATH': str(Path(__file__).resolve().parents[1]),
+        'PATH': os.environ.get('PATH', ''),
+        'LANG': 'en_US.UTF-8',
+        'PYTHONIOENCODING': 'utf-8',
+        'PYTHONUTF8': '1',
+    }
     with TemporaryFile() as output:
         process = subprocess.Popen([sys.executable, '-m', 'general_agent.document_worker', str(path.resolve()), extension], stdout=output, stderr=subprocess.DEVNULL, env=environment)
         try:
@@ -158,11 +240,18 @@ def parse_document(path: Path, extension: str) -> ParsedDocument:
             while process.poll() is None:
                 if monotonic() >= deadline:
                     return ParsedDocument(info=info, error='文档处理超过 20 秒资源限制，请拆分或简化后上传。')
-                observed = subprocess.run(['/bin/ps', '-o', 'rss=', '-p', str(process.pid)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2, check=False)
-                if observed.returncode == 0 and int(observed.stdout.strip() or b'0') > 512 * 1024:
-                    return ParsedDocument(info=info, error='文档解析超过 512 MB 内存资源限制，请拆分或简化后上传。')
+                if sys.platform == 'win32':
+                    usage = _windows_process_usage(process.pid)
+                    if usage is not None and usage.rss_bytes > MAX_DOCUMENT_RSS_BYTES:
+                        return ParsedDocument(info=info, error='文档解析超过 512 MB 内存资源限制，请拆分或简化后上传。')
+                    if usage is not None and usage.cpu_seconds > MAX_DOCUMENT_CPU_SECONDS:
+                        return ParsedDocument(info=info, error='文档解析超过 CPU 资源限制，请拆分或简化后上传。')
+                else:
+                    observed = subprocess.run(['/bin/ps', '-o', 'rss=', '-p', str(process.pid)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2, check=False)
+                    if observed.returncode == 0 and int(observed.stdout.strip() or b'0') * 1024 > MAX_DOCUMENT_RSS_BYTES:
+                        return ParsedDocument(info=info, error='文档解析超过 512 MB 内存资源限制，请拆分或简化后上传。')
                 sleep(0.025)
-            if process.returncode != 0 or output.tell() > 16_000_000:
+            if process.returncode != 0 or output.tell() > MAX_DOCUMENT_OUTPUT_BYTES:
                 return ParsedDocument(info=info, error='文档解析失败或超过CPU、内存、输出资源限制，请拆分或简化后上传。')
             output.seek(0)
             return ParsedDocument.model_validate_json(output.read(16_000_001))
