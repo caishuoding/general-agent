@@ -1,5 +1,5 @@
 import { SourceDeletion, SourceDeletionPending, type DeleteTarget } from './SourceDeletion';
-import { HistorySources } from "./HistorySources";
+import { AnswerContent } from "./AnswerContent";
 import { DocumentProgress } from './DocumentProgress';
 import {
   useEffect,
@@ -9,6 +9,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type MouseEvent,
+  type UIEvent,
 } from "react";
 import {
   api,
@@ -16,21 +17,16 @@ import {
   type Conversation,
   type ConversationDetail,
   type Message,
-  type FileCitation,
   type Settings,
   type Usage,
 } from "./api";
 import { AttachmentPanel } from "./AttachmentPanel";
 import { SearchCard } from "./SearchCard";
-import { BudgetPrompt } from "./BudgetPrompt";
 import { SettingsPanel } from "./SettingsPanel";
-import { AutomaticMemory } from "./AutomaticMemory";
-import { MemoryCandidates } from "./MemoryCandidates";
-import { MemoryPanel } from "./MemoryPanel";
 
-type Screen = "chat" | "settings" | "memory";
+type Screen = "chat" | "settings";
 
-// 展示会话、记忆、资料与来源删除影响及恢复状态，并隔离过期异步响应。
+// 展示会话、资料与来源删除状态，并隔离过期异步响应。
 export function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(
@@ -60,6 +56,8 @@ export function App() {
   const activeId = useRef<string | null>(null);
   const selection = useRef(0);
   const bottom = useRef<HTMLDivElement>(null);
+  const followLatest = useRef(true);
+  const [showLatest, setShowLatest] = useState(false);
   const composer = useRef<HTMLFormElement>(null);
 
   // 当前会话最多有一条正在生成的回答。
@@ -119,8 +117,8 @@ export function App() {
     }, [sourceMessage, conversation],
   );
 
-  // 打开记忆或历史来源并重新验证消息存在；后续渲染负责定位原处。
-  function openMemorySource(id: string, messageId: string) {
+  // 打开历史来源并重新验证消息存在；后续渲染负责定位原处。
+  function openHistorySource(id: string, messageId: string) {
     setSourceMessage(messageId);
     void selectConversation(id, messageId);
   }
@@ -130,6 +128,9 @@ export function App() {
     const current = ++selection.current;
     activeId.current = id;
     localStorage.setItem("active-conversation", id);
+    followLatest.current = !expectedMessage;
+    setShowLatest(false);
+    setSourceMessage(expectedMessage || null);
     setScreen("chat");
     setConversation(null);
     setDraft("");
@@ -185,12 +186,27 @@ export function App() {
   );
 
   useEffect(
-    // 新消息或等待状态出现时，将聊天区滚动到最新内容。
+    /** 仅在用户停留在底部时跟随流式回答，保留上滑后的阅读位置。 */
     function revealLatestMessage() {
-      bottom.current?.scrollIntoView({ behavior: "smooth" });
+      if (followLatest.current) bottom.current?.scrollIntoView({ block: "end" });
     },
     [conversation, pending],
   );
+
+  /** 根据会话滚动容器的位置更新跟随状态，无返回值；上滑时显示返回入口。 */
+  function trackReadingPosition(event: UIEvent<HTMLDivElement>) {
+    const element = event.currentTarget;
+    const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+    followLatest.current = nearBottom;
+    setShowLatest(!nearBottom);
+  }
+
+  /** 用户明确请求最新内容时恢复跟随并定位底部，无输入或返回值。 */
+  function returnToLatest() {
+    followLatest.current = true;
+    setShowLatest(false);
+    bottom.current?.scrollIntoView({ block: "end" });
+  }
 
   // 清理后刷新来源；详情只回写发起时仍选中的会话，切换或重新选择后的旧响应失效。
   async function refreshSources() {
@@ -261,12 +277,6 @@ export function App() {
     }
   }
 
-  // 打开记忆管理页，由页面重新核对正式事实与原消息来源。
-  function openMemory() {
-    setScreen("memory");
-    setError("");
-  }
-
   // 更新当前输入草稿。
   function editDraft(event: ChangeEvent<HTMLTextAreaElement>) {
     setDraft(event.target.value);
@@ -302,6 +312,8 @@ export function App() {
     if (!id) id = (await createConversation())?.id ?? null;
     if (!id) return;
     const targetId = id;
+    followLatest.current = true;
+    setShowLatest(false);
     setPending({ id: targetId, content });
     setDraft("");
     setError("");
@@ -349,14 +361,10 @@ export function App() {
     const id = activeId.current;
     const messageId = event.currentTarget.dataset.message;
     const action = event.currentTarget.dataset.action;
-    const approve = event.currentTarget.dataset.approve === "true";
     if (!id || !messageId || !action || changingRun) return;
     setChangingRun(true);
     setError("");
     try {
-      if (approve && paused?.budget_pause) {
-        await api(`/budget/operations/${paused.budget_pause.operation_id}/approve`, { method: "POST", body: JSON.stringify({ pause_id: paused.budget_pause.pause_id }) });
-      }
       const result = await api<ConversationDetail>(`/conversations/${id}/messages/${messageId}/${action}`, { method: "POST" });
       if (activeId.current === id) {
         selection.current += 1;
@@ -367,14 +375,6 @@ export function App() {
     } finally {
       setChangingRun(false);
     }
-  }
-
-  // 候选操作后读取当前会话，保留草稿并防止切换后的旧结果覆盖新会话。
-  async function refreshConversation() {
-    const id = activeId.current;
-    if (!id) return;
-    const result = await api<ConversationDetail>(`/conversations/${id}`);
-    if (activeId.current === id) setConversation(result);
   }
 
   // 将每个会话渲染为可访问的切换按钮。
@@ -400,17 +400,7 @@ export function App() {
     if (activeId.current === detail.id) { selection.current += 1; setConversation(detail); }
   }
 
-  // 只渲染后端提供的安全网页来源链接，模型正文仍按纯文本展示。
-  function renderWebSource(source: Message["web_sources"][number]) {
-    return <details className="file-citation" key={source.key}><summary>[{source.key}] <a href={source.url} target="_blank" rel="noopener noreferrer">{source.title || source.url}</a></summary><blockquote>{source.excerpt}</blockquote></details>;
-  }
-
-  // 展示后端核验的文件位置与原文摘录，所有正文均按纯文本渲染。
-  function renderCitation(citation: FileCitation) {
-    return <details className="file-citation" key={citation.key} open><summary>[{citation.key}] <a href={`/api/conversations/${conversation?.id}/attachments/${citation.attachment_id}/file`} download>{citation.filename} · {citation.location}</a></summary><blockquote>{citation.excerpt}</blockquote></details>;
-  }
-
-  // 展示回答、出处和自动记忆真实状态，保留暂停及重试入口。
+  /** 接收持久化消息并返回消息界面；助手显示 Markdown，用户保留原始输入。 */
   function renderMessage(message: Message) {
     return (
       <article
@@ -427,28 +417,12 @@ export function App() {
             })}
           </time>
         </div>
-        <div className="message-content">{message.content}</div>
+        {message.role === "assistant"
+          ? <AnswerContent message={message} conversationId={conversation?.id} onHistorySource={openHistorySource} />
+          : <div className="message-content">{message.content}</div>}
         {message.document_progress && <DocumentProgress progress={message.document_progress} status={message.status} />}
-        {message.memory_recall && message.memory_recall.status !== "skipped" && <div data-testid="memory-recall" className={`memory-recall ${message.memory_recall.status}`} role="status">{message.memory_recall.detail}</div>}
-        {conversation && <AutomaticMemory message={message} conversationId={conversation.id} onChanged={refreshConversation} />}
-        {message.memory_update && <div className={`memory-action ${message.memory_update.status}`} role="status">
-          {message.memory_update.status === "deleted" ? "相关长期记忆已忘记；原聊天仍保留。" : message.memory_update.status === "complete" ? `已更正 · ${message.memory_update.fact}` : `记忆更正未完成 · ${message.memory_update.error || "正在同步；旧事实已停止召回。"}`}
-        </div>}
-        {message.memory_action && <div className={`memory-action ${message.memory_action.status}`} role="status">
-          {message.memory_action.status === "deleted" ? "这条长期记忆已忘记；原聊天仍保留。" : message.memory_action.status === "deleting" ? "记忆已停止召回，清理尚未完成。" : message.memory_action.status === "complete" ? `已保存 · ${message.memory_action.fact}` : message.memory_action.status === "failed" ? `记忆保存未完成 · ${message.memory_action.error || "可以重试核对。"}` : "记忆正在处理，尚未确认保存。"}
-        </div>}
-        {message.role === "assistant" && conversation && <MemoryCandidates message={message} conversationId={conversation.id} onChanged={refreshConversation} />}
-        {message.status === "paused" && message.budget_pause && <section className="run-budget" aria-label="回答等待预算">
-          <strong>后续云端请求已暂停</strong><p>{message.budget_pause.detail}</p><p>已完成的记忆和资料处理会保留。批准仅允许下一次调用。</p>
-          <button className="retry-button" data-action="resume" data-approve="true" data-message={message.id} onClick={changeRun} disabled={changingRun}>仅允许下一次云端调用并继续</button>
-          <button className="retry-button" data-action="resume" data-message={message.id} onClick={changeRun} disabled={changingRun}>重新检查并继续</button>
-          <button className="retry-button" data-action="stop" data-message={message.id} onClick={changeRun} disabled={changingRun}>取消本次回答</button>
-        </section>}
         {!!message.attachment_ids?.length && <div className="message-progress">已附 {message.attachment_ids.length} 个会话文件</div>}
         {message.search_action && conversation && <SearchCard message={message} conversationId={conversation.id} onUpdated={applySearchUpdate} />}
-        <HistorySources state={message.history_search} sources={message.history_sources || []} onSource={openMemorySource} />
-        {message.web_sources?.map(renderWebSource)}
-        {message.citations?.map(renderCitation)}
         {message.status === "generating" && <div className="message-progress" role="status">正在生成…</div>}
         {message.status === "failed" && (
           <div className="message-error" role="alert">回答未完成 · {message.error || "可以重试或检查设置。"}</div>
@@ -494,12 +468,6 @@ export function App() {
         </nav>
         <div className="sidebar-bottom">
           <button
-            className={`nav-button ${screen === "memory" ? "selected" : ""}`}
-            onClick={openMemory}
-          >
-            <span aria-hidden="true">◇</span>长期记忆
-          </button>
-          <button
             className={`nav-button ${screen === "settings" ? "selected" : ""}`}
             onClick={openSettings}
           >
@@ -519,9 +487,7 @@ export function App() {
             <span className="topbar-subtitle">
               {screen === "settings"
                 ? "设置"
-                : screen === "memory"
-                  ? "长期记忆"
-                  : "日常、灵感与思考"}
+                : "日常、灵感与思考"}
             </span>
           </div>
           <button className="model-pill" onClick={openSettings}>
@@ -540,7 +506,6 @@ export function App() {
         <SourceDeletionPending revision={sourceRevision} onChanged={refreshSources} />
         {deleteTarget && <SourceDeletion key={deleteTarget.path} target={deleteTarget} onClose={closeDeletion} onChanged={refreshSources} />}
         {screen === 'chat' && conversation && <button className="delete-conversation" onClick={deleteConversation}>删除当前会话</button>}
-        <BudgetPrompt onConfigure={openSettings} />
         {screen === "settings" ? (
           <div className="page-scroll">
             <SettingsPanel
@@ -549,11 +514,9 @@ export function App() {
               onSaved={setSettings}
             />
           </div>
-        ) : screen === "memory" ? (
-          <MemoryPanel onSource={openMemorySource} />
         ) : (
           <div className="chat-layout">
-            <div className="chat-scroll">
+            <div className="chat-scroll" onScroll={trackReadingPosition}>
               <div className="chat-content">
                 {loading ? (
                   <div className="empty-state">
@@ -604,6 +567,7 @@ export function App() {
                 <div ref={bottom} />
               </div>
             </div>
+            {showLatest && <button type="button" className="return-to-latest" onClick={returnToLatest}>↓ 回到最新</button>}
             <div className="composer-wrap">
               <AttachmentPanel revision={sourceRevision} onDelete={deleteAttachment} conversationId={activeId.current} selected={selectedAttachments} onSelect={setSelectedAttachments} disabled={!!pending || !!generating || changingRun || creating || loading} />
               {streamNotice && <p className="stream-notice" role="status">{streamNotice}</p>}
@@ -645,7 +609,7 @@ export function App() {
                   </button>}
                 </div>
               </form>
-              <p className="composer-note">回答可能有误，请核对重要信息。停止不一定撤销服务商费用；已返回用量仍会记录。</p>
+              <p className="composer-note">回答可能有误，请核对重要信息。停止生成不会撤回已经发出的服务请求。</p>
             </div>
           </div>
         )}
