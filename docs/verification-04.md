@@ -28,7 +28,7 @@
 
 ## 后续 Mem0、资料、工具与搜索的公共接入合同
 
-公共入口在 `general_agent.budget` 与 `general_agent.calls`。应用实例也暴露 `app.state.budget` 与 `app.state.calls`。`ModelClient` 仅是网关内部原始协议边界；新增业务不能直接使用它或默认 SDK 客户端。
+公共入口在 `general_agent.infrastructure.budget` 与 `general_agent.infrastructure.calls`。应用实例也暴露 `app.state.budget` 与 `app.state.calls`。`ModelClient` 仅是网关内部原始协议边界；新增业务不能直接使用它或默认 SDK 客户端。
 
 1. 用 `BudgetService.operation(purpose, scope, operation_id=None, conversation_id=None)` 取得 `(OperationContext, previous_operation)`。scope 必须由后端根据实际内容/目标、配置版本及业务来源身份构造；不可直接信任客户端提交的任意 scope。用途可为 memory_save、memory_recall、attachment_embed、web_search 等。个人单用户身份由应用固定，会话可空。
 2. `OperationContext` 是不可变数据：operation_id、purpose、conversation_id。将 `CallGateway.bind(context)` 返回的**操作专属 BoundCalls 实例**绑定在该次 SDK 的 embedder/llm 上，并将同一实例显式传入工作线程。**不能仅用 ContextVar；Mem0 的内部线程池不会继承它。不得在共享 Memory 实例上临时替换适配器造成串线。**

@@ -11,13 +11,12 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test && playwright test --config playwright.capabilities.config.ts && playwright test --config playwright.images.config.ts && playwright test --config playwright.search.config.ts && playwright test --config playwright.history.config.ts && playwright test --config playwright.source-deletion.config.ts && playwright test --config playwright.rebuild.config.ts",
+    "test:e2e": "playwright test && playwright test --config playwright.capabilities.config.ts && playwright test --config playwright.images.config.ts && playwright test --config playwright.search.config.ts && playwright test --config playwright.history.config.ts && playwright test --config playwright.source-deletion.config.ts",
     "test:capabilities": "playwright test --config playwright.capabilities.config.ts",
     "test:images": "playwright test --config playwright.images.config.ts",
     "test:search": "playwright test --config playwright.search.config.ts",
     "test:history": "playwright test --config playwright.history.config.ts",
-    "test:source-deletion": "playwright test --config playwright.source-deletion.config.ts",
-    "test:rebuild": "playwright test --config playwright.rebuild.config.ts"
+    "test:source-deletion": "playwright test --config playwright.source-deletion.config.ts"
   },
   "dependencies": {
     "react": "^19.2.0",

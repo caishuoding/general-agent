@@ -4,10 +4,6 @@ export type Settings = {
   api_key_configured: boolean;
 };
 export type Conversation = { id: string; title: string; created_at: string };
-export type MemoryAction = { id: string; fact: string; status: "pending" | "saving" | "complete" | "failed" | "deleting" | "deleted"; deletion?: { status: string; error: string | null } | null; memory_id: string | null; source_deleted?: boolean; message_id: string | null; conversation_id: string | null; error: string | null; created_at: string };
-export type MemoryUpdate = { source_deleted?: boolean; id: string; action_id: string; fact: string; status: "pending" | "saving" | "complete" | "failed" | "deleted"; error: string | null; target_version: number; source_kind: "management" | "chat"; source_message_id: string | null; source_conversation_id: string | null; conversation_title?: string | null };
-export type AttachmentMemorySource = { attachment_id: string; filename: string; location: string; suggested_subject: string; subject_label: string | null; is_image: boolean };
-export type MemoryCandidate = { id: string; fact: string; subject: "user" | "other" | "unknown"; source_kind: "message" | "attachment"; attachment_source: AttachmentMemorySource | null; source_message_id: string; source_conversation_id: string; source_quote: string; target_id: string | null; target_version: number | null; target_fact: string | null; status: "pending" | "saving" | "paused" | "failed" | "confirmed" | "rejected" | "expired"; approved_at: string | null; expires_at: string; error: string | null };
 export type DocumentParseInfo = { format?: string; total_units?: number; readable_units?: number; coverage?: string; missing_units?: string[]; limitations?: string[] };
 export type Attachment = { id: string; filename: string; size: number; status: "processing" | "ready" | "failed" | "deleting"; error: string | null; parse_info?: DocumentParseInfo; image_metadata: { format: string; mime: string; width: number; height: number } | null };
 export type FileCitation = { key: string; attachment_id: string; filename: string; location: string; excerpt: string };
@@ -21,14 +17,7 @@ export type Message = {
   history_search: { status: "complete" | "empty" | "unavailable"; count: number; detail: string } | null;
   history_sources: { key: string; conversation_id: string; conversation_title: string; message_id: string; role: "user" | "assistant"; created_at: string; excerpt: string }[];
   web_sources: { key: string; title: string; url: string; excerpt: string }[];
-  memory_action: MemoryAction | null;
-  memory_update: MemoryUpdate | null;
-  memory_candidates: MemoryCandidate[];
-  memory_discovery: { status: "pending" | "complete" | "failed"; error: string | null } | null;
-  automatic_memory?: { status: string; detail: string } | null;
-  memory_recall: { status: "pending" | "complete" | "failed" | "skipped" | "unavailable"; count: number; detail: string } | null;
   document_progress?: DocumentProcessing | null;
-  budget_pause: { detail: string; operation_id: string; pause_id: string } | null;
   attachment_ids: string[];
   citations: FileCitation[];
   reply_to: string | null;
@@ -36,13 +25,11 @@ export type Message = {
   created_at: string;
 };
 export type ConversationDetail = Conversation & { messages: Message[] };
-export type BudgetDecision = { detail: string; operation_id: string; pause_id: string; resolve: (retry: boolean) => void };
 
 export type Usage = {
   id: string;
   model: string;
   purpose: string;
-  estimated_cost: string | null;
   unit: string;
   credits: string | null;
   status: string;
@@ -51,7 +38,7 @@ export type Usage = {
   created_at: string;
 };
 
-// 访问同源 JSON 或文件上传接口；预算暂停恢复复用原操作标识和请求正文。
+// 访问同源 JSON 或文件上传接口，并为写操作附加稳定操作标识。
 export async function api<T>(
   path: string,
   options: RequestInit = {},
@@ -72,14 +59,6 @@ export async function api<T>(
     // 非 JSON 错误使用通用提示，不把原始服务正文放入页面。
     () => ({ detail: "服务暂时不可用，请稍后重试。" }),
   );
-  if (response.status === 402 && body.code === "budget_paused") {
-    const retry = await new Promise<boolean>(
-      // 将当前请求的持久化暂停挑战交给用户，用户决定前不发送后续请求。
-      (resolve) => window.dispatchEvent(new CustomEvent<BudgetDecision>("budget-paused", { detail: { ...body, resolve } })),
-    );
-    if (!retry) throw new Error("本次操作已取消。");
-    return api<T>(path, { ...options, headers });
-  }
   if (!response.ok)
     throw new Error(
       typeof body.detail === "string"

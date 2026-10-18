@@ -1,4 +1,6 @@
-# 任务 14：附件候选、人物确认与正式记忆
+# 任务 14 历史记录：附件候选、人物确认与正式记忆
+
+> 此功能已于 2026-10-17 按用户要求删除，不再属于当前产品行为。本文仅保留历史验收记录；当前边界见 [ADR 0006](adr/0006-attachments-do-not-create-memories.md)。
 
 ## 已实现行为
 
@@ -26,7 +28,7 @@ TXT/Markdown、文本 PDF、DOCX 使用现有可信文字片段与位置；PDF �
 
 开发按公开 HTTP 纵向红灯/绿灯推进：初始附件明确请求没有预览、图片重试入口拒绝、提取带入未选文件、确认期间丢失来源仍成功，均先以测试复现再修复；“这份附件”指代及缺少原文件边界同样有公开行为回归。浏览器先观察原卡片错误显示“归属：你”，再实现人物澄清。
 
-- 新 `tests/test_attachment_memory.py`：真实 PostgreSQL/pgvector、真实 Mem0 SDK、受控外部 HTTP。覆盖 TXT/PDF/DOCX/图片、当前范围、跨会话隔离、人物澄清、未批准不可召回、逐项确认/拒绝、重复提交、来源在嵌入途中丢失、失败与重试、提取及保存分别预算暂停/重启、否定和材料注入、伪造引文、停止后迟到结果。
+- 新 `tests/memory/test_attachment_memory.py`：真实 PostgreSQL/pgvector、真实 Mem0 SDK、受控外部 HTTP。覆盖 TXT/PDF/DOCX/图片、当前范围、跨会话隔离、人物澄清、未批准不可召回、逐项确认/拒绝、重复提交、来源在嵌入途中丢失、失败与重试、提取及保存分别预算暂停/重启、否定和材料注入、伪造引文、停止后迟到结果。
 - 浏览器 `pnpm --dir frontend test:attachment-memory`：默认端口 18112/18113，可通过 TEST_APP_PORT/TEST_MODEL_PORT 覆盖。实际上传→原文件出处→人物澄清→仅更新预览→确认一项/拒绝另一项→刷新→正式记忆来源，1 项通过，截图已人工检查。
 - 前端构建通过；`test_attachment_memory.py`、`test_memory_candidates.py`、`test_memory.py`、`test_mem0_adapter.py`、`test_images.py` 共 37 项通过（37.43 秒）；完整 mypy 60 个源文件通过，TypeScript 通过。
 - 已合入任务 16 集成 `fd20732`：历史查询在 `reserve_first` / `prepare` 最先保持只读，附件明确提取保持独立。合并后附件、历史与直接保存资料组合 20 项通过（19.25 秒），新增交叉用例核对旧提取指令和当前附带文件不会授权候选；下一条当前明确请求仍可提取。附件/历史/原消息候选浏览器共 4 项通过，完整 mypy 62 个源文件、TypeScript 与构建通过。

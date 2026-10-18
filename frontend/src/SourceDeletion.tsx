@@ -1,18 +1,17 @@
-import { useEffect, useState, type ChangeEvent, type MouseEvent } from 'react';
+import { useEffect, useState, type MouseEvent } from 'react';
 import { api, errorMessage } from './api';
 
-type Impact = { name: string; revision: string; memories: { id: string; fact: string; status: string; can_keep: boolean }[] };
+type Impact = { name: string; revision: string };
 type Result = { id: string; status: string; phase: string; error: string | null; kind: string };
 export type DeleteTarget = { path: string; label: string };
 
-// 删除前展示真实关联事实，默认删除全部；失败保留同一清理身份供刷新后恢复。
+// 删除前只确认来源本身，关联数据由后端默认清理且不在前端展示。
 export function SourceDeletion({ target, onClose, onChanged }: { target: DeleteTarget; onClose: () => void; onChanged: () => Promise<void> }) {
   const [impact, setImpact] = useState<Impact | null>(null);
-  const [keep, setKeep] = useState<string[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   useEffect(
-    // 每次打开重新读取影响版本，旧页面不能默许后来新增的关联记忆。
+    // 每次打开重新读取影响版本，避免按过期预览删除后来变化的来源。
     () => {
       let active = true;
       // 仅显示仍然打开的弹窗请求结果。
@@ -25,35 +24,22 @@ export function SourceDeletion({ target, onClose, onChanged }: { target: DeleteT
       return () => { active = false; };
     }, [target.path],
   );
-  // 取消删除勾选意味着明确保留该完整事实，未完整保存的项不能保留。
-  function choose(event: ChangeEvent<HTMLInputElement>) {
-    const id = event.currentTarget.value;
-    setKeep(event.currentTarget.checked ? keep.filter(
-      // 恢复默认删除时移除该保留身份。
-      (value) => value !== id,
-    ) : [...keep, id]);
-  }
-  // 发送具体影响版本和逐项保留选择，503也刷新真实停用状态与恢复入口。
+  // 发送具体影响版本并默认清理全部关联数据，503 也刷新停用状态与恢复入口。
   async function remove() {
     if (!impact) return;
     setBusy(true); setError('');
     try {
-      const response = await fetch(`/api${target.path}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ preview_revision: impact.revision, keep_memory_ids: keep }) });
+      const response = await fetch(`/api${target.path}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ preview_revision: impact.revision, keep_memory_ids: [] }) });
       const result = await response.json();
       if (!response.ok && !result.id) throw new Error(result.detail || '删除未被接受，请重新预览。');
       await onChanged(); onClose();
     } catch (failure) { setError(errorMessage(failure)); }
     finally { setBusy(false); }
   }
-  // 每条可保留记忆都以明确勾选表达默认删除，禁用不完整事实的保留能力。
-  function renderMemory(memory: Impact['memories'][number]) {
-    return <label key={memory.id} className="source-delete-memory"><input type="checkbox" value={memory.id} checked={!keep.includes(memory.id)} onChange={choose} disabled={busy || !memory.can_keep} />删除关联记忆：{memory.fact || '尚未完整保存的记忆'} {!memory.can_keep && '（不能保留未完成项）'}</label>;
-  }
   return <section role="dialog" aria-label="删除来源影响预览" className="source-delete-dialog">
     <h2>删除{target.label}</h2>
     <p>{impact?.name}。原文件和派生资料将清除。删除会话也会移除其消息；只删除附件会保留已完成的聊天正文。</p>
-    <p>以下记忆默认一起删除。取消勾选可保留已完整保存的事实，并标记“来源已删除”。</p>
-    {impact && (impact.memories.length ? impact.memories.map(renderMemory) : <p>没有关联的长期记忆。</p>)}
+    <p>与该来源关联的数据将一并清理。</p>
     {error && <p role="alert">{error}</p>}
     <button onClick={remove} disabled={busy || !impact}>{busy ? '正在清理…' : '确认删除来源'}</button><button onClick={onClose} disabled={busy}>取消</button>
   </section>;
@@ -78,7 +64,7 @@ export function SourceDeletionPending({ revision, onChanged }: { revision: numbe
       return () => { active = false; };
     }, [revision],
   );
-  // 沿原批准身份恢复，不重新选择关联事实或重复申请云预算。
+  // 沿原删除身份恢复，不重新选择关联事实或创建第二个清理任务。
   async function retry(event: MouseEvent<HTMLButtonElement>) {
     const id = event.currentTarget.dataset.id;
     if (!id) return;

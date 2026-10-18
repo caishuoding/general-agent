@@ -19,29 +19,28 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 
-from general_agent.source_deletion import SourceDeletion
-from general_agent.source_deletion_api import source_deletion_router
-from general_agent.attachment_api import attachment_router
-from general_agent.attachments import AttachmentService
-from general_agent.budget import BudgetInput, BudgetPaused, BudgetService, OperationContext
-from general_agent.calls import CallGateway
-from general_agent.capabilities import Capability, CapabilityResult, CapabilityService
-from general_agent.chat import ChatService
-from general_agent.execution import ChatExecution
-from general_agent.memory import MemoryService
-from general_agent.native_memory_api import native_memory_router
-from general_agent.memory_deletion_api import deletion_router
-from general_agent.memory_candidates_api import candidates_router
-from general_agent.memory_correction import MemoryCorrection
-from general_agent.memory_correction_api import correction_router
-from general_agent.database import Database
-from general_agent.rebuild import EmbeddingRebuild
-from general_agent.rebuild_api import rebuild_router
-from general_agent.embedding import EmbeddingConfiguration, EmbeddingIndexConflict
-from general_agent.provider import ModelClient, ModelFailure
-from general_agent.streaming import StreamingChat
-from general_agent.search import SearchService, SearchSettingsInput, SearchQueryInput, SearchDecisionInput
-from general_agent.settings import (PublicSettings, SettingsInput, SettingsStore, EmbeddingSettingsInput, EmbeddingSettingsStore, PublicEmbeddingSettings)
+from general_agent.memory.source_deletion import SourceDeletion
+from general_agent.memory.source_deletion_api import source_deletion_router
+from general_agent.attachments.api import attachment_router
+from general_agent.attachments.service import AttachmentService
+from general_agent.infrastructure.operations import OperationContext, OperationService
+from general_agent.infrastructure.calls import CallGateway
+from general_agent.infrastructure.capabilities import Capability, CapabilityResult, CapabilityService
+from general_agent.conversation.chat import ChatService
+from general_agent.conversation.execution import ChatExecution
+from general_agent.agent.conversation import ConversationGraph
+from general_agent.memory.service import MemoryService
+from general_agent.memory.automatic_api import native_memory_router
+from general_agent.memory.correction import MemoryCorrection
+from general_agent.memory.correction_api import correction_router
+from general_agent.memory.deletion_api import deletion_router
+from general_agent.infrastructure.database import Database
+from general_agent.infrastructure.logging import configure_agent_logging
+from general_agent.memory.embedding import EmbeddingConfiguration
+from general_agent.infrastructure.provider import ModelClient, ModelFailure
+from general_agent.conversation.streaming import StreamingChat
+from general_agent.search.service import SearchService, SearchSettingsInput, SearchQueryInput, SearchDecisionInput
+from general_agent.infrastructure.settings import (PublicSettings, SettingsInput, SettingsStore, EmbeddingSettingsInput, EmbeddingSettingsStore, PublicEmbeddingSettings)
 
 
 class ConversationInput(BaseModel):
@@ -69,13 +68,10 @@ class Message(BaseModel):
     created_at: datetime
     reply_to: UUID | None = None
     error: str | None = None
-    memory_candidates: list[dict[str, Any]] = Field(default_factory=list)
-    memory_discovery: dict[str, Any] | None = None
     automatic_memory: dict[str, Any] | None = None
     memory_action: dict[str, Any] | None = None
     memory_update: dict[str, Any] | None = None
     memory_recall: dict[str, Any] | None = None
-    budget_pause: dict[str, str] | None = None
     document_progress: dict[str, Any] | None = None
     attachment_ids: list[UUID] = Field(default_factory=list)
     search_action: dict[str, Any] | None = None
@@ -89,10 +85,6 @@ class ConversationDetail(Conversation):
     messages: list[Message] = Field(default_factory=list)
 
 
-class ApprovalInput(BaseModel):
-    pause_id: UUID
-
-
 class UsageRecord(BaseModel):
     id: UUID
     conversation_id: UUID | None
@@ -101,7 +93,6 @@ class UsageRecord(BaseModel):
     status: str
     operation_id: UUID | None = None
     base_url: str | None = None
-    estimated_cost: str | None = None
     unit: str = "chat_tokens"
     credits: str | None = None
     prompt_tokens: int | None
@@ -110,50 +101,57 @@ class UsageRecord(BaseModel):
     created_at: datetime
 
 
-def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None) -> FastAPI:
+def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None, mem0_transport: httpx.BaseTransport | None = None) -> FastAPI:
     """创建聊天、自动记忆和资料应用，测试可指定隔离数据库、目录及模型 HTTP 替身。"""
     database = Database(database_url or os.environ.get(
         "DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/general_agent"
     ))
     settings = SettingsStore(data_dir or Path(os.environ.get("APP_DATA_DIR", ".local")))
+    configure_agent_logging(settings.directory)
     embedding_settings = EmbeddingSettingsStore(settings.directory)
     embedding_configuration = EmbeddingConfiguration(database, embedding_settings)
-    budget = BudgetService(database)
-    model = CallGateway(budget, ModelClient(model_transport))
-    memory = MemoryService(database, embedding_configuration, model, settings.directory)
+    operations = OperationService(database)
+    model = CallGateway(operations, ModelClient(model_transport))
+    memory = MemoryService(database, embedding_configuration, model, settings.directory, mem0_transport)
     attachments = AttachmentService(database, settings.directory)
     search_settings = SettingsStore(settings.directory, 'search.json')
     search = SearchService(database, model, search_settings, memory, attachments, model_transport)
     execution = ChatExecution(model, memory, search)
-    source_deletion = SourceDeletion(execution.deletion,memory)
-    rebuild = EmbeddingRebuild(memory)
-    chat = ChatService(database, model, execution, attachments)
+    conversation_graph = ConversationGraph(database, model, execution, attachments)
+    source_deletion = SourceDeletion(execution.deletion, memory, conversation_graph.delete_threads)
+    chat = ChatService(database, model, execution, attachments, conversation_graph)
     capabilities = CapabilityService(database, model, settings, embedding_settings)
-    streaming = StreamingChat(database, model, execution, attachments)
+    streaming = StreamingChat(database, model, execution, attachments, conversation_graph)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """迁移并恢复重建、生成与来源删除；不自动外发重建请求，停机等待工作线程。"""
+        """迁移数据库并恢复生成、附件与来源删除，停机时等待工作线程。"""
         database.migrate()
-        rebuild.recover()
+        conversation_graph.start()
         streaming.recover()
         attachments.recover()
         source_deletion.recover()
         yield
         await asyncio.to_thread(streaming.close)
-        await asyncio.to_thread(rebuild.close)
+        conversation_graph.close()
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
-    app.include_router(rebuild_router(rebuild,settings))
     app.include_router(attachment_router(attachments))
     app.include_router(source_deletion_router(source_deletion))
     app.include_router(correction_router(MemoryCorrection(memory)))
-    app.include_router(candidates_router(execution.candidates,settings,execution.attachment_memory))
     app.include_router(native_memory_router(execution.automatic,settings))
     app.include_router(deletion_router(execution.deletion))
     app.state.calls = model
-    app.state.budget = budget
+    app.state.operations = operations
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
+
+    @app.get("/api/memories")
+    def list_memories() -> list[dict[str, Any]]:
+        """提供存储核验接口，供自动化测试和外部数据库管理工具使用。"""
+        try:
+            return memory.list()
+        except Exception:
+            raise HTTPException(503, "记忆存储暂时不可读取，请检查 Mem0 服务后重试。") from None
 
     @app.middleware("http")
     async def local_origin_only(request: Request, call_next: RequestResponseEndpoint) -> Response:
@@ -181,9 +179,9 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.get('/api/settings/search', response_model=PublicSettings)
     def get_search_settings() -> PublicSettings:
-        """展示独立 Tavily 配置状态，永不返回完整密钥。"""
+        """展示独立智谱搜索配置状态，旧供应商凭据不会被误当作可用。"""
         saved = search_settings.read()
-        return saved.public() if saved else PublicSettings(base_url='https://api.tavily.com',model='tavily-basic')
+        return saved.public() if saved and saved.model == 'zhipu-search-std' else PublicSettings(base_url='https://open.bigmodel.cn/api/paas/v4',model='zhipu-search-std')
 
     @app.put('/api/settings/search', response_model=PublicSettings)
     def save_search_settings(body: SearchSettingsInput) -> PublicSettings:
@@ -247,31 +245,29 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         return capabilities.results()
 
     def perform(purpose: str, scope: object, operation_id: UUID | None, conversation_id: UUID | None, action: Callable[[OperationContext], BaseModel], status: int = 200) -> JSONResponse:
-        """绑定请求范围并缓存已执行结果，暂停保留可恢复操作且不重复发送云端请求。"""
+        """绑定请求范围并缓存已执行结果，避免重复发送云端请求。"""
         try:
-            with budget.operation(purpose, scope, operation_id, conversation_id) as (operation, previous):
+            with operations.operation(purpose, scope, operation_id, conversation_id) as (operation, previous):
                 if previous and previous["result"] is not None:
                     return JSONResponse(previous["result"], status_code=previous["response_status"])
-                if budget.has_calls(operation):
+                if operations.has_calls(operation):
                     raise ValueError("该操作已执行但结果尚未确认，请先查看原会话或能力结果，不能重复发送。")
                 try:
                     result = action(operation).model_dump(mode="json")
                     response_status = status
                 except ModelFailure as error:
                     result, response_status = {"detail": str(error)}, 502
-                budget.cache_result(operation, result, response_status)
+                operations.cache_result(operation, result, response_status)
                 return JSONResponse(result, status_code=response_status)
-        except BudgetPaused as paused:
-            return JSONResponse(paused.public(), status_code=402)
         except LookupError as error:
             raise HTTPException(404, str(error)) from None
         except ValueError as error:
             raise HTTPException(409, str(error)) from None
 
     def perform_run(purpose: str, scope: object, operation_id: UUID | None, conversation_id: UUID, action: Callable[[OperationContext], None], status: int = 202) -> JSONResponse:
-        """幂等受理仅关联稳定回答身份，初始 202 不会冻结后续预算批准或最终结果。"""
+        """幂等受理仅关联稳定回答身份，重复提交不会创建第二次执行。"""
         try:
-            with budget.operation(purpose, scope, operation_id, conversation_id) as (operation, previous):
+            with operations.operation(purpose, scope, operation_id, conversation_id) as (operation, previous):
                 with database.connect() as connection:
                     existing = connection.execute('SELECT id FROM messages WHERE operation_id=%s', (operation.operation_id,)).fetchone()
                 if existing is None:
@@ -279,20 +275,10 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
                 return JSONResponse(get_conversation(conversation_id).model_dump(mode='json'),status_code=status)
         except ModelFailure as error:
             return JSONResponse({'detail':str(error)},status_code=502)
-        except BudgetPaused as paused:
-            return JSONResponse(paused.public(),status_code=402)
         except LookupError as error:
             raise HTTPException(404,str(error)) from None
         except ValueError as error:
             raise HTTPException(409,str(error)) from None
-
-    @app.get('/api/memories')
-    def list_memories() -> list[dict[str, Any]]:
-        """展示明确批准事实、原始会话与消息来源，以及实际保存状态。"""
-        try:
-            return memory.list()
-        except Exception:
-            raise HTTPException(503,'记忆存储暂时不可读取，请检查 PostgreSQL/pgvector 后重试。') from None
 
     @app.post("/api/settings/capabilities/{capability}")
     def check_capability(capability: Capability, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
@@ -306,40 +292,6 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
             return capabilities.check(capability, operation, saved)
         return perform("capability_" + capability, saved.revision, operation_id, None, check)
 
-    @app.get("/api/settings/budget")
-    def get_budget() -> dict[str, object]:
-        """展示人民币月度预算和按服务、模型绑定的单价。"""
-        return budget.settings()
-
-    @app.put("/api/settings/budget")
-    def save_budget(body: BudgetInput) -> dict[str, object]:
-        """保存可选月度预算，空预算允许继续使用并保留未知费用。"""
-        return budget.save(body)
-
-    @app.get("/api/usage/summary")
-    def usage_summary() -> dict[str, object]:
-        """返回上海时区当月全部调用统计，费用未知与已知部分分别展示。"""
-        return budget.summary()
-
-    @app.post("/api/budget/operations/{operation_id}/approve")
-    def approve_operation(operation_id: UUID, body: ApprovalInput) -> dict[str, str]:
-        """只批准持久化暂停挑战对应的下一次云端调用。"""
-        try:
-            budget.approve(operation_id, body.pause_id)
-        except ValueError as error:
-            raise HTTPException(409, str(error)) from None
-        return {"approval_scope": "next_call"}
-
-    @app.post("/api/budget/operations/{operation_id}/cancel")
-    def cancel_operation(operation_id: UUID) -> dict[str, str]:
-        """撤回该操作后续调用许可，已经发生的用量仍可继续记录。"""
-        budget.cancel(OperationContext(operation_id, ""))
-        with database.connect() as connection:
-            row = connection.execute('SELECT id,conversation_id FROM messages WHERE operation_id=%s',(operation_id,)).fetchone()
-        if row:
-            streaming.stop(row['conversation_id'],row['id'])
-        return {"status": "cancelled"}
-
     @app.get("/api/settings/embedding", response_model=PublicEmbeddingSettings)
     def get_embedding_settings() -> PublicEmbeddingSettings:
         """读取独立嵌入配置，始终隐藏完整密钥。"""
@@ -347,11 +299,14 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.put("/api/settings/embedding", response_model=PublicEmbeddingSettings)
     def save_embedding_settings(body: EmbeddingSettingsInput) -> PublicEmbeddingSettings:
-        """保存独立嵌入配置，已有索引时拒绝未经重建的向量空间变更。"""
+        """保存 Mem0 嵌入配置并立即验证连接，实际应用配置需重启 Mem0 服务。"""
         try:
-            return embedding_configuration.save(body, settings.read())
-        except EmbeddingIndexConflict as error:
-            raise HTTPException(409, str(error)) from None
+            result = embedding_configuration.save(body, settings.read())
+            saved = embedding_settings.read()
+            if saved is not None:
+                # 配置保存后立即验证，避免用户还要额外执行一次没有业务意义的手动检查。
+                perform("capability_embedding", saved.revision, None, None, lambda operation: capabilities.check("embedding", operation, saved))
+            return result
         except ValueError:
             raise HTTPException(422, "请检查嵌入地址、密钥和维度；复用连接前请先保存聊天配置。") from None
 
@@ -399,7 +354,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.post("/api/conversations/{conversation_id}/messages/{message_id}/retry", status_code=202)
     def retry_stream(conversation_id: UUID, message_id: UUID, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
-        """重试构成新的可计量操作，每次实际云端请求重新检查预算。"""
+        """重试构成新的可计量操作，每次实际云端请求单独记录用量。"""
         saved = settings.read()
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
@@ -418,7 +373,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.post('/api/conversations/{conversation_id}/messages/{message_id}/resume', response_model=ConversationDetail)
     def resume_stream(conversation_id: UUID, message_id: UUID) -> ConversationDetail:
-        """继续同一预算暂停步骤，读取当前配置但不挪用旧批准到新模型。"""
+        """继续同一搜索确认暂停步骤，读取当前配置但不挪用旧授权到新模型。"""
         saved = settings.read()
         if saved is None:
             raise HTTPException(409,'请先在设置中配置模型。')
@@ -462,8 +417,8 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.get("/api/usage", response_model=list[UsageRecord])
     def get_usage() -> list[UsageRecord]:
-        """返回最近调用的服务用量，未知值不会被替换为零。"""
-        return [UsageRecord.model_validate({**row, "estimated_cost": format(row["estimated_cost"], "f") if row["estimated_cost"] is not None else None, "credits": format(row["credits"], "f") if row["credits"] is not None else None}) for row in database.list_usage()]
+        """返回最近调用的状态和服务商提供的实际用量。"""
+        return [UsageRecord.model_validate({**row, "credits": format(row["credits"], "f") if row["credits"] is not None else None}) for row in database.list_usage()]
 
     frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     if frontend.is_dir():
