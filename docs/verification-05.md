@@ -14,7 +14,7 @@
 
 精确锁定 **mem0ai 1.0.11**，真实 OSS `Memory` CRUD 与官方 PGVector；未使用托管 MemoryClient。该版本并非最新，选择 1.x 是为了当前已批准文本的明确 CRUD 避免引入 2.x 实体提取与额外衍生集合生命周期；升级必须重新跑契约，适配器会拒绝其他版本。
 
-自定义兼容层 `mem0_adapter.py` 覆盖初始化、关闭、重置并注入 PostgreSQL 历史与显式预算嵌入器，完全不构造默认 SQLite 或默认云模型客户端。`mem0_history` 由 SQL 迁移管理；每次历史读写独立短连接，兼容 SDK 内部线程池。所选 SDK 实际契约为 add_history/get_history/reset/close；1.0.11 不存在较新版的最近消息或批量历史路径，未宣称实现那些不存在的方法。
+`mem0_adapter.py` 仅负责官方 PGVector、受控嵌入和生命周期；Mem0 2.2.1 的 history 使用官方 SQLiteManager 与 `history_db_path`，不再复制到 PostgreSQL。业务 PostgreSQL 只保存来源、版本、删除和操作状态。
 
 - `Memory.add(..., infer=False)` 只接收已批准事实字符串，一次嵌入、零 LLM。默认推断模型适配明确拒绝未批准的推断路径。
 - 每次 SDK 会话创建操作专属 embedder，绑定不可变 `OperationContext`，不依赖 ContextVar 或修改共享实例；所有嵌入通过现有 BoundCalls，先记 usage 再返回向量。

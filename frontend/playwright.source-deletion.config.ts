@@ -4,5 +4,5 @@ const modelPort = process.env.TEST_MODEL_PORT || '18117';
 export default defineConfig({
   testDir: './e2e', testMatch: 'source-deletion.spec.ts', workers: 1,
   use: { baseURL: `http://127.0.0.1:${appPort}`, trace: 'retain-on-failure' },
-  webServer: { command: `TEST_APP_PORT=${appPort} TEST_MODEL_PORT=${modelPort} ${process.env.TEST_PYTHON || '../.venv/bin/python'} ../tests/browser_attachment_memory_server.py`, url: `http://127.0.0.1:${appPort}/api/health`, reuseExistingServer: false, timeout: 30000 },
+  webServer: { command: `TEST_APP_PORT=${appPort} TEST_MODEL_PORT=${modelPort} ${process.env.TEST_PYTHON || '../.venv/bin/python'} ../tests/conversation/browser_server.py`, url: `http://127.0.0.1:${appPort}/api/health`, reuseExistingServer: false, timeout: 30000 },
 });

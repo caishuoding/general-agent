@@ -38,7 +38,7 @@ SDK 的向量和历史分别提交。重试先读取正式向量：如果内容�
 | `memory_updates` | 旧正文 `previous_fact`、批准新正文 `fact`、稳定动作 ID、目标版本、真实状态和来源。任务 09 / 15 删除记忆时必须清理这些正文；不能只清理 `memory_actions.fact`。 |
 | `memory_update_operations` | 每次原操作及显式重试的 `update_id -> operation_id` 关联，不含正文。删除时据此调用既有预算失效逻辑，清除所有关联 `cloud_operations.result` 缓存及批准，不能只处理更新记录上的最后 `operation_id`。 |
 | 更正的聊天来源 | `source_conversation_id`、`source_message_id` 与原记忆来源分别保存。任务 15 列出关联记忆时，应合并原来源和这些更正来源；保留记忆时按来源删除规则处理引用，而不是忽略这些外键。 |
-| 正式 SDK 与内部历史 | 同一 Mem0 向量实体可能含当前正文，`mem0_history` 包含旧新正文。记忆删除需清除向量、内部历史和上述业务更正正文；SDK metadata 中的原来源及 `correction_id` 仅作核对信息，业务记录决定授权。 |
+| 正式 SDK 与内部 history | 同一 Mem0 向量实体含当前正文，history 由 Mem0 官方 SQLiteManager 管理。记忆删除清除向量和业务更正正文；SDK metadata 中的原来源及 `correction_id` 仅作核对信息，业务记录决定授权。 |
 
 原始聊天和助手回执是独立来源记录；删除记忆本身不删除原聊天。防止从旧来源恢复仍由任务 09 实现，本文没有宣称已经完成该产品行为。任务 06 的召回检查点不复制正文，正式状态、版本或实体失效后就不会继续提供条目。
 

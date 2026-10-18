@@ -47,7 +47,7 @@ export function SearchCard({ message, conversationId, onUpdated }: Props) {
   if (action.status !== 'pending') return <div className={`search-status ${action.status}`} role="status">
     {({ planning: '正在准备搜索内容，尚未联网', approved: '搜索已获许可，等待执行', complete: '联网搜索已完成', rejected: '已拒绝外发，本次未联网', expired: '外发许可已失效', cancelled: '搜索已取消', failed: '联网搜索未完成' } as Record<string, string>)[action.status] || action.status}
     {action.error && <p>{action.error}</p>}
-    {action.status === 'approved' && message.status === 'paused' && !message.budget_pause && <button className="retry-button" onClick={resume} disabled={busy}>继续本次搜索</button>}
+    {action.status === 'approved' && message.status === 'paused' && <button className="retry-button" onClick={resume} disabled={busy}>继续本次搜索</button>}
     {error && <p role="alert">{error}</p>}
   </div>;
   return <section className="search-confirm" aria-label="搜索内容外发确认">
@@ -58,8 +58,8 @@ export function SearchCard({ message, conversationId, onUpdated }: Props) {
       // 展示参与查询的来源名称，正文以完整查询框中的文本为准。
       (source) => source.label,
     ).join('、')}</p>
-    <label>将发送给 Tavily 的完整查询<textarea value={query} onChange={edit} maxLength={2000} disabled={busy} /></label>
-    <p>批准仅用于当前查询的一次搜索，有效期 30 分钟；修改文本或来源变化后需要重新确认。预算许可另外检查。</p>
+    <label>将发送给智谱的完整查询<textarea value={query} onChange={edit} maxLength={70} disabled={busy} /></label>
+    <p>批准仅用于当前查询的一次搜索，有效期 30 分钟；修改文本或来源变化后需要重新确认。</p>
     <div className="search-confirm-actions">
       <button className="secondary-button" onClick={save} disabled={busy || !query.trim() || query === action.query}>保存查询修改</button>
       <button className="secondary-button" data-decision="reject" onClick={decide} disabled={busy}>拒绝发送</button>

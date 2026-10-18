@@ -13,4 +13,5 @@ uv sync --locked --python "$GENERAL_AGENT_PYTHON"
 pnpm --dir frontend install --frozen-lockfile
 pnpm --dir frontend run build
 docker compose up -d --build --wait
+docker compose -f mem0/docker-compose.yml up -d --build --wait
 exec .venv/bin/uvicorn general_agent.app:create_app --factory --app-dir backend --host 127.0.0.1 --port 8000

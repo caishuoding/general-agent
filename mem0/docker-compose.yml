@@ -1,0 +1,59 @@
+services:
+  mem0-postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: local-mem0-only
+    volumes:
+      - mem0-postgres-data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "127.0.0.1:8432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mem0:
+    image: mem0-official-local:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      mem0-postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8888:8000"
+    volumes:
+      - mem0-history:/app/history
+    environment:
+      POSTGRES_HOST: mem0-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: local-mem0-only
+      POSTGRES_COLLECTION_NAME: memories
+      APP_DB_NAME: mem0_app
+      AUTH_DISABLED: "true"
+      # 仅用于完成服务初始化；启动后通过官方 /configure 分别注入真实 LLM 和 embedding 配置。
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-bootstrap-only}
+      MEM0_TELEMETRY: "false"
+
+  mem0-config:
+    image: mem0-official-local:latest
+    depends_on:
+      mem0:
+        condition: service_started
+    command: ["python", "/configure/configure.py"]
+    environment:
+      MEM0_URL: http://mem0:8000
+    volumes:
+      - ./configure.py:/configure/configure.py:ro
+      - ../.local:/settings:ro
+    restart: "no"
+
+volumes:
+  mem0-postgres-data:
+  mem0-history:

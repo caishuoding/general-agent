@@ -4,7 +4,7 @@ type Props = { progress: DocumentProcessing; status: string };
 
 // 展示本次资料任务的持久进度和读取范围，暂停、失败或停止均不声称处理完成。
 export function DocumentProgress({ progress, status }: Props) {
-  const state = status === 'paused' ? '等待预算' : status === 'stopped' ? '已停止' : status === 'failed' ? '未完成' : progress.status === 'complete' ? '已完成' : progress.status === 'ready' ? '正在形成最终回答' : '正在处理资料';
+  const state = status === 'paused' ? '等待确认' : status === 'stopped' ? '已停止' : status === 'failed' ? '未完成' : progress.status === 'complete' ? '已完成' : progress.status === 'ready' ? '正在形成最终回答' : '正在处理资料';
 
   // 缺口与解析限制作为纯文本呈现，不让文档内容成为可执行指令。
   function renderNote(note: string, index: number) {

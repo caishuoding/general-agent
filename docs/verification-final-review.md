@@ -26,10 +26,10 @@
 
 | 范围 | 结果 |
 | --- | --- |
-| `tests/test_final_review.py tests/test_search.py tests/test_attachments.py tests/test_images.py` | 32 passed（41.50s） |
-| `tests/test_final_review.py tests/test_search.py`，最终搜索规则 | 17 passed（23.35s） |
-| `tests/test_summary.py tests/test_history.py tests/test_streaming.py tests/test_memory_recall.py` 加预算阈值/单次批准、在途停止重试、取消许可三项 | 30 passed（30.66s） |
-| `tests/test_source_deletion.py` 加重建中保留来源已删事实、在途来源删除、预算重启后清影子副本三项 | 12 passed（15.16s） |
+| `tests/app/test_final_review.py tests/search/test_search.py tests/attachments/test_attachments.py tests/attachments/test_images.py` | 32 passed（41.50s） |
+| `tests/app/test_final_review.py tests/search/test_search.py`，最终搜索规则 | 17 passed（23.35s） |
+| `tests/conversation/test_summary.py tests/conversation/test_history.py tests/conversation/test_streaming.py tests/memory/test_memory_recall.py` 加预算阈值/单次批准、在途停止重试、取消许可三项 | 30 passed（30.66s） |
+| `tests/memory/test_source_deletion.py` 加重建中保留来源已删事实、在途来源删除、预算重启后清影子副本三项 | 12 passed（15.16s） |
 | `playwright.source-deletion.config.ts` | 2 passed（8.5s） |
 | `playwright.search.config.ts` | 1 passed（5.2s） |
 | 默认配置下 `summary.spec.ts` | 1 passed（6.7s） |

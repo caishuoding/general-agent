@@ -12,12 +12,12 @@
 
 ## 真 Mem0 删除契约
 
-使用锁定 `mem0ai==1.0.11` 的真实 SDK。删除时按 `embedding_indexes.personal_memories` 保存的地址、模型和维度打开无云端调用权限的会话，不使用当前密钥发请求。
+使用锁定 `mem0ai==2.2.1` 的真实 SDK。删除时按 `embedding_indexes.personal_memories` 保存的地址、模型和维度打开无云端调用权限的会话，不使用当前密钥发请求；Mem0 history 由官方 SQLiteManager 管理。
 
 1. 同时核对业务 `memory_id` 和向量 metadata 的 `action_id + user_id=local-person`，覆盖 SDK 向量已提交而业务尚未获得标识的部分成功。
 2. 在调用 SDK 前把发现的标识写入 `memory_deletions.memory_ids`。只有身份匹配时才调用真实 `Memory.delete`。
-3. SDK 默认删除会追加含旧正文的 DELETE 历史，所以另执行 `PgHistory.purge`，并核验 `get` 不存在、`history` 为空、该动作向量集合为空。
-4. 向量删除后 purge 失败，重试仍使用持久标识清历史，不把“向量不存在”当作完整成功。全部完成后清内部标识列表，仅保留无正文完成状态。
+3. 只有身份匹配时才调用真实 `Memory.delete`，并核验 `get` 不存在及该动作向量集合为空；不直接操作 Mem0 内部 history。
+4. 向量删除失败时按持久标识重试，不把“向量不存在”误判为其他条目已删除。全部完成后清内部业务标识列表，仅保留无正文完成状态。
 
 删除不增加云端用量；已发生的保存、更正、召回、回答与搜索费用保留。
 

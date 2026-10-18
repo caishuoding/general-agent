@@ -16,7 +16,7 @@ DOCX 使用锁定的 `python-docx==1.2.0`，按正文顺序提取普通段落和
 
 `012_document_parse_info.sql` 为 `attachments` 增加 `parse_info JSONB NOT NULL DEFAULT '{}'`，原文件继续位于 `APP_DATA_DIR/attachments/<UUID>`。元信息随公开附件列表及本轮模型资料返回，重启后保留。它包含 `format`、`total_units`、`readable_units`、`coverage`、`missing_units`、`limitations`；每份来源仍使用持久 `A{citation_id}`，原有引用白名单不变。
 
-`general_agent.documents.parse_document(path, extension) -> ParsedDocument` 返回 Pydantic 结果：`chunks: list[tuple[location, text]]`（最多 1500 字符/块）、`info: DocumentInfo`、`error: str | None`。`AttachmentService.process` 从登记的 filename 识别格式，对 PDF/DOCX 调此入口；成功后事务保存片段及范围，失败持久记录原因且不能绑定给消息。该入口不发模型请求、不保存记忆、不访问数据库；图片解析由任务 12 的独立分支处理。
+`general_agent.attachments.documents.parse_document(path, extension) -> ParsedDocument` 返回 Pydantic 结果：`chunks: list[tuple[location, text]]`（最多 1500 字符/块）、`info: DocumentInfo`、`error: str | None`。`AttachmentService.process` 从登记的 filename 识别格式，对 PDF/DOCX 调此入口；成功后事务保存片段及范围，失败持久记录原因且不能绑定给消息。该入口不发模型请求、不保存记忆、不访问数据库；图片解析由任务 12 的独立分支处理。
 
 解析使用子进程，环境只传模块路径、系统 PATH 和 locale，不传应用服务配置。父进程限制 20 秒墙钟时间并监测 512 MiB RSS，子进程限制 CPU 软/硬限额 10/12 秒、输出文件 16,000,000 字节；Linux 另设置数据段 512 MiB / 地址空间 1 GiB 限额，macOS 使用 RSS 监测。异常退出和限额终止都返回明确失败，不将截断输出当成功；子进程退出或取消后回收。这里是资源约束，不是系统级网络沙箱。
 
@@ -24,7 +24,7 @@ DOCX 使用锁定的 `python-docx==1.2.0`，按正文顺序提取普通段落和
 
 ## 验证
 
-测试 seam 延续已批准的公开 HTTP + 真实 PostgreSQL + 外部 HTTP 替身，少量浏览器检验用户可见流程。没有 mock 内部解析器或直接查询数据库判定业务结果。新增的 PDF 和 Word 均为可被实际解析器读取的真实格式样本；浏览器混合 PDF 保存在 `tests/fixtures/partial.pdf`。
+测试 seam 延续已批准的公开 HTTP + 真实 PostgreSQL + 外部 HTTP 替身，少量浏览器检验用户可见流程。没有 mock 内部解析器或直接查询数据库判定业务结果。新增的 PDF 和 Word 均为可被实际解析器读取的真实格式样本；浏览器混合 PDF 保存在 `tests/attachments/fixtures/partial.pdf`。
 
 红灯包括：PDF/DOCX 上传被拒、压缩展开超限仍可用、UI 不显示部分覆盖、UTF-16 声明绕过检查。逐条增加公开行为测试并修复。正常样本还发现 macOS 不支持使用所选数据段限额，调整为父进程 RSS 监测后正常解析及限制均通过。
 

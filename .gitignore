@@ -1,8 +1,12 @@
 .venv/
 .cache/
+.pnpm-store/
+.uv-cache/
 .local/
 .pytest_cache/
 .mypy_cache/
+.test-runtime/
+.test-tmp*/
 __pycache__/
 *.py[cod]
 .env

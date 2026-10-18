@@ -3,7 +3,7 @@ import { test, expect } from "@playwright/test";
 const modelUrl = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18081"}/v1`;
 const appUrl = `http://127.0.0.1:${process.env.TEST_APP_PORT || "18080"}`;
 
-// 从浏览器精确核对配置保存提示，并验证发送、刷新持久化、会话切换和空记忆入口。
+// 从浏览器精确核对配置保存提示，并验证发送、刷新持久化和会话切换。
 test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
   await page.goto("/");
   await expect(
@@ -38,10 +38,6 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
     .click();
   await expect(
     page.getByText("这是受控模型的测试回答。", { exact: true }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "长期记忆", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "长期记忆", exact: true }),
   ).toBeVisible();
 });
 

@@ -8,7 +8,7 @@ export default defineConfig({
   workers: 1,
   use: { baseURL: `http://127.0.0.1:${appPort}`, trace: "retain-on-failure" },
   webServer: {
-    command: `${process.env.TEST_PYTHON || "../.venv/bin/python"} ../tests/browser_capabilities_server.py`,
+    command: `${process.env.TEST_PYTHON || "../.venv/bin/python"} ../tests/infrastructure/browser_capabilities_server.py`,
     url: `http://127.0.0.1:${appPort}/api/health`,
     reuseExistingServer: false,
     timeout: 30000,

@@ -1,6 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { SearchSettings } from "./SearchSettings";
-import { BudgetPanel } from "./BudgetPanel";
 import { ModelCapabilities } from "./ModelCapabilities";
 import { api, errorMessage, type Settings, type Usage } from "./api";
 
@@ -10,7 +9,7 @@ type Props = {
   onSaved: (value: Settings) => void;
 };
 
-// 管理聊天、独立嵌入与搜索设置、月度预算和真实用量；保存不代表验证通过。
+// 管理聊天、独立嵌入与搜索设置以及真实调用用量；保存不代表验证通过。
 export function SettingsPanel({ settings, usage, onSaved }: Props) {
   const [recentUsage, setRecentUsage] = useState(usage);
   const [saving, setSaving] = useState(false);
@@ -20,7 +19,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
   // 同步页面首次进入后加载的用量，能力检查也可更新本地列表。
   useEffect(() => { setRecentUsage(usage); }, [usage]);
 
-  // 搜索连接保存后刷新用量引用，使预算面板加载新的搜索服务身份。
+  // 搜索连接保存后刷新最近调用记录。
   async function searchSaved() { setRecentUsage(await api<Usage[]>("/usage")); }
 
   // 从表单读取连接信息，成功后清空密钥输入并更新公开配置状态。
@@ -59,7 +58,6 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
         </td>
         <td>{call.unit === "credits" ? `${call.credits ?? "未知"} credits` : call.prompt_tokens ?? "未知"}</td>
         <td>{call.unit === "credits" ? "—" : call.completion_tokens ?? "未知"}</td>
-        <td>{call.estimated_cost === null ? "未知" : `¥${call.estimated_cost}`}</td>
         <td>
           {new Date(call.created_at).toLocaleString("zh-CN", {
             month: "numeric",
@@ -142,14 +140,13 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
       </div>
       <ModelCapabilities settings={settings} onUsageChanged={setRecentUsage} />
       <SearchSettings onSaved={searchSaved} />
-      <BudgetPanel settings={settings} usage={recentUsage} onUsageChanged={setRecentUsage} />
       <div className="settings-card usage-card">
         <div className="card-heading">
           <h3>最近调用</h3>
           <span className="small-label">本应用</span>
         </div>
         <p className="field-help">
-          最近 100 次实际调用及估算费用；月度预算按全月全部记录计算。缺失用量和费用显示为未知。
+          最近 100 次实际调用及服务商返回的用量。缺失用量显示为未知。
         </p>
         {recentUsage.length ? (
           <div className="table-scroll">
@@ -160,7 +157,6 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
                   <th>状态</th>
                   <th>输入 / credits</th>
                   <th>输出</th>
-                  <th>估算费用</th>
                   <th>时间</th>
                 </tr>
               </thead>

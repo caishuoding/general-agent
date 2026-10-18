@@ -6,7 +6,7 @@ test('PDF部分可读范围与页码在上传和刷新后可见', async ({ page,
   await page.goto('/');
   await page.getByRole('button', { name: '新建会话' }).click();
   await expect(page.getByLabel('上传会话附件')).toBeEnabled();
-  await page.getByLabel('上传会话附件').setInputFiles('../tests/fixtures/partial.pdf');
+  await page.getByLabel('上传会话附件').setInputFiles('../tests/attachments/fixtures/partial.pdf');
   await expect(page.getByText('文字可用（部分） · partial.pdf', { exact: true })).toBeVisible();
   await expect(page.getByText('文字提取：1 / 2 页', { exact: true })).toBeVisible();
   await expect(page.getByText('第 2 页没有可提取文字（可能是空白或扫描图像）', { exact: true })).toBeVisible();
