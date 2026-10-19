@@ -8,13 +8,21 @@ import httpx
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
-from tests.auth.support import authenticated_client
+from tests.auth.support import authenticated_client, set_global_settings
 
 
 def configure(client: TestClient) -> str:
-    """配置固定模型并创建用于资料问答的独立会话。"""
-    client.put('/api/settings', json={'base_url': 'https://model.example/v1', 'model': 'controlled', 'api_key': 'test-key'})
+    """使用已保存的全局模型创建用于资料问答的独立会话。"""
     return str(client.post('/api/conversations', json={}).json()['id'])
+
+
+def configure_settings(database_url: str, tmp_path: Path) -> None:
+    """通过管理员入口配置资料测试使用的全局模型。"""
+    set_global_settings(
+        database_url,
+        tmp_path,
+        {"base_url": "https://model.example/v1", "model": "controlled", "api_key": "test-key"},
+    )
 
 
 def attachment_documents(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -54,6 +62,7 @@ def test_uploaded_text_is_sent_in_full_and_survives_restart(database_url: str, t
         return httpx.Response(200, json={'choices': [{'message': {'content': '蓝鲸项目星期五交付。'}}]})
 
     transport = httpx.MockTransport(provider)
+    configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, transport) as client:
         conversation = configure(client)
         uploaded = client.post(
@@ -88,6 +97,7 @@ def test_attachments_are_isolated_by_conversation(database_url: str, tmp_path: P
         payloads.append(payload)
         return httpx.Response(200, json={'choices': [{'message': {'content': '已收到资料。'}}]})
 
+    configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         first = configure(client)
         second = client.post('/api/conversations', json={}).json()['id']
@@ -113,6 +123,7 @@ def test_message_history_shows_attachments_used_by_each_user_message(
         json.loads(request.content)
         return httpx.Response(200, json={'choices': [{'message': {'content': '已阅读资料。'}}]})
 
+    configure_settings(database_url, tmp_path)
     with authenticated_client(
         database_url, tmp_path, httpx.MockTransport(provider)
     ) as client:
@@ -150,6 +161,7 @@ def test_upload_limits_and_failed_files_are_truthful(database_url: str, tmp_path
         assert 'empty' not in str(payload['messages'])
         return httpx.Response(200, json={'choices': [{'message': {'content': '没有可读取资料。'}}]})
 
+    configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation = configure(client)
         assert client.post(f'/api/conversations/{conversation}/attachments', files=[('files', (f'{index}.txt', b'text')) for index in range(6)]).status_code == 422
@@ -173,6 +185,7 @@ def test_long_document_tail_is_included_in_full_context(database_url: str, tmp_p
         assert documents and sentinel in documents[0]['content']
         return httpx.Response(200, json={'choices': [{'message': {'content': '口令是海风。'}}]})
 
+    configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation = configure(client)
         client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('long.txt', text.encode())})

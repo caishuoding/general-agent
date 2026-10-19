@@ -12,7 +12,7 @@ from uuid import UUID
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.base import RequestResponseEndpoint
@@ -158,9 +158,9 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     @app.get("/api/memories")
     def list_memories(request: Request) -> list[dict[str, Any]]:
         """提供存储核验接口，供自动化测试和外部数据库管理工具使用。"""
-        admin = require_admin(request)
+        user = current_user(request)
         try:
-            return memory.list(admin.id)
+            return memory.list(user.id)
         except Exception:
             raise HTTPException(503, "记忆存储暂时不可读取，请检查 Mem0 服务后重试。") from None
 
@@ -190,6 +190,10 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
             "/api/auth/password",
         }:
             return JSONResponse(status_code=403, content={"detail": "请先修改密码。"})
+        if user.role == "admin" and not path.startswith(
+            ("/api/auth/", "/api/admin/", "/api/settings", "/api/health")
+        ):
+            return JSONResponse(status_code=403, content={"detail": "管理员请使用管理端。"})
         return await call_next(request)
 
     @app.get("/api/health")
@@ -384,6 +388,12 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         return [UsageRecord.model_validate({**row, "credits": format(row["credits"], "f") if row["credits"] is not None else None}) for row in database.list_usage(current_user(request).id)]
 
     frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    if (frontend / "admin.html").is_file():
+        @app.get("/admin")
+        @app.get("/admin/")
+        def admin_frontend() -> FileResponse:
+            """为独立管理端提供单独入口，不与用户聊天页面共用路由。"""
+            return FileResponse(frontend / "admin.html")
     if frontend.is_dir():
         app.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
     return app

@@ -52,7 +52,10 @@ def test_bootstrap_admin_forces_password_change_and_blocks_public_login(
         )
         assert changed.status_code == 200
         assert changed.json()["must_change_password"] is False
-        assert client.get("/api/conversations").status_code == 200
+        assert client.get("/api/admin/users").status_code == 200
+        user_area = client.get("/api/conversations")
+        assert user_area.status_code == 403
+        assert user_area.json()["detail"] == "管理员请使用管理端。"
 
         client.cookies.set(COOKIE_NAME, old_token)
         assert client.get("/api/auth/me").status_code == 401

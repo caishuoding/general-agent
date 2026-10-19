@@ -11,7 +11,7 @@ from psycopg.rows import dict_row
 from general_agent.app import create_app
 from tests.auth.support import (
     TEST_ADMIN_PASSWORD,
-    authenticated_client,
+    admin_client,
     login_admin,
     login_and_change_password,
 )
@@ -21,9 +21,9 @@ def test_admin_creates_disables_resets_and_protects_last_admin(
     database_url: str, tmp_path: Path
 ) -> None:
     """管理员可管理账号，但停用或降级最后一个管理员会被拒绝。"""
-    with authenticated_client(database_url, tmp_path) as admin_client:
-        admin_id = admin_client.get("/api/auth/me").json()["id"]
-        created = admin_client.post(
+    with admin_client(database_url, tmp_path) as admin:
+        admin_id = admin.get("/api/auth/me").json()["id"]
+        created = admin.post(
             "/api/admin/users",
             json={"username": "alice", "password": "alice-temp-pass", "role": "user"},
         )
@@ -31,12 +31,12 @@ def test_admin_creates_disables_resets_and_protects_last_admin(
         alice_id = created.json()["id"]
         assert created.json()["must_change_password"] is True
 
-        duplicate = admin_client.post(
+        duplicate = admin.post(
             "/api/admin/users",
             json={"username": "alice", "password": "another", "role": "user"},
         )
         assert duplicate.status_code == 422
-        invalid = admin_client.post(
+        invalid = admin.post(
             "/api/admin/users",
             json={"username": "Alice!", "password": "another", "role": "user"},
         )
@@ -46,7 +46,7 @@ def test_admin_creates_disables_resets_and_protects_last_admin(
             login_and_change_password(alice, "alice", "alice-temp-pass", "alice-strong-pass")
             assert alice.get("/api/admin/users").status_code == 403
 
-            disabled = admin_client.patch(
+            disabled = admin.patch(
                 f"/api/admin/users/{alice_id}", json={"status": "disabled"}
             )
             assert disabled.status_code == 200
@@ -56,7 +56,7 @@ def test_admin_creates_disables_resets_and_protects_last_admin(
                 json={"username": "alice", "password": "alice-strong-pass"},
             ).status_code == 401
 
-            enabled = admin_client.patch(
+            enabled = admin.patch(
                 f"/api/admin/users/{alice_id}", json={"status": "active"}
             )
             assert enabled.status_code == 200
@@ -65,7 +65,7 @@ def test_admin_creates_disables_resets_and_protects_last_admin(
                 json={"username": "alice", "password": "alice-strong-pass"},
             ).status_code == 200
 
-            reset = admin_client.post(
+            reset = admin.post(
                 f"/api/admin/users/{alice_id}/reset-password",
                 json={"password": "alice-reset-pass"},
             )
@@ -79,19 +79,19 @@ def test_admin_creates_disables_resets_and_protects_last_admin(
             assert relogin.status_code == 200
             assert relogin.json()["must_change_password"] is True
 
-        ops = admin_client.post(
+        ops = admin.post(
             "/api/admin/users",
             json={"username": "ops_admin", "password": "ops-temp-pass", "role": "admin"},
         )
         assert ops.status_code == 201
         ops_id = ops.json()["id"]
-        assert admin_client.patch(
+        assert admin.patch(
             f"/api/admin/users/{ops_id}", json={"status": "disabled"}
         ).status_code == 200
-        assert admin_client.patch(
+        assert admin.patch(
             f"/api/admin/users/{admin_id}", json={"status": "disabled"}
         ).status_code == 409
-        assert admin_client.patch(
+        assert admin.patch(
             f"/api/admin/users/{admin_id}", json={"role": "user"}
         ).status_code == 409
 
@@ -106,12 +106,12 @@ def test_admin_can_view_all_user_content_read_only_and_audit_it(
         assert payload["messages"]
         return httpx.Response(200, json={"choices": [{"message": {"content": "管理员可见的回答"}}]})
 
-    with authenticated_client(database_url, tmp_path) as admin_client:
-        admin_client.put(
+    with admin_client(database_url, tmp_path) as admin:
+        admin.put(
             "/api/settings",
             json={"base_url": "https://model.example/v1", "model": "chat", "api_key": "test-key"},
         )
-        created = admin_client.post(
+        created = admin.post(
             "/api/admin/users",
             json={"username": "bob", "password": "bob-temp-pass", "role": "user"},
         )
@@ -140,24 +140,24 @@ def test_admin_can_view_all_user_content_read_only_and_audit_it(
             )
             assert sent.status_code == 200, sent.text
 
-        conversations = admin_client.get(f"/api/admin/users/{bob_id}/conversations")
+        conversations = admin.get(f"/api/admin/users/{bob_id}/conversations")
         assert conversations.status_code == 200
         assert [item["id"] for item in conversations.json()] == [conversation]
-        detail = admin_client.get(
+        detail = admin.get(
             f"/api/admin/users/{bob_id}/conversations/{conversation}"
         )
         assert detail.status_code == 200
         assert any(item["content"] == "管理员可见的回答" for item in detail.json()["messages"])
-        download = admin_client.get(
+        download = admin.get(
             f"/api/admin/users/{bob_id}/conversations/{conversation}"
             f"/attachments/{uploaded['id']}/file"
         )
         assert download.status_code == 200
         assert download.content == b"bob private attachment"
-        assert admin_client.get(f"/api/admin/users/{bob_id}/memories").status_code == 200
-        assert admin_client.get(f"/api/admin/users/{bob_id}/search").status_code == 200
-        assert admin_client.get(f"/api/admin/users/{bob_id}/usage").status_code == 200
-        assert admin_client.post(
+        assert admin.get(f"/api/admin/users/{bob_id}/memories").status_code == 200
+        assert admin.get(f"/api/admin/users/{bob_id}/search").status_code == 200
+        assert admin.get(f"/api/admin/users/{bob_id}/usage").status_code == 200
+        assert admin.post(
             f"/api/admin/users/{bob_id}/conversations/{conversation}/messages",
             json={"content": "管理员不能代发"},
         ).status_code in {404, 405}

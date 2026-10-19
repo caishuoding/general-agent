@@ -4,6 +4,10 @@ import { api, errorMessage, type AuthUser } from "./api";
 
 type LoginProps = {
   onAuthenticated: (user: AuthUser) => void;
+  expectedRole?: "admin" | "user";
+  kicker?: string;
+  title?: string;
+  description?: string;
 };
 
 type ChangePasswordProps = {
@@ -15,7 +19,13 @@ type ChangePasswordProps = {
 };
 
 // 渲染用户名密码登录页，并处理统一登录错误。
-export function LoginScreen({ onAuthenticated }: LoginProps) {
+export function LoginScreen({
+  onAuthenticated,
+  expectedRole = "user",
+  kicker = "个人对话空间",
+  title = "登录",
+  description = "账号由管理员创建，不开放注册。",
+}: LoginProps) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -29,7 +39,7 @@ export function LoginScreen({ onAuthenticated }: LoginProps) {
     try {
       const user = await api<AuthUser>("/auth/login", {
         method: "POST",
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, expected_role: expectedRole }),
       });
       onAuthenticated(user);
     } catch (failure) {
@@ -43,9 +53,9 @@ export function LoginScreen({ onAuthenticated }: LoginProps) {
     <main className="auth-shell">
       <section className="auth-card" aria-labelledby="login-title">
         <div className="auth-brand" aria-hidden="true">✳</div>
-        <p className="auth-kicker">个人对话空间</p>
-        <h1 id="login-title">登录</h1>
-        <p className="auth-description">账号由管理员创建，不开放注册。</p>
+        <p className="auth-kicker">{kicker}</p>
+        <h1 id="login-title">{title}</h1>
+        <p className="auth-description">{description}</p>
         <form className="auth-form" onSubmit={submit}>
           <label className="auth-field">
             <span>用户名</span>

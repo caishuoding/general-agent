@@ -11,8 +11,28 @@ import httpx
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
-from tests.auth.support import authenticated_client
+from tests.auth.support import admin_client, authenticated_client, set_global_settings
 from tests.attachments.test_attachments import configure
+
+
+def configure_search_settings(
+    database_url: str,
+    tmp_path: Path,
+    search_base: str | None = None,
+    search_key: str = "test-key",
+) -> None:
+    """通过管理员入口配置全局聊天模型和可选搜索连接。"""
+    set_global_settings(
+        database_url,
+        tmp_path,
+        {"base_url": "https://model.example/v1", "model": "chat", "api_key": "test-key"},
+    )
+    if search_base is not None:
+        with admin_client(database_url, tmp_path) as admin:
+            assert admin.put(
+                "/api/settings/search",
+                json={"base_url": search_base, "api_key": search_key},
+            ).status_code == 200
 
 
 def reply(payload: dict[str, Any], text: str) -> httpx.Response:
@@ -130,11 +150,12 @@ def test_search_is_a_model_tool_without_confirmation_and_keeps_sources(database_
             return tool_call("search_web", {"query": "杭州天气"})
         return structured_text("普通回答。")
 
+    configure_search_settings(database_url, tmp_path, "https://search.example", "test-key")
+
     with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure(client)
         assert client.post(f"/api/conversations/{conversation}/messages", json={"content": "你好"}).status_code == 200
         assert searches == []
-        client.put("/api/settings/search", json={"base_url": "https://search.example", "api_key": "search-test-key"})
         response = client.post(f"/api/conversations/{conversation}/messages", json={"content": "杭州天气怎么样"})
 
         assert response.status_code == 200
@@ -162,6 +183,8 @@ def test_unconfigured_search_returns_tool_error_without_leaking_provider_details
             assert "尚未配置智谱 Web Search" in str(payload["messages"])
             return structured_text("请先在设置中配置智谱搜索密钥。")
         return tool_call("search_web", {"query": "杭州天气"})
+
+    configure_search_settings(database_url, tmp_path)
 
     with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure(client)
@@ -202,9 +225,10 @@ def test_attachment_and_memory_pii_are_sent_by_search_tool_without_extra_confirm
             return tool_call("search_memories", {"query": "住址"}, "call-memory-search")
         return tool_call("search_web", {"query": "青松路 88 号附近咖啡店"})
 
+    configure_search_settings(database_url, tmp_path, "https://search.example", "test-key")
+
     with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure(client)
-        client.put("/api/settings/search", json={"base_url": "https://search.example", "api_key": "test-key"})
         saved = client.post(f"/api/conversations/{conversation}/messages", json={"content": "请记住：我住在青松路 88 号"})
         assert saved.json()["messages"][-1]["status"] == "complete"
         attachment_response = client.post(
@@ -244,9 +268,10 @@ def test_failed_search_preserves_actual_usage_and_truthful_terminal_state(databa
             return structured_text("联网搜索未完成，请稍后重试。")
         return tool_call("search_web", {"query": "杭州天气"})
 
+    configure_search_settings(database_url, tmp_path, "https://search.example", "test-key")
+
     with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure(client)
-        client.put("/api/settings/search", json={"base_url": "https://search.example", "api_key": "test-key"})
         response = client.post(f"/api/conversations/{conversation}/messages", json={"content": "联网查杭州天气"})
 
         assert response.status_code == 200
@@ -265,12 +290,16 @@ def test_search_credentials_remain_independent_and_private(database_url: str, tm
         assert request.url.host == "model.example"
         return structured_text("你好。")
 
-    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
-        conversation = configure(client)
-        response = client.put("/api/settings/search", json={"base_url": "https://search.example", "api_key": "private-search-key"})
+    configure_search_settings(database_url, tmp_path, "https://search.example", "test-key")
+
+    with admin_client(database_url, tmp_path) as admin:
+        response = admin.put("/api/settings/search", json={"base_url": "https://search.example", "api_key": "private-search-key"})
         assert response.status_code == 200 and "private-search-key" not in response.text
         if os.name != "nt":
             assert (tmp_path / "search.json").stat().st_mode & 0o777 == 0o600
-        assert client.put("/api/settings/search", json={"base_url": "https://other.example"}).status_code == 422
-        assert client.delete("/api/settings/search").status_code == 200
+        assert admin.put("/api/settings/search", json={"base_url": "https://other.example"}).status_code == 422
+        assert admin.delete("/api/settings/search").status_code == 200
+
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
+        conversation = configure(client)
         assert client.post(f"/api/conversations/{conversation}/messages", json={"content": "你好"}).status_code == 200

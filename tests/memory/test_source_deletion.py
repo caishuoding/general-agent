@@ -7,15 +7,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
-from tests.auth.support import authenticated_client
+from tests.auth.support import admin_client, authenticated_client
 from tests.fake_mem0 import CallableTransport
-from tests.memory.test_memory import configure_memory, memory_provider
+from tests.memory.test_memory import configure_memory, memory_provider, configure_memory_settings
 from tests.memory.test_memory_recall import recall_provider
 
 
 def test_conversation_delete_rejects_old_preview_and_retained_memory_survives_restart(database_url: str, tmp_path: Path) -> None:
     """旧影响预览不扩大删除，整会话移除后保留事实可查可召回。"""
     transport = CallableTransport(recall_provider)
+    configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, transport) as client:
         conversation = configure_memory(client)
         client.post(f'/api/conversations/{conversation}/messages', json={'content': '请记住：我喜欢简洁的中文回答'})
@@ -62,9 +63,15 @@ def test_attachment_delete_clears_search_links_and_original_file(database_url: s
             return tool_call('search_web', {'query': '删除测试私密住址附近服务'})
         return reply(payload, '普通回答。')
 
+    configure_memory_settings(database_url, tmp_path)
+    with admin_client(database_url, tmp_path) as admin:
+        assert admin.put(
+            '/api/settings/search',
+            json={'base_url': 'https://search.example', 'api_key': 'test-only'},
+        ).status_code == 200
+
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation = configure(client)
-        client.put('/api/settings/search', json={'base_url': 'https://search.example', 'api_key': 'test-only'})
         uploaded = client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('私密.txt', '删除测试私密住址，主人陈敏。'.encode())}).json()[0]
         answer = client.post(f'/api/conversations/{conversation}/messages', json={'content': '联网搜索：根据资料查询服务'}).json()['messages'][-1]
         request = answer['search_action']
@@ -99,6 +106,7 @@ def test_parser_late_result_cannot_restore_deleted_file(database_url: str, tmp_p
         return content
 
     monkeypatch.setattr(Path, 'read_bytes', blocked_read)
+    configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(memory_provider)) as client:
         conversation = configure(client)
         with ThreadPoolExecutor() as pool:

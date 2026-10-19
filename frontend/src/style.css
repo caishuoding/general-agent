@@ -212,6 +212,79 @@ button:hover:not(:disabled) {
   padding: 28px 40px 60px;
 }
 
+.admin-shell {
+  min-height: 100dvh;
+  background: #fbfaf7;
+}
+
+.admin-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px 32px;
+  border-bottom: 1px solid #e6e6dd;
+  background: #f0f0e9;
+}
+
+.admin-title,
+.admin-session {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.admin-title div {
+  display: grid;
+}
+
+.admin-title small {
+  color: #7d857d;
+  font-size: 11px;
+}
+
+.admin-mark {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 10px;
+  background: #303831;
+  color: #fbfaf7;
+}
+
+.admin-session {
+  color: #687168;
+  font-size: 13px;
+}
+
+.admin-session button {
+  padding: 5px 9px;
+  border: 1px solid #dfe1d9;
+  border-radius: 8px;
+  color: #8b5b50;
+  font-size: 12px;
+}
+
+.admin-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 14px 32px 0;
+}
+
+.admin-tabs button {
+  padding: 8px 12px;
+  border-radius: 9px 9px 0 0;
+  color: #778077;
+  font-size: 13px;
+}
+
+.admin-tabs button.active {
+  background: #fffefa;
+  color: #303831;
+  box-shadow: inset 0 -2px #718773;
+}
+
 .admin-header {
   display: flex;
   align-items: flex-end;

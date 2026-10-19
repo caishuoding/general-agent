@@ -16,10 +16,10 @@ test("未登录时只显示登录页，错误密码显示统一提示", async ({
 // 验证管理员登录、聊天界面和主动退出。
 test("管理员可以登录并退出", async ({ page }) => {
   await loginAdmin(page);
-  await page.goto("/");
-  await expect(page.getByRole("heading", { name: "个人对话空间" })).toBeVisible();
+  await page.goto("/admin");
+  await expect(page.getByRole("heading", { name: "账号与只读内容" })).toBeVisible();
   await page.getByRole("button", { name: "退出" }).click();
-  await expect(page.getByRole("heading", { name: "登录" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "管理员登录" })).toBeVisible();
 });
 
 // 验证新建账号首次登录必须先完成改密。

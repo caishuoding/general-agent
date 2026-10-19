@@ -1,20 +1,19 @@
-import { loginAdmin } from "./auth";
+import { configureSearchModel, loginUser } from "./auth";
 import { test, expect } from '@playwright/test';
 
 // 每个用例先通过 API 登录管理员。
 test.beforeEach(async ({ page }) => {
-  await loginAdmin(page);
+  await loginUser(page);
 });
 
 // 验证模型自主联网直接执行，并展示真实网页来源。
 test('联网搜索作为模型工具直接执行并提供来源链接', async ({ page }) => {
-  await page.request.put('/api/settings', { data: { base_url: `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18103'}/v1`, model: 'controlled-search-chat', api_key: 'test-key' } });
+  await configureSearchModel(
+    page,
+    `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18103'}/v1`,
+    `http://127.0.0.1:${process.env.TEST_SEARCH_PORT || '18104'}`,
+  );
   await page.goto('/');
-  await page.getByRole('button', { name: '设置', exact: true }).click();
-  await page.getByLabel('智谱 API 地址', { exact: true }).fill(`http://127.0.0.1:${process.env.TEST_SEARCH_PORT || '18104'}`);
-  await page.getByLabel('智谱 API 密钥', { exact: true }).fill('browser-search-key');
-  await page.getByRole('button', { name: '保存搜索配置', exact: true }).click();
-  await expect(page.getByLabel('智谱 API 密钥', { exact: true })).toHaveValue('');
   await page.getByRole('button', { name: '新建会话', exact: true }).click();
   await expect(page.getByLabel('上传会话附件')).toBeEnabled();
   await page.getByLabel('上传会话附件').setInputFiles({ name: '位置.txt', mimeType: 'text/plain', buffer: Buffer.from('我的住址：上海市青松路 88 号。') });

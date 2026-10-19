@@ -1,7 +1,7 @@
 """登录、退出、当前账号和修改密码接口。"""
 
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,6 +17,7 @@ class LoginInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
+    expected_role: Literal["admin", "user"] | None = None
 
 
 class PasswordChangeInput(BaseModel):
@@ -36,6 +37,8 @@ def auth_router(service: AuthService, secure_cookies: bool) -> APIRouter:
         user = service.authenticate(body.username, body.password)
         if user is None:
             raise HTTPException(401, "用户名或密码错误。")
+        if body.expected_role is not None and user.role != body.expected_role:
+            raise HTTPException(403, "该账号不能登录此入口。")
         if user.username == "admin" and user.must_change_password and not _direct_local_request(request):
             raise HTTPException(403, "请在服务器本机完成首次改密后再从公网登录。")
         token = service.create_session(user.id)

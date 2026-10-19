@@ -9,9 +9,9 @@ from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
 from tests.auth.support import authenticated_client
-from tests.memory.test_memory import configure_memory
+from tests.memory.test_memory import configure_memory, configure_memory_settings
 from tests.memory.test_memory_recall import recall_provider
-from tests.search.test_search import last_user_content, reply, tool_call, tool_messages
+from tests.search.test_search import configure_search_settings, last_user_content, reply, tool_call, tool_messages
 
 
 @pytest.mark.parametrize('with_memory', [False, True])
@@ -41,9 +41,10 @@ def test_public_memory_topics_do_not_read_private_long_term_memory(database_url:
             return reply(payload, '公开主题回答。')
         return reply(payload, '公开主题回答。')
 
+    configure_memory_settings(database_url, tmp_path)
+    configure_search_settings(database_url, tmp_path, 'https://search.example', 'test-key')
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         old = configure_memory(client)
-        client.put('/api/settings/search', json={'base_url': 'https://search.example', 'api_key': 'test-key'})
         if with_memory:
             assert client.post(f'/api/conversations/{old}/messages', json={'content': '请记住：我住在私人地址银河路123号'}).status_code == 200
         conversation = client.post('/api/conversations', json={}).json()['id']

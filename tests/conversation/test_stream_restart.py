@@ -12,7 +12,7 @@ from time import monotonic, sleep
 
 import httpx
 import pytest
-from tests.auth.support import login_admin_http
+from tests.auth.support import login_admin_http, switch_to_normal_user
 
 
 @pytest.mark.parametrize("stop_before_kill", [False, True])
@@ -66,6 +66,7 @@ def test_killed_process_recovers_partial_answer_as_failed(database_url: str, tmp
             ready(client)
             login_admin_http(client)
             client.put("/api/settings", json={"base_url": f"http://127.0.0.1:{provider.server_port}/v1", "model": "controlled", "api_key": "test-key"})
+            switch_to_normal_user(client)
             conversation_id = client.post("/api/conversations", json={}).json()["id"]
             client.post(f"/api/conversations/{conversation_id}/runs", json={"content": "hello"})
             deadline = monotonic() + 5

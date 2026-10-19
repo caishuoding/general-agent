@@ -1,15 +1,15 @@
-import { loginAdmin } from "./auth";
+import { configureChatModel, loginUser } from "./auth";
 import { test, expect } from '@playwright/test';
 
 // 每个用例先通过 API 登录管理员。
 test.beforeEach(async ({ page }) => {
-  await loginAdmin(page);
+  await loginUser(page);
 });
 
 // 只延迟后端真实详情GET返回，验证删除后的旧会话刷新不能覆盖已经切换到的另一会话。
 test('删除附件后的迟到详情不会覆盖新选会话', async ({ page }) => {
   const base = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18117'}/v1`;
-  await page.request.put('/api/settings', { data: { base_url: base, model: 'chat', api_key: 'test-only' } });
+  await configureChatModel(page, base, 'chat');
   const a = await (await page.request.post('/api/conversations', { data: { title: '资料会话 A' } })).json();
   const b = await (await page.request.post('/api/conversations', { data: { title: '资料会话 B' } })).json();
   await page.request.post(`/api/conversations/${a.id}/messages`, { data: { content: '会话 A 独有消息' } });

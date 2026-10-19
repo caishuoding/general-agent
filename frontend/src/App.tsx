@@ -18,15 +18,11 @@ import {
   type ConversationDetail,
   type Message,
   type MessageAttachment,
-  type Settings,
-  type Usage,
 } from "./api";
 import { AttachmentPanel } from "./AttachmentPanel";
-import { AdminPanel } from "./AdminPanel";
 import { LoginScreen, PasswordChangeScreen } from "./AuthScreens";
-import { SettingsPanel } from "./SettingsPanel";
 
-type Screen = "chat" | "settings" | "admin" | "password";
+type Screen = "chat" | "password";
 
 // 展示会话、消息内附件与来源删除状态，并隔离过期异步响应。
 export function App() {
@@ -36,12 +32,6 @@ export function App() {
   const [conversation, setConversation] = useState<ConversationDetail | null>(
     null,
   );
-  const [settings, setSettings] = useState<Settings>({
-    base_url: "",
-    model: "",
-    api_key_configured: false,
-  });
-  const [usage, setUsage] = useState<Usage[]>([]);
   const [screen, setScreen] = useState<Screen>("chat");
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
@@ -135,7 +125,12 @@ export function App() {
       async function load() {
         try {
           const current = await api<AuthUser>("/auth/me");
-          if (mounted) setUser(current);
+          if (!mounted) return;
+          if (current.role === "admin") {
+            window.location.replace("/admin");
+            return;
+          }
+          setUser(current);
         } catch {
           if (mounted) setUser(null);
         } finally {
@@ -158,20 +153,13 @@ export function App() {
         setLoading(false);
         return;
       }
-      const currentUser = user;
       let mounted = true;
       // 只在组件仍有效时应用初始化结果，避免卸载后更新状态。
       async function load() {
         try {
-          const [items, saved] = await Promise.all([
-            api<Conversation[]>("/conversations"),
-            currentUser.role === "admin"
-              ? api<Settings>("/settings")
-              : Promise.resolve({ base_url: "", model: "", api_key_configured: true }),
-          ]);
+          const items = await api<Conversation[]>("/conversations");
           if (!mounted) return;
           setConversations(items);
-          setSettings(saved);
           const remembered = localStorage.getItem("active-conversation");
           // 仅恢复列表中仍然存在的会话。
           const target =
@@ -274,17 +262,6 @@ export function App() {
     if (id) void selectConversation(id);
   }
 
-  // 打开设置并取得最新用量；加载失败时保留明确错误。
-  async function openSettings() {
-    setScreen("settings");
-    setError("");
-    try {
-      setUsage(await api<Usage[]>("/usage"));
-    } catch (failure) {
-      setError(errorMessage(failure));
-    }
-  }
-
   // 结束服务端会话并清空前端中的账号相关状态。
   async function logout() {
     try {
@@ -298,8 +275,6 @@ export function App() {
       setUser(null);
       setConversations([]);
       setConversation(null);
-      setSettings({ base_url: "", model: "", api_key_configured: false });
-      setUsage([]);
       setScreen("chat");
       setError("");
       setDraft("");
@@ -309,6 +284,10 @@ export function App() {
   // 登录成功后保存当前账号并触发工作区加载。
   function handleAuthenticated(next: AuthUser) {
     setError("");
+    if (next.role === "admin") {
+      window.location.replace("/admin");
+      return;
+    }
     setUser(next);
   }
 
@@ -317,11 +296,6 @@ export function App() {
     setError("");
     setUser(next);
     setScreen("chat");
-  }
-
-  // 打开管理员后台页面。
-  function openAdmin() {
-    setScreen("admin");
   }
 
   // 更新当前输入草稿。
@@ -570,24 +544,6 @@ export function App() {
           )}
         </nav>
         <div className="sidebar-bottom">
-          {user.role === "admin" && (
-            <>
-              <button
-                className={`nav-button ${screen === "admin" ? "selected" : ""}`}
-                aria-label="管理员后台"
-                onClick={openAdmin}
-              >
-                <span aria-hidden="true">▦</span>管理员后台
-              </button>
-              <button
-                className={`nav-button ${screen === "settings" ? "selected" : ""}`}
-                aria-label="设置"
-                onClick={openSettings}
-              >
-                <span aria-hidden="true">⚙</span>设置
-              </button>
-            </>
-          )}
           <div className="user-menu">
             <span className="user-name">{user.username}</span>
             <button className="logout-button" onClick={() => setScreen("password")}>
@@ -608,25 +564,9 @@ export function App() {
           <div>
             <h1>个人对话空间</h1>
             <span className="topbar-divider">/</span>
-            <span className="topbar-subtitle">
-              {screen === "settings"
-                ? "设置"
-                : screen === "admin"
-                  ? "管理员后台"
-                  : "日常、灵感与思考"}
-            </span>
+            <span className="topbar-subtitle">日常、灵感与思考</span>
           </div>
-          {user.role === "admin" ? (
-            <button className="model-pill" onClick={openSettings}>
-              <span
-                className={`status-dot ${settings.api_key_configured ? "configured" : ""}`}
-              />
-              {settings.model || "配置模型"}
-              <span aria-hidden="true">⌄</span>
-            </button>
-          ) : (
-            <span className="user-pill">{user.username}</span>
-          )}
+          <span className="user-pill">{user.username}</span>
         </header>
         {error && (
           <div className="global-error" role="alert">
@@ -636,18 +576,7 @@ export function App() {
         <SourceDeletionPending revision={sourceRevision} onChanged={refreshSources} />
         {deleteTarget && <SourceDeletion key={deleteTarget.path} target={deleteTarget} onClose={closeDeletion} onChanged={refreshSources} />}
         {screen === 'chat' && conversation && <button className="delete-conversation" onClick={deleteConversation}>删除当前会话</button>}
-        {screen === "settings" ? (
-          <div className="page-scroll">
-            <SettingsPanel
-              settings={settings}
-              usage={usage}
-              onSaved={setSettings}
-            />
-          </div>
-        ) : screen === "admin" ? (
-          <AdminPanel />
-        ) : (
-          <div className="chat-layout">
+        <div className="chat-layout">
             <div className="chat-scroll" onScroll={trackReadingPosition}>
               <div className="chat-content">
                 {loading ? (
@@ -666,11 +595,6 @@ export function App() {
                       <br />
                       或把脑海里还没成形的想法说出来。
                     </p>
-                    {!settings.api_key_configured && (
-                      <button className="setup-link" onClick={openSettings}>
-                        先连接你的模型 <span aria-hidden="true">↗</span>
-                      </button>
-                    )}
                     <div className="topic-tags">
                       <span>日常问答</span>
                       <span>写作灵感</span>
@@ -706,16 +630,12 @@ export function App() {
                 <AttachmentPanel revision={sourceRevision} resetToken={attachmentReset} onDelete={deleteAttachment} conversationId={activeId.current} disabled={!!pending || !!generating || changingRun || creating || loading} />
                 <textarea
                   aria-label="消息"
-                  placeholder={
-                    settings.api_key_configured
-                      ? "把你的想法写在这里…"
-                      : "先在设置中连接一个模型，即可开始对话"
-                  }
+                  placeholder="把你的想法写在这里…"
                   value={draft}
                   onChange={editDraft}
                   onKeyDown={composeKey}
                   maxLength={32000}
-                  disabled={!settings.api_key_configured || loading || creating}
+                  disabled={loading || creating}
                   rows={2}
                 />
                 <div className="composer-bottom">
@@ -733,8 +653,7 @@ export function App() {
                       !draft.trim() ||
                       !!pending ||
                       creating ||
-                      loading ||
-                      !settings.api_key_configured
+                      loading
                     }
                   >
                     <span aria-hidden="true">↑</span>
@@ -743,8 +662,7 @@ export function App() {
               </form>
               <p className="composer-note">回答可能有误，请核对重要信息。停止生成不会撤回已经发出的服务请求。</p>
             </div>
-          </div>
-        )}
+        </div>
       </main>
     </div>
   );

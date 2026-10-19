@@ -1,17 +1,18 @@
-import { loginAdmin } from "./auth";
+import { configureChatModel, loginUser } from "./auth";
 import { test, expect, type Page } from "@playwright/test";
 
 // 每个用例先通过 API 登录管理员。
 test.beforeEach(async ({ page }) => {
-  await loginAdmin(page);
+  await loginUser(page);
 });
 
 // 通过真实应用接口配置受控模型，并用页面发送当前测试消息。
 async function start(page: Page, content: string) {
-  await page.request.put("/api/settings", { data: {
-    base_url: `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18081"}/v1`,
-    model: "controlled-model", api_key: "browser-test-key",
-  } });
+  await configureChatModel(
+    page,
+    `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18081"}/v1`,
+    "controlled-model",
+  );
   await page.goto("/");
   await page.getByRole("button", { name: "新建会话" }).click();
   await expect(page.getByRole("button", { name: "新建会话" })).toBeEnabled();

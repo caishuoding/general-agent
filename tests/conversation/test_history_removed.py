@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
 from tests.auth.support import authenticated_client
-from tests.attachments.test_attachments import configure
+from tests.attachments.test_attachments import configure, configure_settings
 from tests.search.test_search import reply
 
 
@@ -24,6 +24,7 @@ def test_history_phrase_no_longer_reads_other_conversations(database_url: str, t
         payloads.append(payload)
         return reply(payload, '历史聊天检索已移除。')
 
+    configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         original = configure(client)
         assert client.post(f'/api/conversations/{original}/messages', json={'content': '蓝鲸计划周五交付。'}).status_code == 200

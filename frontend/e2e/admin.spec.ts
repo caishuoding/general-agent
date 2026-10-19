@@ -8,9 +8,7 @@ test.beforeEach(async ({ page }) => {
 
 // 验证管理员后台的账号创建、停用和临时密码重置。
 test("管理员可以在后台创建、停用和重置账号", async ({ page }) => {
-  await page.goto("/");
-  await expect(page.getByRole("heading", { name: "个人对话空间" })).toBeVisible();
-  await page.getByRole("button", { name: "管理员后台", exact: true }).click();
+  await page.goto("/admin");
   await expect(page.getByRole("heading", { name: "账号与只读内容" })).toBeVisible();
 
   await page.getByLabel("用户名").fill("ui_user");

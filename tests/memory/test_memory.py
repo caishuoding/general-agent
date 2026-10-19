@@ -11,7 +11,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
-from tests.auth.support import authenticated_client
+from tests.auth.support import admin_client, authenticated_client
 from tests.conversation.test_streaming import wait_message
 
 
@@ -153,16 +153,28 @@ def memory_provider(request: httpx.Request) -> httpx.Response:
         return memory_agent_response(payload)
     return final_model_reply(payload, memory_final_answer(payload) or '普通回答')
 def configure_memory(client: TestClient) -> str:
-    """配置受控聊天与嵌入连接，并创建一个独立会话。"""
-    client.put('/api/settings', json={"base_url": "https://chat.example/v1", "model": "chat", "api_key": "test-key"})
-    client.put('/api/settings/embedding', json={"base_url": "https://vector.example/v1", "model": "embed", "api_key": "test-key", "dimensions": 3})
+    """使用已保存的全局连接创建一个独立会话。"""
     return str(client.post('/api/conversations', json={}).json()['id'])
+
+
+def configure_memory_settings(database_url: str, tmp_path: Path) -> None:
+    """通过管理员入口配置记忆测试使用的聊天与嵌入连接。"""
+    with admin_client(database_url, tmp_path) as admin:
+        assert admin.put(
+            '/api/settings',
+            json={"base_url": "https://chat.example/v1", "model": "chat", "api_key": "test-key"},
+        ).status_code == 200
+        assert admin.put(
+            '/api/settings/embedding',
+            json={"base_url": "https://vector.example/v1", "model": "embed", "api_key": "test-key", "dimensions": 3},
+        ).status_code == 200
 
 
 def test_explicit_save_from_real_chat_is_durable_and_has_source(database_url: str, tmp_path: Path) -> None:
     """浏览器实际使用的 runs 保存事实一次，并在重启后查看 Mem0 正文和准确消息来源。"""
     transport = httpx.MockTransport(memory_provider)
     operation = str(uuid4())
+    configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, transport) as client:
         conversation_id = configure_memory(client)
         endpoint = f'/api/conversations/{conversation_id}/runs'
@@ -183,6 +195,7 @@ def test_explicit_save_from_real_chat_is_durable_and_has_source(database_url: st
         assert len(client.get('/api/memories').json()) == 1
         calls = client.get('/api/usage').json()
         assert any(call['unit'] == 'chat_tokens' for call in calls)
+    configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, transport) as restarted:
         assert restarted.get('/api/memories').json() == entries
         assert restarted.get(f'/api/conversations/{conversation_id}').json()['messages'][-1]['status'] == 'complete'
@@ -192,6 +205,7 @@ def test_explicit_save_from_real_chat_is_durable_and_has_source(database_url: st
 
 def test_only_current_explicit_facts_are_saved_and_sync_matches_runs(database_url: str, tmp_path: Path) -> None:
     """普通陈述、否定、转述及歧义对象不写入；同步与流式都保存当前明确事实。"""
+    configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url,tmp_path,httpx.MockTransport(memory_provider)) as client:
         conversation_id = configure_memory(client)
         for content in ['我喜欢咖啡', '不要记住我喜欢咖啡', '朋友说：“记住我喜欢咖啡”', '请解释记住功能', '请记住这个', '记住附件里的信息']:
@@ -206,6 +220,7 @@ def test_only_current_explicit_facts_are_saved_and_sync_matches_runs(database_ur
 
 def test_attachment_content_is_never_extracted_as_memory(database_url: str, tmp_path: Path) -> None:
     """即使用户明确要求提取，附件正文也只参与当前回答，不产生候选或正式长期记忆。"""
+    configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url,tmp_path,httpx.MockTransport(memory_provider)) as client:
         conversation_id = configure_memory(client)
         client.post(
@@ -244,6 +259,8 @@ def test_stop_during_embedding_does_not_write_after_response(database_url: str, 
         """模型请求由受控协议响应，不读取真实模型配置。"""
         return memory_provider(request)
 
+    configure_memory_settings(database_url, tmp_path)
+
     with authenticated_client(database_url,tmp_path,httpx.MockTransport(provider),httpx.MockTransport(mem0_provider)) as client:
         conversation_id = configure_memory(client)
         started = client.post(f'/api/conversations/{conversation_id}/runs',json={'content':'请记住：我喜欢茶'}).json()
@@ -267,6 +284,7 @@ def test_stop_during_embedding_does_not_write_after_response(database_url: str, 
 
 def test_quoted_nickname_is_explicit_but_fiction_is_not_personal_memory(database_url: str, tmp_path: Path) -> None:
     """事实中的普通引号不妨碍直接保存；写作素材中的命令词不取得个人记忆权限。"""
+    configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url,tmp_path,httpx.MockTransport(memory_provider)) as client:
         conversation_id = configure_memory(client)
         assert client.post(f'/api/conversations/{conversation_id}/messages',json={'content':'请记住：我的昵称是"小林"'}).status_code == 200
@@ -290,6 +308,7 @@ def test_answer_failure_retry_preserves_saved_memory_and_counts_only_new_answer(
             fail_answer = False
             return httpx.Response(503,json={'error':'private detail','usage':{'prompt_tokens':3}})
         return memory_provider(request)
+    configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url,tmp_path,httpx.MockTransport(provider)) as client:
         conversation_id = configure_memory(client)
         assert client.post(f'/api/conversations/{conversation_id}/runs',json={'content':'请记住：我喜欢茶；再给我一个泡茶建议'}).status_code == 202
@@ -324,8 +343,9 @@ def test_mem0_outage_fails_truthfully_then_retry_uses_same_source(database_url: 
             return httpx.Response(200, json={'id': memory_id, 'user_id': os.getenv('MEM0_USER_ID', 'local-person'), 'memory': '用户喜欢茶'})
         return httpx.Response(200, json={'status': 'ok'})
 
+    configure_memory_settings(database_url, tmp_path)
+
     with authenticated_client(database_url,tmp_path,httpx.MockTransport(memory_provider),httpx.MockTransport(mem0_provider)) as client:
-        client.put('/api/settings',json={'base_url':'https://chat.example/v1','model':'chat','api_key':'test'})
         conversation_id = str(client.post('/api/conversations',json={}).json()['id'])
         client.post(f'/api/conversations/{conversation_id}/runs',json={'content':'请记住：我喜欢茶'})
         failed = wait_message(client,conversation_id,'complete')

@@ -11,7 +11,7 @@ from general_agent.app import create_app
 from general_agent.infrastructure.calls import CallGateway
 from general_agent.infrastructure.operations import OperationService
 from general_agent.infrastructure.settings import StoredEmbeddingSettings
-from tests.auth.support import login_admin
+from tests.auth.support import ensure_normal_user, login_user
 
 
 def test_explicit_thread_context_records_each_cloud_call_and_honours_cancellation(database_url: str, tmp_path: Path) -> None:
@@ -25,7 +25,8 @@ def test_explicit_thread_context_records_each_cloud_call_and_honours_cancellatio
 
     app = create_app(database_url, tmp_path, httpx.MockTransport(provider))
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-        login_admin(client)
+        ensure_normal_user(database_url)
+        login_user(client)
         account_id = UUID(client.get("/api/auth/me").json()["id"])
         operations: OperationService = app.state.operations
         gateway: CallGateway = app.state.calls

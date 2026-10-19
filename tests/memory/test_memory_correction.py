@@ -8,11 +8,12 @@ from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
 from tests.auth.support import authenticated_client
-from tests.memory.test_memory import configure_memory
+from tests.memory.test_memory import configure_memory, configure_memory_settings
 from tests.memory.test_memory_recall import recall_provider
 def test_manage_edit_keeps_identity_source_and_replaces_recall_after_restart(database_url: str, tmp_path: Path) -> None:
     """按条目标识编辑保留原来源，重放不重复更新，重启后新会话仅使用新值。"""
     transport=httpx.MockTransport(recall_provider)
+    configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url,tmp_path,transport) as client:
         source=configure_memory(client)
         client.post(f'/api/conversations/{source}/messages',json={'content':'请记住：我住在杭州'})
@@ -33,6 +34,7 @@ def test_manage_edit_keeps_identity_source_and_replaces_recall_after_restart(dat
         assert client.put(path,json={'fact':'复用标识改成别的内容','expected_version':1},headers=headers).status_code==409
         assert client.put(path,json={'fact':'错改其他城市','expected_version':1}).status_code==409
         assert len(client.get('/api/memories').json())==1
+    configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url,tmp_path,transport) as client:
         new=client.post('/api/conversations',json={}).json()['id']
         response=client.post(f'/api/conversations/{new}/messages',json={'content':'我现在住在哪个城市'})
@@ -41,6 +43,7 @@ def test_manage_edit_keeps_identity_source_and_replaces_recall_after_restart(dat
 def test_explicit_chat_correction_reuses_entry_and_links_new_source(database_url: str, tmp_path: Path) -> None:
     """同步和实际 runs 更正唯一旧事实或明确标识，保留两次来源且歧义不误改。"""
     from tests.conversation.test_streaming import wait_message
+    configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url,tmp_path,httpx.MockTransport(recall_provider)) as client:
         source=configure_memory(client)
         client.post(f'/api/conversations/{source}/messages',json={'content':'请记住：我住在杭州'})
@@ -79,6 +82,8 @@ def test_failed_update_hides_old_value_and_retry_does_not_increment_version_twic
             failed_once=True
             return httpx.Response(503,json={'error':'private provider body'})
         return memories.handle(request)
+
+    configure_memory_settings(database_url, tmp_path)
 
     with authenticated_client(database_url,tmp_path,httpx.MockTransport(recall_provider),httpx.MockTransport(mem0_provider)) as client:
         source=configure_memory(client)
@@ -119,6 +124,8 @@ def test_stop_update_then_retry_preserves_target_and_counts_real_calls(database_
             assert release.wait(5)
         return memories.handle(request)
 
+    configure_memory_settings(database_url, tmp_path)
+
     with authenticated_client(database_url,tmp_path,httpx.MockTransport(recall_provider),httpx.MockTransport(mem0_provider)) as client:
         source=configure_memory(client)
         client.post(f'/api/conversations/{source}/messages',json={'content':'请记住：我住在杭州'})
@@ -148,6 +155,7 @@ def test_stop_update_then_retry_preserves_target_and_counts_real_calls(database_
 
 def test_unclear_duplicate_and_untrusted_corrections_do_not_change_memories(database_url: str, tmp_path: Path) -> None:
     """重复旧事实不能猜测目标，转述、否定和虚构中的更正词也不取得修改授权。"""
+    configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url,tmp_path,httpx.MockTransport(recall_provider)) as client:
         source=configure_memory(client)
         client.post(f'/api/conversations/{source}/messages',json={'content':'请记住：我住在杭州'})
