@@ -31,7 +31,7 @@ export function SearchSettings({ onSaved }: Props) {
     try {
       setSettings(await api<Settings>('/settings/search', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(form))) }));
       (form.elements.namedItem('api_key') as HTMLInputElement).value = '';
-      await onSaved(); setNotice('搜索配置已保存；只有明确要求联网时才搜索。');
+      await onSaved(); setNotice('搜索配置已保存；助手会根据当前请求按需自主联网。');
     } catch (failure) { setError(errorMessage(failure)); }
     finally { setBusy(false); }
   }
@@ -44,7 +44,7 @@ export function SearchSettings({ onSaved }: Props) {
   }
   return <div className="settings-card">
     <div className="card-heading"><h3>联网搜索</h3><span className="small-label">智谱 Web Search · 独立配置</span></div>
-    <p className="field-help">明确说“联网搜索：…”才会联网。涉及本机资料的查询先由你配置的模型拟定文字，再展示完整外发文本，确认后发送给智谱。未配置不会妨碍其他功能。</p>
+    <p className="field-help">助手会根据当前请求自主决定何时联网，查询直接发送给智谱，无需额外确认。查询可能包含当前会话附件或长期记忆中的个人信息。未配置不会妨碍其他功能。</p>
     {settings && <form key={settings.base_url} onSubmit={save}>
       <label>智谱 API 地址<input name="base_url" type="url" defaultValue={settings.base_url} required maxLength={2048} /></label>
       <label>智谱 API 密钥<input name="api_key" type="password" autoComplete="off" placeholder={settings.api_key_configured ? '已配置 · 同地址留空保留' : '填写独立智谱密钥'} /></label>

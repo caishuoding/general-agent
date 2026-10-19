@@ -113,7 +113,7 @@ class StreamingChat:
         self.graph.run(context)
 
     def stop(self, conversation_id: UUID, account_id: UUID, message_id: UUID) -> None:
-        """冻结回答并撤销未用搜索许可；已发出的请求仍可回传真实用量。"""
+        """冻结回答并取消尚未完成的搜索记录；已发出的请求仍可回传真实用量。"""
         message=self.message(conversation_id, account_id, message_id)
         if message.get('operation_id'):
             self.execution.search.cancel(message['operation_id'])

@@ -1,5 +1,9 @@
 # 智谱 Web Search 替换验证（2026-10-17）
 
+> 历史记录说明（2026-10-19）：下文保留当时的实现、审查和验收事实。当前联网搜索由模型根据用户请求按需自主调用并直接执行，无需“联网搜索：”等固定句式；包含附件或长期记忆中的个人信息也不增加确认。显式触发、查询规划/编辑/批准、确认卡片和搜索确认恢复流程均已移除。现行行为以 [ADR 0008](adr/0008-tool-driven-web-search-and-prompt-composition.md) 和 [当前联网说明](../README.md#模型自主联网与来源核验) 为准；下文旧流程及测试数字不代表当前版本验收。
+
+## 当时的实现与验收记录
+
 联网搜索已由 Tavily 切换为智谱 Web Search。独立本机配置使用 `https://open.bigmodel.cn/api/paas/v4`、固定身份 `zhipu-search-std` 和 `search_std` 引擎；密钥保存在 Git 忽略的 `.local/search.json`，公开读取只返回配置状态。
 
 ## 协议与边界

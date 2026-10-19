@@ -57,7 +57,7 @@ class ChatExecution:
         return expected is None or (current is not None and current.revision==expected)
 
     def scope(self, content: str, settings: StoredSettings) -> list[str | None]:
-        """返回聊天、嵌入及搜索配置版本组成的幂等范围，防止批准跨配置复用。"""
+        """返回聊天、嵌入及搜索配置版本组成的幂等范围，防止操作结果跨配置复用。"""
         search = self.search.settings.read()
         return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
