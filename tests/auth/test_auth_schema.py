@@ -39,8 +39,8 @@ def test_migration_seeds_bootstrap_admin_and_auth_tables(
         assert {"users", "sessions", "admin_audit_log"} <= table_names
 
         user_id = connection.execute(
-            "SELECT data_type FROM information_schema.columns "
+            "SELECT data_type, is_nullable FROM information_schema.columns "
             "WHERE table_schema = 'public' AND table_name = 'conversations' "
             "AND column_name = 'user_id'"
         ).fetchone()
-        assert user_id == {"data_type": "uuid"}
+        assert user_id == {"data_type": "uuid", "is_nullable": "NO"}
