@@ -40,7 +40,7 @@ class MemoryModel(ControlledModel):
 
 def main() -> None:
     """只管理当前进程随机测试库与临时目录，禁止重启共享数据库。"""
-    admin = os.environ.get('TEST_DATABASE_URL','postgresql://general_agent:local-development-only@127.0.0.1:15433/postgres')
+    admin = os.environ.get('TEST_DATABASE_URL','postgresql://general_agent:local-development-only@127.0.0.1:15432/postgres')
     name = 'general_agent_memory_browser_'+uuid4().hex
     with psycopg.connect(admin,autocommit=True) as connection:
         connection.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(name)))

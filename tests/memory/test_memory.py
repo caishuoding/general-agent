@@ -29,7 +29,7 @@ def explicit_memory_request(content: str) -> bool:
 
 
 def memory_agent_response(payload: dict[str, Any]) -> httpx.Response:
-    """模拟模型在 LangGraph 记忆工具图中的标准函数调用与最终答复。"""
+    """模拟统一流式工具协议中的函数调用和最终文字。"""
     messages = payload['messages']
     users = [str(item.get('content') or '') for item in messages if item.get('role') == 'user']
     current = users[-1] if users else ''
@@ -37,15 +37,26 @@ def memory_agent_response(payload: dict[str, Any]) -> httpx.Response:
 
     def call(name: str, arguments: dict[str, Any]) -> httpx.Response:
         """返回标准工具调用响应。"""
-        body = {'id': 'call-' + name, 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(arguments, ensure_ascii=False)}}
+        body: dict[str, Any] = {'id': 'call-' + name, 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(arguments, ensure_ascii=False)}}
+        if payload.get('stream'):
+            events = [
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": body["id"], "type": "function", "function": {"name": name, "arguments": ""}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": body["function"]["arguments"]}}]}}]},
+                {"choices": [{"delta": {}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 8, "completion_tokens": 3}},
+            ]
+            text = ''.join('data: ' + json.dumps(event, ensure_ascii=False) + '\n\n' for event in events) + 'data: [DONE]\n\n'
+            return httpx.Response(200, text=text)
         return httpx.Response(200, json={'choices': [{'message': {'role': 'assistant', 'content': None, 'tool_calls': [body]}}], 'usage': {}})
 
     def answer(text: str) -> httpx.Response:
         """返回工具循环或普通规划结束时的文本。"""
+        if payload.get('stream'):
+            event = {"choices": [{"delta": {"content": text}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 8, "completion_tokens": 3}}
+            return httpx.Response(200, text='data: ' + json.dumps(event, ensure_ascii=False) + '\n\ndata: [DONE]\n\n')
         return httpx.Response(200, json={'choices': [{'message': {'role': 'assistant', 'content': text}}], 'usage': {}})
 
     if re.search(r'(?:不要|别|不许|禁止).{0,8}(?:更正|更新|修改|删除|忘记)记忆', current) or any(token in current for token in ('朋友说', '故事', '角色')):
-        return answer('NO_TOOL_ACTION')
+        return answer('普通回答')
     if not results:
         if explicit_memory_request(current):
             return call('add_memory', {})
@@ -53,7 +64,20 @@ def memory_agent_response(payload: dict[str, Any]) -> httpx.Response:
             if re.search(r'(?:更正|更新|修改|删除|忘记)记忆\s*[：:]?\s*(?:我的城市变了|那个事情)$', current):
                 return answer('请提供具体记忆；未找到唯一可修改条目，未删除任何记忆。')
             return call('search_memories', {'query': ''})
-        return answer('NO_TOOL_ACTION')
+        facts: list[str] = []
+        for message in messages:
+            content = message.get('content')
+            if not isinstance(content, str) or not content.startswith('['):
+                continue
+            try:
+                rows = json.loads(content)
+            except ValueError:
+                continue
+            if isinstance(rows, list):
+                facts.extend(str(item['fact']) for item in rows if isinstance(item, dict) and item.get('fact'))
+        if facts:
+            return answer('当前长期记忆：' + '；'.join(facts))
+        return answer('普通回答')
 
     last = results[-1]
     if 'memories' not in last:
@@ -88,6 +112,37 @@ def memory_agent_response(payload: dict[str, Any]) -> httpx.Response:
     return call('update_memory', {'memory_id': target['memory_id'], 'version': target['version'], 'fact': new_fact})
 
 
+def memory_final_answer(payload: dict[str, Any]) -> str | None:
+    """根据真实工具结果或明确澄清请求，为最终回答节点生成受控文本。"""
+    messages = payload['messages']
+    users = [str(item.get('content') or '') for item in messages if item.get('role') == 'user']
+    current = users[-1] if users else ''
+    results = [json.loads(item['content']) for item in messages if item.get('role') == 'tool']
+    if results:
+        last = results[-1]
+        if 'memories' in last:
+            memories = last.get('memories') or []
+            if not memories:
+                return '未找到唯一匹配的记忆，未删除任何记忆。'
+            return str(memories[0]['fact'])
+        if last.get('status') == 'complete':
+            return '已完成。'
+    if '更正记忆' in current and any(token in current for token in ('我的城市变了', '那个事情')):
+        return '请提供具体记忆；未找到唯一可修改条目，未修改长期记忆。'
+    if '忘记记忆' in current and '那个事情' in current:
+        return '请提供具体记忆；未找到唯一可删除条目，未删除任何记忆。'
+    return None
+
+
+def final_model_reply(payload: dict[str, Any], text: str) -> httpx.Response:
+    """按同步或流式协议返回最终回答文本。"""
+    usage = {"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11}
+    if payload.get('stream'):
+        event = {"choices": [{"delta": {"content": text}, "finish_reason": "stop"}], "usage": usage}
+        return httpx.Response(200, text='data: ' + json.dumps(event, ensure_ascii=False) + '\n\ndata: [DONE]\n\n')
+    return httpx.Response(200, json={"choices": [{"message": {"content": text}}], "usage": usage})
+
+
 def memory_provider(request: httpx.Request) -> httpx.Response:
     """只替换云端 HTTP，嵌入提供确定向量，普通回答不负责写记忆。"""
     payload = json.loads(request.content)
@@ -95,14 +150,11 @@ def memory_provider(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"model": "embed", "data": [{"index": index, "embedding": [1.0, 0.0, 0.0]} for index, _ in enumerate(payload['input'])], "usage": {"prompt_tokens": 7, "total_tokens": 7}})
     if payload.get('tools'):
         return memory_agent_response(payload)
-    if payload.get('stream'):
-        return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"普通回答"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
-    return httpx.Response(200, json={"choices": [{"message": {"content": "NO_TOOL_ACTION"}}]})
+    return final_model_reply(payload, memory_final_answer(payload) or '普通回答')
 def configure_memory(client: TestClient) -> str:
-    """配置受控聊天与已验证嵌入，并创建一个独立会话。"""
+    """配置受控聊天与嵌入连接，并创建一个独立会话。"""
     client.put('/api/settings', json={"base_url": "https://chat.example/v1", "model": "chat", "api_key": "test-key"})
     client.put('/api/settings/embedding', json={"base_url": "https://vector.example/v1", "model": "embed", "api_key": "test-key", "dimensions": 3})
-    assert client.post('/api/settings/capabilities/embedding').json()['status'] == 'passed'
     return str(client.post('/api/conversations', json={}).json()['id'])
 
 
@@ -155,13 +207,13 @@ def test_attachment_content_is_never_extracted_as_memory(database_url: str, tmp_
     """即使用户明确要求提取，附件正文也只参与当前回答，不产生候选或正式长期记忆。"""
     with TestClient(create_app(database_url,tmp_path,httpx.MockTransport(memory_provider)),base_url='http://127.0.0.1:8000') as client:
         conversation_id = configure_memory(client)
-        attachment = client.post(
+        client.post(
             f'/api/conversations/{conversation_id}/attachments',
             files={'files': ('朋友.txt', '陈敏住在杭州。陈敏喜欢乌龙茶。'.encode())},
-        ).json()[0]
+        )
         response = client.post(
             f'/api/conversations/{conversation_id}/messages',
-            json={'content':'请从附件提取长期记忆','attachment_ids':[attachment['id']]},
+            json={'content':'请从附件提取长期记忆'},
         )
         assert response.status_code == 200
         assert client.get('/api/memories').json() == []
@@ -248,8 +300,8 @@ def test_answer_failure_retry_preserves_saved_memory_and_counts_only_new_answer(
         assert complete['memory_action']['id'] == failed['memory_action']['id']
         assert len(client.get('/api/memories').json()) == 1
         calls = client.get('/api/usage').json()
-        assert len([call for call in calls if call['unit'] == 'embedding_tokens']) == 2
-        assert len([call for call in calls if call['unit'] == 'chat_tokens']) == 3
+        assert len([call for call in calls if call['unit'] == 'embedding_tokens']) == 0
+        assert len([call for call in calls if call['unit'] == 'chat_tokens']) == 4
 
 
 def test_mem0_outage_fails_truthfully_then_retry_uses_same_source(database_url: str, tmp_path: Path) -> None:

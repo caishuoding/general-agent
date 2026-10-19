@@ -2,7 +2,7 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID
 
 from general_agent.infrastructure.operations import OperationContext, OperationService, Unit
@@ -23,7 +23,7 @@ class CallGateway:
 
 
 class BoundCalls:
-    """提供绑定同一操作的聊天、能力检查及嵌入，每次 outbound 单独检查。"""
+    """提供绑定同一操作的聊天及嵌入调用，每次 outbound 单独检查。"""
 
     def __init__(self, gateway: CallGateway, context: OperationContext) -> None:
         """保存不可变操作身份，禁止通过线程局部变量隐式选择操作。"""
@@ -60,13 +60,6 @@ class BoundCalls:
             self.gateway.operations.record(call_id, result.usage)
             return result
 
-    def probe(self, settings: StoredSettings, capability: Literal["text", "image", "tools"]) -> TokenUsage:
-        """使文字、图片和工具能力探针遵守与聊天相同的调用记录边界。"""
-        with self.call(settings, "chat_tokens") as call_id:
-            usage = self.gateway.provider.probe(settings, capability)
-            self.gateway.operations.record(call_id, usage)
-            return usage
-
     def embed(self, settings: StoredEmbeddingSettings, texts: list[str], reserved: UUID | None = None) -> Embedding:
         """复用可选首步预留，按实际批量嵌入记录输入用量，不要求不存在的输出用量。"""
         with self.call(settings, "embedding_tokens", reserved) as call_id:
@@ -74,10 +67,17 @@ class BoundCalls:
             self.gateway.operations.record(call_id, result.usage)
             return result
 
-    def stream(self, settings: StoredSettings, messages: list[ModelMessage], reserved: UUID, assistant_message_id: UUID) -> Iterator[StreamChunk]:
-        """消费已预留的文字或视觉流式调用，先记录用量尾帧再交给界面更新。"""
+    def stream(
+        self,
+        settings: StoredSettings,
+        messages: list[ModelMessage],
+        reserved: UUID | None = None,
+        assistant_message_id: UUID | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> Iterator[StreamChunk]:
+        """消费统一的文字、推理与工具调用流，先记录用量尾帧再交给调用方。"""
         with self.call(settings, "chat_tokens", reserved, assistant_message_id) as call_id:
-            for chunk in self.gateway.provider.stream(settings, messages):
+            for chunk in self.gateway.provider.stream(settings, messages, tools):
                 if chunk.usage is not None:
                     self.gateway.operations.record(call_id, chunk.usage)
                 yield chunk

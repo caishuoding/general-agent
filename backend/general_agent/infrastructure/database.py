@@ -4,8 +4,6 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4, uuid5
 
-from general_agent.conversation.history import public_history
-
 import psycopg
 from psycopg.rows import dict_row
 
@@ -56,9 +54,13 @@ class Database:
             return row
 
     def decorate_message(self, row: dict[str, Any]) -> dict[str, Any]:
-        """补齐自动记忆及真实来源状态，历史摘录只从仍有效消息重建。"""
+        """补齐自动记忆、搜索、召回及消息附件展示信息，不返回附件正文。"""
         with self.connect() as connection:
-            row['attachment_ids'] = [item['attachment_id'] for item in connection.execute('SELECT attachment_id FROM message_attachments WHERE message_id=%s ORDER BY attachment_id', (row['id'],)).fetchall()]
+            row['attachments'] = connection.execute(
+                "SELECT id,filename,size,status,error FROM attachments "
+                "WHERE user_message_id=%s ORDER BY created_at,id",
+                (row.get('id'),),
+            ).fetchall() if row['role'] == 'user' else []
         if row['role'] == 'assistant' and row.get('reply_to'):
             with self.connect() as connection:
                 row['memory_action'] = connection.execute('SELECT * FROM memory_actions WHERE id=%s', (uuid5(row['reply_to'],'explicit-memory:0'),)).fetchone()
@@ -75,9 +77,6 @@ class Database:
                 ).fetchone()
             row['search_action'] = connection.execute('SELECT id,query,status,error,revision,sources,purpose,expires_at FROM search_requests WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
             row['memory_recall'] = connection.execute('SELECT status,match_count AS count,detail FROM memory_recalls WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
-        row['history_search'], row['history_sources'] = public_history(self, row.get('operation_id'))
-        if row['history_search'] and row['history_search']['status'] == 'unavailable' and row['status'] != 'complete':
-            row['content'] = row['history_search']['detail']
         return row
 
     def list_usage(self) -> list[dict[str, Any]]:

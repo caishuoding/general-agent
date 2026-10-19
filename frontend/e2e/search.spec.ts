@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
-// 验证独立搜索设置，附件外发必须经过具体文本确认卡片。
-test('联网确认卡片允许编辑、拒绝和单次批准并提供来源链接', async ({ page, request }) => {
+// 验证模型自主联网直接执行，并展示真实网页来源。
+test('联网搜索作为模型工具直接执行并提供来源链接', async ({ page, request }) => {
   await request.put('/api/settings', { data: { base_url: `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18103'}/v1`, model: 'controlled-search-chat', api_key: 'test-key' } });
   await page.goto('/');
   await page.getByRole('button', { name: '设置', exact: true }).click();
@@ -15,22 +15,9 @@ test('联网确认卡片允许编辑、拒绝和单次批准并提供来源链�
   await expect(page.getByText('可用 · 位置.txt', { exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: '消息', exact: true }).fill('联网搜索：根据附件里的住址查附近咖啡店');
   await page.getByRole('button', { name: '发送消息' }).click();
-  const card = page.getByRole('region', { name: '搜索内容外发确认' });
-  await expect(card.getByLabel('将发送给智谱的完整查询')).toHaveValue('上海市青松路 88 号附近咖啡店');
-  await card.getByRole('button', { name: '允许发送以上内容并搜索', exact: true }).scrollIntoViewIfNeeded();
-  await page.screenshot({ path: '/private/tmp/general-agent-implementation/search-confirm-17.png', fullPage: true });
-  await page.reload();
-  await expect(card.getByLabel('将发送给智谱的完整查询')).toHaveValue('上海市青松路 88 号附近咖啡店');
-  await card.getByLabel('将发送给智谱的完整查询').fill('上海市青松路附近咖啡店');
-  await card.getByRole('button', { name: '保存查询修改', exact: true }).click();
-  await expect(card.getByRole('button', { name: '允许发送以上内容并搜索', exact: true })).toBeEnabled();
-  await card.getByRole('button', { name: '拒绝发送', exact: true }).click();
-  await expect(page.getByText('已拒绝发送这些搜索内容，本次没有联网。', { exact: true })).toBeVisible();
-  await page.getByRole('textbox', { name: '消息', exact: true }).fill('联网搜索：根据附件里的住址查附近咖啡店');
-  await page.getByRole('button', { name: '发送消息' }).click();
-  await expect(card.getByLabel('将发送给智谱的完整查询')).toHaveValue('上海市青松路 88 号附近咖啡店');
-  await card.getByRole('button', { name: '允许发送以上内容并搜索', exact: true }).click();
+  await expect(page.getByText('咖啡店营业时间', { exact: true })).toBeVisible();
+  await expect(page.getByText('正在生成…', { exact: true })).toBeVisible();
+  await expect(page.getByText('咖啡店营业时间 9–18。[W1]', { exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: '咖啡店信息', exact: true })).toHaveAttribute('href', 'https://cafe.example/nearby');
-  await expect(page.getByText('联网搜索已完成', { exact: false })).toBeVisible();
   await page.screenshot({ path: '/private/tmp/general-agent-implementation/search-17.png', fullPage: true });
 });

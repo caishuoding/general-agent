@@ -22,7 +22,7 @@ from general_agent.app import create_app
 
 
 class ImageModel(ControlledModel):
-    """仅对真实多模态载荷返回图片依据，并支持基础红色能力检查。"""
+    """仅对真实多模态载荷返回图片依据，不依赖预先能力探针。"""
 
     def do_POST(self) -> None:
         """识别测试图片请求形状并返回带真实来源标识的可计量流式回答。"""
@@ -37,8 +37,7 @@ class ImageModel(ControlledModel):
             self.end_headers()
             self.wfile.write(body)
             return
-        sources = json.loads(payload['messages'][0]['content'].split('\n', 1)[1])
-        answer = '受控视觉服务返回红色。' + ''.join(f'[{source["key"]}]' for source in sources)
+        answer = '受控视觉服务返回红色。'
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
@@ -49,7 +48,7 @@ class ImageModel(ControlledModel):
 
 def main() -> None:
     """仅启动并清理本进程随机数据库和配置，不读取用户设置或修改共享库。"""
-    admin = os.environ.get('TEST_DATABASE_URL', 'postgresql://general_agent:local-development-only@127.0.0.1:15433/postgres')
+    admin = os.environ.get('TEST_DATABASE_URL', 'postgresql://general_agent:local-development-only@127.0.0.1:15432/postgres')
     name = 'general_agent_images_browser_' + uuid4().hex
     with psycopg.connect(admin, autocommit=True) as connection:
         connection.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(name)))

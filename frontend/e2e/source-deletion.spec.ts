@@ -8,10 +8,11 @@ test('删除附件后的迟到详情不会覆盖新选会话', async ({ page }) 
   const b = await (await page.request.post('/api/conversations', { data: { title: '资料会话 B' } })).json();
   await page.request.post(`/api/conversations/${a.id}/messages`, { data: { content: '会话 A 独有消息' } });
   await page.request.post(`/api/conversations/${b.id}/messages`, { data: { content: '会话 B 独有消息' } });
-  await page.request.post(`/api/conversations/${a.id}/attachments`, { multipart: { files: { name: '待删除.txt', mimeType: 'text/plain', buffer: Buffer.from('owned by A') } } });
   await page.goto('/');
   await page.getByRole('button', { name: '资料会话 A', exact: true }).click();
   await expect(page.getByText('会话 A 独有消息', { exact: true })).toBeVisible();
+  await page.getByLabel('上传会话附件').setInputFiles({ name: '待删除.txt', mimeType: 'text/plain', buffer: Buffer.from('owned by A') });
+  await expect(page.getByText('可用 · 待删除.txt', { exact: true })).toBeVisible();
   let release!: () => void;
   let received!: () => void;
   const hold = new Promise<void>(

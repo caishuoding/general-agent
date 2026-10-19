@@ -26,8 +26,9 @@ def test_manage_edit_keeps_identity_source_and_replaces_recall_after_restart(dat
         assert entry['id']==original['id'] and entry['memory_id']==original['memory_id']
         assert entry['message_id']==original['message_id'] and entry['conversation_id']==source
         assert entry['version']==2 and entry['updates'][-1]['source_kind']=='management'
+        usage_before = len(client.get('/api/usage').json())
         assert client.put(path,json=body,headers=headers).status_code==200
-        assert len(client.get('/api/usage').json())==4
+        assert len(client.get('/api/usage').json())==usage_before
         assert client.put(path,json={'fact':'复用标识改成别的内容','expected_version':1},headers=headers).status_code==409
         assert client.put(path,json={'fact':'错改其他城市','expected_version':1}).status_code==409
         assert len(client.get('/api/memories').json())==1

@@ -105,8 +105,3 @@ class OperationService:
         """判断操作是否已经开始过外部调用，避免未知结果被重复发送。"""
         with self.database.connect() as connection:
             return connection.execute("SELECT id FROM model_calls WHERE operation_id=%s AND status <> 'cancelled' LIMIT 1", (context.operation_id,)).fetchone() is not None
-
-    def invalidate_conversation(self, conversation_id: UUID) -> None:
-        """取消会话全部操作并清除缓存结果，供来源删除流程调用。"""
-        with self.database.connect() as connection:
-            connection.execute("UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,result=NULL,response_status=NULL WHERE conversation_id=%s", (conversation_id,))

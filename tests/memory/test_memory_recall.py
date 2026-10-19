@@ -2,13 +2,12 @@
 
 import json
 from pathlib import Path
-from typing import Any
 
 import httpx
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
-from tests.memory.test_memory import configure_memory, memory_provider
+from tests.memory.test_memory import configure_memory, final_model_reply, memory_final_answer, memory_provider
 from tests.conversation.test_streaming import wait_message
 def recall_provider(request: httpx.Request) -> httpx.Response:
     """在云端边界提供确定的语义向量，回答原样包含收到的材料便于核对泄漏。"""
@@ -21,6 +20,9 @@ def recall_provider(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200,json={'model':'embed','data':data,'usage':{'prompt_tokens':7,'total_tokens':7}})
     if payload.get('tools'):
         return memory_provider(request)
+    final = memory_final_answer(payload)
+    if final is not None:
+        return final_model_reply(payload, final)
     content = json.dumps(payload['messages'],ensure_ascii=False)
     if payload.get('stream'):
         return httpx.Response(200,text='data: '+json.dumps({'choices':[{'delta':{'content':content},'finish_reason':'stop'}]},ensure_ascii=False)+'\n\ndata: '+json.dumps({'choices':[],'usage':{'prompt_tokens':9,'completion_tokens':2,'total_tokens':11}})+'\n\ndata: [DONE]\n\n')
@@ -30,15 +32,13 @@ def test_new_conversation_reuses_only_related_approved_memories_after_restart(da
     transport=httpx.MockTransport(recall_provider)
     with TestClient(create_app(database_url,tmp_path,transport),base_url='http://127.0.0.1:8000') as client:
         old=configure_memory(client)
-        attachment=client.post(f'/api/conversations/{old}/attachments',files={'files':('旧资料.txt','旧附件专属内容583029'.encode())}).json()[0]['id']
         for content in ('请记住：我喜欢简洁的中文回答','请记住：我住在杭州','我的未批准门禁码是927481'):
-            selected=[attachment] if '927481' in content else []
-            assert client.post(f'/api/conversations/{old}/messages',json={'content':content,'attachment_ids':selected}).status_code==200
+            assert client.post(f'/api/conversations/{old}/messages',json={'content':content}).status_code==200
         new=client.post('/api/conversations',json={}).json()['id']
         assert client.post(f'/api/conversations/{new}/runs',json={'content':'按我的偏好给我一段回答风格示例'}).status_code==202
         answer=wait_message(client,new,'complete')
         assert '我喜欢简洁的中文回答' in answer['content']
-        assert '杭州' not in answer['content'] and '927481' not in answer['content'] and '583029' not in answer['content']
+        assert '杭州' not in answer['content'] and '927481' not in answer['content']
         assert answer['memory_recall']['status']=='complete' and answer['memory_recall']['count']==1
         assert len(client.get('/api/memories').json())==2
     with TestClient(create_app(database_url,tmp_path,transport),base_url='http://127.0.0.1:8000') as client:

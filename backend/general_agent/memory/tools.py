@@ -1,6 +1,8 @@
 """为对话智能体注册真实记忆工具，执行前核对观察结果、版本和当前来源。"""
 
-from typing import Any
+from dataclasses import dataclass
+from collections.abc import Callable
+from typing import Any, cast
 from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -12,8 +14,9 @@ from general_agent.memory.correction import MemoryCorrection
 from general_agent.memory.deletion import MemoryDeletion
 from general_agent.memory.automatic import AutomaticMemory, MemoryCheckpoint
 from general_agent.infrastructure.settings import StoredSettings
-from general_agent.conversation.history import HistorySearch
-from general_agent.prompts import TOOL_DESCRIPTIONS, tool_planner_instruction
+from general_agent.infrastructure.provider import ModelMessage
+from general_agent.prompts import TOOL_DESCRIPTIONS
+from general_agent.search.service import SearchService, SearchWebInput, search_web_tool
 from general_agent.agent.graph import AgentToolGraph
 
 
@@ -28,11 +31,6 @@ class AddMemoryInput(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
 
 
-class HistorySearchInput(BaseModel):
-    model_config = ConfigDict(extra='forbid', strict=True)
-    query: str = Field(min_length=2, max_length=1000)
-
-
 class DeleteMemoryInput(BaseModel):
     """删除必须引用本次查找返回的具体记忆与版本。"""
     model_config = ConfigDict(extra='forbid', strict=True)
@@ -45,11 +43,18 @@ class UpdateMemoryInput(DeleteMemoryInput):
     fact: str = Field(min_length=1, max_length=5000)
 
 
+@dataclass(frozen=True)
+class ToolOutcome:
+    """记录单次流式工具循环的最终文字及是否执行过工具。"""
+
+    answer: str | None
+    used_tools: bool
+
+
 def memory_tools() -> list[dict[str, Any]]:
     """返回 OpenAI 兼容函数定义，模型自行选择查找、更新或删除。"""
     definitions: list[tuple[str, str, type[BaseModel]]] = [
         ('add_memory', TOOL_DESCRIPTIONS['add_memory'], AddMemoryInput),
-        ('search_chat_history', TOOL_DESCRIPTIONS['search_chat_history'], HistorySearchInput),
         ('search_memories', TOOL_DESCRIPTIONS['search_memories'], SearchMemoryInput),
         ('update_memory', TOOL_DESCRIPTIONS['update_memory'], UpdateMemoryInput),
         ('delete_memory', TOOL_DESCRIPTIONS['delete_memory'], DeleteMemoryInput),
@@ -57,12 +62,17 @@ def memory_tools() -> list[dict[str, Any]]:
     return [{'type': 'function', 'function': {'name': name, 'description': description, 'parameters': model.model_json_schema()}} for name, description, model in definitions]
 
 
-class MemoryTools:
-    """隐藏工具协议、版本检查和恢复，管理页与对话工具复用同一记忆操作。"""
+def agent_tools() -> list[dict[str, Any]]:
+    """返回同一工具循环中可用的记忆与联网搜索工具。"""
+    return [*memory_tools(), search_web_tool()]
 
-    def __init__(self, memory: MemoryService, automatic: AutomaticMemory, history: HistorySearch) -> None:
-        """只绑定现有记忆模块，工具无权访问其他数据来源。"""
-        self.memory, self.automatic, self.history = memory, automatic, history
+
+class MemoryTools:
+    """隐藏记忆与搜索工具协议、版本检查及可恢复执行。"""
+
+    def __init__(self, memory: MemoryService, automatic: AutomaticMemory, search: SearchService | None = None) -> None:
+        """绑定记忆模块与搜索服务，工具只能通过各自业务边界访问真实数据。"""
+        self.memory, self.automatic, self.web_search = memory, automatic, search
         self.graph = AgentToolGraph()
 
     def add(self, checkpoint: MemoryCheckpoint, arguments: dict[str, Any], settings: StoredSettings) -> dict[str, Any]:
@@ -107,18 +117,33 @@ class MemoryTools:
                 connection.execute('INSERT INTO memory_tool_observations(message_id,action_id,version) VALUES(%s,%s,%s) ON CONFLICT(message_id,action_id) DO UPDATE SET version=EXCLUDED.version', (checkpoint.message_id, row['id'], row['version']))
         return {'memories': [{'memory_id': str(row['id']), 'version': row['version'], 'fact': row['fact']} for row in rows], 'limit': 50}
 
-    def execute(self, checkpoint: MemoryCheckpoint, name: str, arguments: dict[str, Any], settings: StoredSettings) -> dict[str, Any]:
-        """执行白名单工具；无观察标识、过时版本和未知参数均不能改变记忆。"""
+    def execute(
+        self,
+        checkpoint: MemoryCheckpoint,
+        name: str,
+        arguments: dict[str, Any],
+        settings: StoredSettings,
+        source_attachment_ids: list[UUID] | None = None,
+    ) -> dict[str, Any]:
+        """执行白名单工具；搜索直接运行，记忆变更仍核对观察标识与版本。"""
         checkpoint.guard()
         if name == 'add_memory':
             return self.add(checkpoint, arguments, settings)
-        if name == 'search_chat_history':
-            history_input = HistorySearchInput.model_validate(arguments)
-            return self.history.tool(checkpoint.conversation_id, checkpoint.message_id, history_input.query, checkpoint.operation)
         if name == 'search_memories':
             return self.search(checkpoint, SearchMemoryInput.model_validate(arguments).query)
+        if name == 'search_web':
+            if self.web_search is None:
+                raise ValueError('联网搜索工具未配置。')
+            query = SearchWebInput.model_validate(arguments).query
+            return self.web_search.tool(
+                checkpoint.conversation_id,
+                checkpoint.message_id,
+                query,
+                checkpoint.operation,
+                source_attachment_ids,
+            )
         if name not in ('update_memory', 'delete_memory'):
-            raise ValueError('未知的记忆工具。')
+            raise ValueError('未知的工具。')
         mutation_input: UpdateMemoryInput | DeleteMemoryInput = UpdateMemoryInput.model_validate(arguments) if name == 'update_memory' else DeleteMemoryInput.model_validate(arguments)
         action_id = UUID(mutation_input.memory_id)
         key = checkpoint.key('mutation', [name, arguments])
@@ -142,38 +167,53 @@ class MemoryTools:
         checkpoint.put(key, public)
         return public
 
-    def prepare(self, conversation_id: UUID, message_id: UUID, content: str, settings: StoredSettings, operation: OperationContext) -> str | None:
-        """运行可恢复的 Agent 工具回合；无工具时返回空，使用工具后返回基于结果的最终回答。"""
+    def prepare(
+        self,
+        conversation_id: UUID,
+        message_id: UUID,
+        content: str,
+        settings: StoredSettings,
+        operation: OperationContext,
+        *,
+        messages: list[ModelMessage],
+        assistant_message_id: UUID,
+        on_content: Callable[[str], None] | None = None,
+        source_attachment_ids: list[UUID] | None = None,
+    ) -> ToolOutcome:
+        """运行单一流式工具循环，边输出文字边执行模型请求的工具。"""
         checkpoint = MemoryCheckpoint(self.memory, message_id, conversation_id, operation)
         with self.memory.database.connect() as connection:
             previous = connection.execute('SELECT status,result FROM memory_tool_runs WHERE message_id=%s', (message_id,)).fetchone()
         if previous and previous['status'] == 'complete':
-            return previous['result'].get('answer') if previous['result'].get('handled') else None
+            saved = previous['result']
+            return ToolOutcome(saved.get('answer'), bool(saved.get('used_tools')))
         if self.memory.source_suppressed(message_id):
-            return None
+            return ToolOutcome(None, False)
         with self.memory.database.connect() as connection:
             self.memory.guard_source(connection, conversation_id, message_id, operation)
             connection.execute("INSERT INTO memory_tool_runs(message_id,operation_id,status) VALUES(%s,%s,'pending') ON CONFLICT(message_id) DO UPDATE SET operation_id=EXCLUDED.operation_id", (message_id, operation.operation_id))
-        with self.memory.database.connect() as connection:
-            source = connection.execute('SELECT position FROM messages WHERE id=%s AND conversation_id=%s', (message_id, conversation_id)).fetchone()
-            if source is None:
-                raise ValueError('当前用户消息已经不可用。')
-            history = connection.execute(
-                "SELECT role,content FROM messages WHERE conversation_id=%s AND status='complete' AND position<=%s ORDER BY position",
-                (conversation_id, source['position']),
-            ).fetchall()
-        messages: list[dict[str, Any]] = [{'role': 'system', 'content': tool_planner_instruction()}]
-        messages.extend({'role': str(row['role']), 'content': str(row['content'])} for row in history)
         result = self.graph.run(
-            messages=messages,
+            messages=cast(list[dict[str, Any]], messages),
             settings=settings,
             calls=self.memory.calls.bind(operation),
             checkpoint=checkpoint,
-            tools=memory_tools(),
-            execute_tool=self.execute,
+            tools=agent_tools(),
+            assistant_message_id=assistant_message_id,
+            on_content=on_content,
+            execute_tool=lambda current, name, arguments, current_settings: self.execute(
+                current,
+                name,
+                arguments,
+                current_settings,
+                source_attachment_ids,
+            ),
         )
+        outcome = ToolOutcome(result['answer'], bool(result['used_tools']))
         with self.memory.database.connect() as connection:
             self.memory.guard_source(connection, conversation_id, message_id, operation)
-            connection.execute("UPDATE memory_tool_runs SET status='complete',result=%s WHERE message_id=%s", (Jsonb({'handled': result['handled'], 'answer': result['answer']}), message_id))
+            connection.execute(
+                "UPDATE memory_tool_runs SET status='complete',result=%s WHERE message_id=%s",
+                (Jsonb({'answer': outcome.answer, 'used_tools': outcome.used_tools}), message_id),
+            )
             connection.execute('DELETE FROM memory_native_steps WHERE message_id=%s AND step_key LIKE %s', (message_id, 'tools:%'))
-        return result['answer'] if result['handled'] else None
+        return outcome

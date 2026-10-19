@@ -6,20 +6,15 @@ export type Settings = {
 export type Conversation = { id: string; title: string; created_at: string };
 export type DocumentParseInfo = { format?: string; total_units?: number; readable_units?: number; coverage?: string; missing_units?: string[]; limitations?: string[] };
 export type Attachment = { id: string; filename: string; size: number; status: "processing" | "ready" | "failed" | "deleting"; error: string | null; parse_info?: DocumentParseInfo; image_metadata: { format: string; mime: string; width: number; height: number } | null };
-export type FileCitation = { key: string; attachment_id: string; filename: string; location: string; excerpt: string };
-export type DocumentProcessing = { status: string; mode: string; completed: number; total: number; coverage: string; files: { attachment_id: string; filename: string; chunks: number; missing: string[]; limitations: string[] }[] };
+export type MessageAttachment = Pick<Attachment, "id" | "filename" | "size" | "status" | "error">;
 export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  status: "generating" | "paused" | "complete" | "stopped" | "failed";
+  status: "generating" | "complete" | "stopped" | "failed";
+  attachments: MessageAttachment[];
   search_action: { id: string; query: string; status: string; revision: string; purpose: string; sources: { id: string; label: string }[]; error: string | null } | null;
-  history_search: { status: "complete" | "empty" | "unavailable"; count: number; detail: string } | null;
-  history_sources: { key: string; conversation_id: string; conversation_title: string; message_id: string; role: "user" | "assistant"; created_at: string; excerpt: string }[];
   web_sources: { key: string; title: string; url: string; excerpt: string }[];
-  document_progress?: DocumentProcessing | null;
-  attachment_ids: string[];
-  citations: FileCitation[];
   reply_to: string | null;
   error: string | null;
   created_at: string;

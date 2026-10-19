@@ -10,13 +10,6 @@ from fastapi.testclient import TestClient
 from general_agent.app import create_app
 
 
-def no_tool_action(payload: dict[str, object]) -> httpx.Response | None:
-    """为普通聊天的 Agent 规划阶段返回无需工具，随后由测试验证正式回答。"""
-    if not payload.get("tools"):
-        return None
-    return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "NO_TOOL_ACTION"}}], "usage": {}})
-
-
 def test_reply_and_usage_survive_restart(database_url: str, tmp_path: Path) -> None:
     """模型回答、消息归属及服务返回用量在重启后仍可通过接口读取。"""
     def provider(request: httpx.Request) -> httpx.Response:
@@ -25,9 +18,6 @@ def test_reply_and_usage_survive_restart(database_url: str, tmp_path: Path) -> N
         assert request.headers["authorization"] == "Bearer fixture-key"
         payload = json.loads(request.content)
         assert payload["model"] == "chat-model"
-        planning = no_tool_action(payload)
-        if planning is not None:
-            return planning
         dialogue = [message for message in payload["messages"] if message["role"] in ("user", "assistant")]
         assert dialogue == [{"role": "user", "content": "你好"}]
         return httpx.Response(200, json={
@@ -101,9 +91,6 @@ def test_conversations_keep_separate_model_context(database_url: str, tmp_path: 
     def provider(request: httpx.Request) -> httpx.Response:
         """依据普通问题的预期上下文检查外部请求，排除候选提取等独立动作。"""
         payload = json.loads(request.content)
-        planning = no_tool_action(payload)
-        if planning is not None:
-            return planning
         dialogue = [message for message in payload["messages"] if message["role"] in ("user", "assistant")]
         assert dialogue == expected.pop(0)
         return httpx.Response(200, json={"choices": [{"message": {"content": "已了解本会话的信息。"}}]})

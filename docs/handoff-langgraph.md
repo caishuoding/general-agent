@@ -1,27 +1,33 @@
 # LangGraph 重构交接文档
 
-更新日期：2026-10-18
+更新日期：2026-10-19
 
 ## 1. 当前状态
 
-项目已完成从手写对话编排到 LangGraph 的整体迁移。同步聊天、流式聊天、工具调用、长期记忆、历史检索、附件与文档处理、联网授权、暂停恢复、失败收尾和消息终态现在共用同一套图结构。
+项目已完成从手写对话编排到 LangGraph 的整体迁移。同步聊天、流式聊天、工具调用、长期记忆、附件全文材料、模型自主联网、失败收尾和消息终态共用同一套图结构。
 
-本轮同时完成了目录重构、独立 Mem0 Docker 服务接入、旧业务表和旧兼容代码清理、长期记忆故障恢复、运行日志补充以及完整测试校准。
+历史聊天检索、文档总结、附件分段检索、文件引用、能力预检和联网确认流程均已移除。提示词改为统一静态基础加按需动态片段；联网搜索作为普通模型工具直接执行。
 
 ## 2. 核心架构
 
 ### 对话执行
 
-- 对话主图负责请求分流、工具智能体、上下文准备、最终回答和统一收尾。
-- 模型判断本轮不需要工具时返回 `NO_TOOL_ACTION`，图继续准备历史、长期记忆、附件或文档资料。
-- 模型需要保存、查找、更正或删除长期记忆时，工具循环把结构化结果交回模型继续判断。
-- 同步与流式入口只改变最终输出的传输方式，不复制业务编排。
+- 对话主图先准备附件和长期记忆，再进入统一的流式工具循环。
+- 每轮模型调用都使用 SSE；文字增量直接写入回答，`tool_calls` 分片累积完整后执行工具，再把结果追加到上下文继续模型调用。
+- 模型可自主调用记忆工具或 `search_web`；不再使用 `NO_TOOL_ACTION`、非流式规划回合或独立最终回答调用。
+- 同步与流式入口共享同一条流式执行路径，只改变即时写入还是聚合返回。
 
-### 联网授权
+### 提示词组装
 
-- 明确联网请求先由确定性路由识别。
-- 涉及附件或长期记忆的查询在发送给搜索服务前必须经过用户确认。
-- 暂停使用 LangGraph 原生中断，批准后从同一回答尝试的检查点恢复。
+- `base_system_prompt` 是唯一静态系统提示。
+- `always_sent_prompt` 表示每次调用都必须携带的内容，`compose_system_prompt` 负责追加工具回合、工具结果、附件和记忆等动态片段。
+- 附件、记忆和网页原始数据只放 `user` 或 `tool` 消息；工具结果出现后只追加通用的不可信数据边界。
+
+### 联网搜索
+
+- `search_web` 与记忆工具注册在同一模型工具循环中，由模型自主决定调用。
+- 查询直接发送给智谱 Web Search，不经过正则意图路由、查询编辑或用户批准。
+- 工具结果按不可信数据处理；搜索记录、实际用量和网页来源核验继续保留。
 
 ### 检查点
 
@@ -44,12 +50,12 @@
 ```text
 backend/general_agent/
   agent/             LangGraph 对话图和工具图
-  attachments/       附件上传、解析、引用和清理
-  conversation/      聊天入口、历史、文档总结和流式传输
+  attachments/       附件上传、完整文字解析、图片和清理
+  conversation/      聊天入口、流式传输和回答准备
   infrastructure/    数据库、模型调用、设置、运行日志
   memory/            长期记忆业务边界、召回、更正和删除
-  prompts/           集中系统提示词
-  search/            联网规划、授权和来源核验
+  prompts/           统一系统提示与动态片段组装
+  search/            模型搜索工具、操作记录和来源核验
 
 frontend/            页面与浏览器测试
 mem0/                官方 Mem0 Docker 服务与一次性配置
@@ -137,24 +143,20 @@ bash scripts/start.sh
 
 ## 8. 验证结果
 
-2026-10-18 最终检查：
+2026-10-19 最终检查：
 
-- Python 测试 121 项，分组运行全部通过：
-  - 记忆、更正、删除、召回和来源清理：34 项
-  - 应用图、聊天、历史、流式和文档总结：44 项
-  - 附件、搜索、设置和能力检查：43 项
-- 后端与测试共 89 个文件通过类型检查。
+- Python 测试 88 项全部通过。
+- 后端与测试共 84 个文件通过严格类型检查。
 - 前端类型检查和生产构建通过。
-- Python 编译检查通过。
-- Git 差异检查通过。
 - 后端健康检查返回正常。
 - LangGraph 检查点表已创建在业务 PostgreSQL 的 `langgraph` schema。
-
-说明：当前机器同时运行大量测试时会短暂消耗 Windows 临时连接端口，曾出现一次数据库连接池初始化超时。单独复跑和按模块分组复跑均通过，没有业务代码失败。
+- 附件、文档、图片、搜索、来源删除和流式浏览器流程通过。
 
 ## 9. 仍需注意
 
 - 本项目设计为单个后端进程；不要使用多个 worker 共用同一业务库，否则内存中的取消状态和外部副作用协调会失去一致性。
+- 当前会把当前会话全部可读附件放入模型上下文，不自动分页、摘要或裁剪；超长资料可能直接触发模型上下文错误。
+- 模型自主联网时，附件或长期记忆中的个人信息也可能随查询外发，应用不会再增加确认步骤。
 - 更换 Mem0 的聊天或嵌入模型后，需要重启 Mem0 Compose，让一次性配置容器重新调用官方配置接口。
 - Mem0 内部模型与嵌入调用不计入应用侧调用记录，真实费用仍以对应服务商账单为准。
 - 浏览器端测试与实际云端模型、视觉、搜索和嵌入质量仍需使用真实凭据定期验收。
@@ -167,19 +169,19 @@ git status
 docker compose ps
 docker compose -f mem0/docker-compose.yml ps
 curl http://127.0.0.1:8000/api/health
-.venv\Scripts\python.exe -m pytest tests/memory -q
-.venv\Scripts\python.exe -m pytest tests/app tests/conversation -q
-.venv\Scripts\python.exe -m pytest tests/attachments tests/search tests/infrastructure -q
+uv run pytest tests/memory -q
+uv run pytest tests/app tests/conversation -q
+uv run pytest tests/attachments tests/search tests/infrastructure -q
 ```
 
 前端检查：
 
 ```sh
-npm.cmd run build
+PATH="/Users/shenbixin/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH" pnpm --dir frontend run build
 ```
 
 类型检查：
 
 ```sh
-.venv\Scripts\python.exe -m mypy --python-version 3.14 --cache-dir .cache\mypy backend tests
+.venv/bin/mypy --python-version 3.12 backend tests
 ```

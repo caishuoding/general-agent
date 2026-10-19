@@ -8,9 +8,8 @@ from psycopg.types.json import Jsonb
 from general_agent.infrastructure.operations import OperationContext
 from general_agent.memory.service import MemoryService
 from general_agent.infrastructure.provider import ModelFailure, ModelMessage
-from general_agent.prompts import memory_failure, memory_material
+from general_agent.prompts import memory_data, memory_failure
 
-THRESHOLD = 0.72
 LIMIT = 5
 
 
@@ -105,9 +104,9 @@ class MemoryRecall:
         self.record(operation,user_id,'complete',detail,valid,revision)
         if not facts:
             return []
-        return [{'role':'system','content':memory_material(facts)}]
+        return [{'role':'user','content':memory_data(facts)}]
 
     @staticmethod
     def failure_material(detail: str) -> list[ModelMessage]:
-        """把真实召回失败告知回答模型，禁止声称已查到长期记忆。"""
-        return [{'role':'system','content':memory_failure(detail)}]
+        """把真实召回失败作为 user 数据告知回答模型，禁止声称已查到长期记忆。"""
+        return [{'role':'user','content':memory_failure(detail)}]

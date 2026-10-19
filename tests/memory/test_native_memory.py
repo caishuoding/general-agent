@@ -12,41 +12,53 @@ import psycopg
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
-from tests.memory.test_memory import configure_memory, explicit_memory_request, memory_provider
+from tests.memory.test_memory import configure_memory, explicit_memory_request, memory_final_answer, memory_provider
 from tests.conversation.test_streaming import wait_message
-def json_reply(value: Any) -> httpx.Response:
+from tests.model_protocol import streaming_transport
+def json_reply(value: Any, *, stream: bool = False) -> httpx.Response:
     """构造受控模型 JSON 响应，包含可核对的实际用量字段。"""
     content = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    if stream:
+        event = {'choices': [{'delta': {'content': content}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}}
+        return httpx.Response(200, text='data: ' + json.dumps(event, ensure_ascii=False) + '\n\ndata: [DONE]\n\n')
     return httpx.Response(200, json={'choices': [{'message': {'role': 'assistant', 'content': content}}], 'usage': {'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}})
-def tool_reply(name: str, arguments: dict[str, Any]) -> httpx.Response:
+def tool_reply(name: str, arguments: dict[str, Any], *, stream: bool = False) -> httpx.Response:
     """模拟标准函数调用并携带 DeepSeek 推理续传字段。"""
+    if stream:
+        events = [
+            {'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'call_' + name, 'type': 'function', 'function': {'name': name, 'arguments': ''}}]}}]},
+            {'choices': [{'delta': {'tool_calls': [{'index': 0, 'function': {'arguments': json.dumps(arguments, ensure_ascii=False)}}]}}]},
+            {'choices': [{'delta': {}, 'finish_reason': 'tool_calls'}], 'usage': {'prompt_tokens': 3, 'completion_tokens': 2}},
+        ]
+        return httpx.Response(200, text=''.join('data: ' + json.dumps(event, ensure_ascii=False) + '\n\n' for event in events) + 'data: [DONE]\n\n')
     return httpx.Response(200, json={'choices': [{'message': {'role': 'assistant', 'content': None, 'reasoning_content': '受控推理', 'tool_calls': [{'id': 'call_'+name, 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(arguments)}}]}}], 'usage': {'prompt_tokens': 3, 'completion_tokens': 2}})
 
 
 def native_provider(request: httpx.Request) -> httpx.Response:
     """只替换云端响应，原生事实提取、检索与动作执行全部使用真实 SDK。"""
     body = json.loads(request.content)
-    if request.url.path.endswith('/embeddings') or body.get('stream'):
+    if request.url.path.endswith('/embeddings'):
         return memory_provider(request)
     messages = body.get('messages', [])
     if body.get('tools'):
+        stream = bool(body.get('stream'))
         user = [item['content'] for item in messages if item['role'] == 'user'][-1]
         results = [json.loads(item['content']) for item in messages if item['role'] == 'tool']
         if user in ('我住在杭州', '我已经搬到苏州了', '我已不再喝咖啡', '请记住：我喜欢咖啡'):
-            return json_reply('普通回答') if results else tool_reply('add_memory', {})
+            return json_reply('普通回答', stream=stream) if results else tool_reply('add_memory', {}, stream=stream)
         if user not in ('把我的居住地改成苏州', '忘掉我住在哪里这件事', '你记得我的住址吗'):
-            return json_reply('NO_MEMORY_ACTION')
+            return json_reply('普通回答', stream=stream)
         if not results:
-            return tool_reply('search_memories', {'query': '居住地'})
+            return tool_reply('search_memories', {'query': '居住地'}, stream=stream)
         if user == '你记得我的住址吗':
-            return json_reply('你住在杭州。' if results[-1]['memories'] else '没有找到居住地记忆。')
+            return json_reply('你住在杭州。' if results[-1]['memories'] else '没有找到居住地记忆。', stream=stream)
         if len(results) == 1:
             target = results[-1]['memories'][0]
             arguments = {'memory_id': target['memory_id'], 'version': target['version']}
             if user == '把我的居住地改成苏州':
-                return tool_reply('update_memory', {**arguments, 'fact': '我住在苏州'})
-            return tool_reply('delete_memory', arguments)
-        return json_reply('已完成。')
+                return tool_reply('update_memory', {**arguments, 'fact': '我住在苏州'}, stream=stream)
+            return tool_reply('delete_memory', arguments, stream=stream)
+        return json_reply('已完成。', stream=stream)
     if body.get('response_format'):
         prompt = messages[-1]['content']
         if prompt.startswith('Input:'):
@@ -63,7 +75,10 @@ def native_provider(request: httpx.Request) -> httpx.Response:
                 return json_reply({'memory': [{'id': rows[0]['id'], 'text': rows[0]['text'], 'event': 'NONE'}]})
             return json_reply({'memory': [{'id': rows[0]['id'], 'text': '我住在苏州', 'old_memory': rows[0]['text'], 'event': 'UPDATE'}]})
         return json_reply({'memory': [{'id': '0', 'text': fact, 'event': 'ADD'}]})
-    return json_reply('普通回答')
+    final = memory_final_answer(body)
+    if final is not None:
+        return json_reply(final, stream=bool(body.get('stream')))
+    return json_reply('普通回答', stream=bool(body.get('stream')))
 
 
 def send(client: TestClient, conversation: str, content: str) -> dict[str, Any]:
@@ -137,15 +152,11 @@ def test_tool_cannot_mutate_unobserved_id_or_borrow_quoted_permission(database_u
             user = [message['content'] for message in body['messages'] if message['role'] == 'user'][-1]
             if explicit_memory_request(user):
                 return memory_provider(request)
-                if user.startswith('朋友说'):
-                    return tool_reply('search_memories', {'query': ''}) if not results else json_reply('未删除记忆。')
-                if user.startswith('不要'):
-                    return json_reply('未修改记忆。')
             if results and 'memories' not in results[-1]:
                 return json_reply('未删除记忆。')
             return tool_reply('delete_memory', {'memory_id': target, 'version': 1})
         return native_provider(request)
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url='http://127.0.0.1:8000') as client:
+    with TestClient(create_app(database_url, tmp_path, streaming_transport(provider)), base_url='http://127.0.0.1:8000') as client:
         conversation = configure_memory(client)
         send(client, conversation, '请记住：我住在杭州')
         target = client.get('/api/memories').json()[0]['id']

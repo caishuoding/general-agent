@@ -78,15 +78,11 @@ class MemoryDeletion:
         connection.execute("UPDATE memory_native_runs SET status='skipped',detail='该来源已停止后续处理。' WHERE message_id=ANY(%s)",(list(sources),))
         connection.execute("UPDATE memory_tool_runs SET result='{}' WHERE message_id=ANY(%s)",(list(observed_sources),))
         operations.discard(active_operation)
-        jobs=[row['document_job_id'] for row in connection.execute('SELECT DISTINCT document_job_id FROM messages WHERE operation_id=ANY(%s) AND document_job_id IS NOT NULL',(list(operations),)).fetchall()]
-        operations.update(row['operation_id'] for row in connection.execute('SELECT operation_id FROM messages WHERE document_job_id=ANY(%s) AND operation_id IS NOT NULL',(jobs,)).fetchall())
         connection.execute("UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,result=NULL,response_status=NULL WHERE id=ANY(%s)",(list(operations),))
         connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE operation_id=ANY(%s) AND status='reserved'",(list(operations),))
-        connection.execute("UPDATE messages SET status='stopped',error='相关长期记忆已删除，本次操作已失效。' WHERE operation_id=ANY(%s) AND status IN ('generating','paused')",(list(operations),))
+        connection.execute("UPDATE messages SET status='stopped',error='相关长期记忆已删除，本次操作已失效。' WHERE operation_id=ANY(%s) AND status='generating'",(list(operations),))
         connection.execute("UPDATE search_requests SET status='expired',query='',results='[]',sources='[]',purpose='',expires_at=0,error='相关记忆已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
         connection.execute("UPDATE messages SET web_sources='[]' WHERE operation_id=ANY(%s)",(list(operations),))
-        connection.execute("UPDATE messages SET citations='[]',document_progress=NULL WHERE document_job_id=ANY(%s)",(jobs,))
-        connection.execute("UPDATE document_jobs SET final_content=NULL,final_call_id=NULL,context_hash='' WHERE id=ANY(%s)",(jobs,))
         for row in recalls:
             matches=[item for item in row['matches'] if item['action_id']!=str(action_id)]
             connection.execute("UPDATE memory_recalls SET matches=%s,match_count=%s,detail='相关记忆已删除，旧回答许可已失效。' WHERE operation_id=%s",(Jsonb(matches),len(matches),row['operation_id']))

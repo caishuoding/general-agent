@@ -33,7 +33,7 @@ test("停止保留部分内容和刷新后的状态", async ({ page, request }) 
   await page.reload();
   await expect(page.getByText("已停止 · 已保留部分内容", { exact: true })).toBeVisible();
   await expect(page.getByText("第一段", { exact: true })).toBeVisible();
-  await expect(page.getByText("停止不一定撤销服务商费用", { exact: false })).toBeVisible();
+  await expect(page.getByText("停止生成不会撤回已经发出的服务请求", { exact: false })).toBeVisible();
 });
 
 // 模型断流后明确展示失败，重试创建新回答尝试且不重复用户消息。

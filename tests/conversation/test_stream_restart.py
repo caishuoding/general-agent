@@ -24,15 +24,7 @@ def test_killed_process_recovers_partial_answer_as_failed(database_url: str, tmp
 
         def do_POST(self) -> None:
             """发送部分回答后等待测试清理，模拟尚未完成的真实网络连接。"""
-            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-            if payload.get("tools"):
-                body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "NO_TOOL_ACTION"}}], "usage": {}}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
+            json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()

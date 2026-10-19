@@ -13,13 +13,6 @@ from fastapi.testclient import TestClient
 from general_agent.app import create_app
 
 
-def no_tool_action(payload: dict[str, Any]) -> httpx.Response | None:
-    """让普通流式测试先通过 Agent 工具规划阶段，再进入原有回答流。"""
-    if not payload.get("tools"):
-        return None
-    return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "NO_TOOL_ACTION"}}], "usage": {}})
-
-
 class ControlledStream(httpx.SyncByteStream):
     """在真实外部流边界提供可暂停的数据，允许测试观察进行中的回答。"""
 
@@ -66,9 +59,6 @@ def test_stream_is_visible_before_completion_and_survives_restart(database_url: 
     def provider(request: httpx.Request) -> httpx.Response:
         """验证使用流式协议，并在外部 HTTP 传输返回分段响应。"""
         payload = json.loads(request.content)
-        planning = no_tool_action(payload)
-        if planning is not None:
-            return planning
         assert payload["stream"] is True
         assert payload["stream_options"] == {"include_usage": True}
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ControlledStream(release))
@@ -100,9 +90,6 @@ def test_stop_freezes_partial_answer_and_keeps_late_usage(database_url: str, tmp
 
     def provider(request: httpx.Request) -> httpx.Response:
         """暂停外部模型，直到接口确认停止后才返回后续内容与用量。"""
-        planning = no_tool_action(json.loads(request.content))
-        if planning is not None:
-            return planning
         return httpx.Response(200, stream=ControlledStream(release))
 
     with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
@@ -140,9 +127,6 @@ def test_interrupted_answer_retries_without_duplicate_user_message(database_url:
         """第一次模拟断流，第二次验证重试上下文并正常完成。"""
         nonlocal attempts
         payload = json.loads(request.content)
-        planning = no_tool_action(payload)
-        if planning is not None:
-            return planning
         attempts += 1
         dialogue = [message for message in payload["messages"] if message["role"] in ("user", "assistant")]
         assert dialogue == [{"role": "user", "content": "hello"}]
@@ -172,9 +156,6 @@ def test_other_send_interfaces_cannot_overlap_live_answer(database_url: str, tmp
     def provider(request: httpx.Request) -> httpx.Response:
         """只接受当前流式执行，额外外部调用不会被伪装成成功。"""
         payload = json.loads(request.content)
-        planning = no_tool_action(payload)
-        if planning is not None:
-            return planning
         if not payload.get("stream"):
             return httpx.Response(500)
         return httpx.Response(200, stream=ControlledStream(release))
@@ -196,9 +177,6 @@ def test_incomplete_finish_still_collects_usage_tail(database_url: str, tmp_path
     """达到输出上限不是完整回答，但结束原因之后返回的用量仍需保存。"""
     def provider(request: httpx.Request) -> httpx.Response:
         """按服务协议先返回长度限制结束事件，再返回独立的用量尾帧。"""
-        planning = no_tool_action(json.loads(request.content))
-        if planning is not None:
-            return planning
         return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"partial"},"finish_reason":"length"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12}}\n\ndata: [DONE]\n\n')
 
     with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
@@ -213,9 +191,6 @@ def test_stream_error_keeps_usage_without_exposing_provider_details(database_url
     """流中错误携带用量时仍记录该用量，服务原始错误和密钥不会展示。"""
     def provider(request: httpx.Request) -> httpx.Response:
         """返回带敏感原始正文和已知用量的错误事件。"""
-        planning = no_tool_action(json.loads(request.content))
-        if planning is not None:
-            return planning
         return httpx.Response(200, text='data: {"error":"private-provider-detail","usage":{"prompt_tokens":4,"completion_tokens":0,"total_tokens":4}}\n\n')
 
     with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:

@@ -15,7 +15,7 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
   await page.getByLabel("API 密钥", { exact: true }).fill("browser-test-key");
   await page.getByRole("button", { name: "保存配置" }).click();
   await expect(
-    page.getByText("配置已保存。修改后的连接请重新检查能力。", { exact: true }),
+    page.getByText("配置已保存，后续调用会使用新连接。", { exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "新建会话" }).click();
   await page

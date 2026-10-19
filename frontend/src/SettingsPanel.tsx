@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { SearchSettings } from "./SearchSettings";
-import { ModelCapabilities } from "./ModelCapabilities";
+import { EmbeddingSettings } from "./EmbeddingSettings";
 import { api, errorMessage, type Settings, type Usage } from "./api";
 
 type Props = {
@@ -16,7 +16,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
-  // 同步页面首次进入后加载的用量，能力检查也可更新本地列表。
+  // 同步页面首次进入后加载的调用用量。
   useEffect(() => { setRecentUsage(usage); }, [usage]);
 
   // 搜索连接保存后刷新最近调用记录。
@@ -38,7 +38,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
       onSaved(next);
       const keyInput = form.elements.namedItem("api_key") as HTMLInputElement;
       keyInput.value = "";
-      setNotice("配置已保存。修改后的连接请重新检查能力。");
+      setNotice("配置已保存，后续调用会使用新连接。");
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -138,7 +138,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
           </div>
         </form>
       </div>
-      <ModelCapabilities settings={settings} onUsageChanged={setRecentUsage} />
+      <EmbeddingSettings settings={settings} />
       <SearchSettings onSaved={searchSaved} />
       <div className="settings-card usage-card">
         <div className="card-heading">

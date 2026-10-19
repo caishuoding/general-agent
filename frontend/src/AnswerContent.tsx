@@ -5,7 +5,6 @@ import rehypeHighlight from "rehype-highlight";
 import { visit, SKIP } from "unist-util-visit";
 import type { Root, PhrasingContent } from "mdast";
 import type { Message } from "./api";
-import { HistorySources } from "./HistorySources";
 import "./answer.css";
 
 /** 根据文本和按钮名称提供复制操作；成功、失败均返回可见反馈。 */
@@ -62,11 +61,9 @@ function sourceId(messageId: string, key: string) {
   return `answer-source-${encodeURIComponent(messageId)}-${encodeURIComponent(key)}`;
 }
 
-/** 根据服务端来源编号创建 Markdown 插件，仅转换正文文本中的真实引用。 */
+/** 根据服务端网页来源编号创建 Markdown 插件，仅转换正文中的真实网页引用。 */
 function citationPlugin(message: Message) {
-  const keys = new Set([
-    ...(message.citations || []), ...(message.web_sources || []), ...(message.history_sources || []),
-  ].map(function getKey(source) { return source.key; }));
+  const keys = new Set((message.web_sources || []).map(function getKey(source) { return source.key; }));
   /** 返回语法树转换器，不修改代码、已有链接或未知来源标记。 */
   return function citations() {
     /** 将普通文本中的引用拆为文字和链接，保留原有 Markdown 结构。 */
@@ -76,7 +73,7 @@ function citationPlugin(message: Message) {
         if (node.type !== "text" || index === undefined || !parent) return;
         const parts: PhrasingContent[] = [];
         let cursor = 0;
-        for (const match of node.value.matchAll(/\[([A-Za-z]+\d+)\]/g)) {
+        for (const match of node.value.matchAll(/\[(W\d+)\]/g)) {
           if (!keys.has(match[1])) continue;
           const start = match.index;
           if (start > cursor) parts.push({ type: "text", value: node.value.slice(cursor, start) });
@@ -92,27 +89,16 @@ function citationPlugin(message: Message) {
   };
 }
 
-/** 将一个可信来源渲染为可展开摘录，区分文件下载链接与网页链接。 */
-function SourceDetails({ id, source, kind, conversationId }: {
-  id: string;
-  source: Message["citations"][number];
-  kind: "file";
-  conversationId?: string;
-} | {
+/** 将一个可信网页来源渲染为可展开摘录。 */
+function SourceDetails({ id, source }: {
   id: string;
   source: Message["web_sources"][number];
-  kind: "web";
-  conversationId?: string;
 }) {
-  const href = kind === "file"
-    ? `/api/conversations/${conversationId}/attachments/${source.attachment_id}/file`
-    : source.url;
-  const label = kind === "file"
-    ? `${source.filename} · ${source.location}`
-    : source.title || source.url;
+  const href = source.url;
+  const label = source.title || source.url;
   /** 返回可折叠来源详情，用户可展开摘录核对回答依据。 */
   return <details className="file-citation" id={id} tabIndex={-1}>
-    <summary>[{source.key}] <a href={href} target={kind === "web" ? "_blank" : undefined} rel={kind === "web" ? "noopener noreferrer" : undefined} download={kind === "file" ? true : undefined}>{label}</a></summary>
+    <summary>[{source.key}] <a href={href} target="_blank" rel="noopener noreferrer">{label}</a></summary>
     <blockquote>{source.excerpt}</blockquote>
   </details>;
 }
@@ -151,31 +137,22 @@ const components: Components = {
 };
 
 /** 接收助手消息及所属会话，输出安全 Markdown、复制入口与可定位的真实来源。 */
-export function AnswerContent({ message, conversationId, onHistorySource }: {
+export function AnswerContent({ message }: {
   message: Message;
-  conversationId?: string;
-  onHistorySource: (conversationId: string, messageId: string) => void;
 }) {
-  const citations = message.citations || [];
   const webSources = message.web_sources || [];
-  const sourceCount = citations.length + webSources.length + (message.history_sources?.length || 0);
+  const sourceCount = webSources.length;
   return <>
     <div className="message-content answer-markdown">
       <Markdown skipHtml remarkPlugins={[remarkGfm, citationPlugin(message)]} rehypePlugins={[[rehypeHighlight, { detect: false }]]} components={components}>{message.content}</Markdown>
     </div>
     {sourceCount > 0 && <section className="answer-sources" aria-label="回答来源">
       <div className="answer-sources-heading">参考来源 · {sourceCount}</div>
-      <HistorySources state={message.history_search} sources={message.history_sources || []} onSource={onHistorySource} sourceIdPrefix={`answer-source-${encodeURIComponent(message.id)}-`} />
       {webSources.map(function renderWebSource(source) {
         /** 输出网页来源详情并绑定本回答唯一定位锚点。 */
-        return <SourceDetails key={source.key} id={sourceId(message.id, source.key)} source={source} kind="web" conversationId={conversationId} />;
-      })}
-      {citations.map(function renderFileSource(source) {
-        /** 输出文件引用详情并绑定本回答唯一定位锚点。 */
-        return <SourceDetails key={source.key} id={sourceId(message.id, source.key)} source={source} kind="file" conversationId={conversationId} />;
+        return <SourceDetails key={source.key} id={sourceId(message.id, source.key)} source={source} />;
       })}
     </section>}
-    {sourceCount === 0 && <HistorySources state={message.history_search} sources={[]} onSource={onHistorySource} />}
     {!!message.content && <div className="answer-actions"><CopyButton text={message.content} label="复制回答" /></div>}
   </>;
 }

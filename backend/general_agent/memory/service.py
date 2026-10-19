@@ -202,8 +202,3 @@ class MemoryService:
             )
             connection.execute("DELETE FROM memory_actions WHERE id=%s AND status='pending'", (uuid5(message_id, 'explicit-memory:0'),))
             return row
-
-    def discard_pending_explicit(self, message_id: UUID) -> None:
-        """Mem0 已合并为更新或删除时移除空白的待定动作，避免管理页出现重复条目。"""
-        with self.database.connect() as connection:
-            connection.execute("DELETE FROM memory_actions WHERE id=%s AND status='pending'", (uuid5(message_id, 'explicit-memory:0'),))

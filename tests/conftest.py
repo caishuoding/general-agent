@@ -8,11 +8,13 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+import httpx
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 from general_agent.memory.mem0_adapter import Mem0Client
 from general_agent.memory.service import MemoryService
 from tests.fake_mem0 import FakeMem0
+from tests.model_protocol import StreamingMockTransport
 
 
 @pytest.fixture
@@ -41,6 +43,7 @@ def database_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 @pytest.fixture(autouse=True)
 def fake_mem0(monkeypatch: pytest.MonkeyPatch) -> FakeMem0:
     """默认用官方 REST 契约替身运行应用测试，显式注入传输时仍使用真实客户端。"""
+    monkeypatch.setattr(httpx, "MockTransport", StreamingMockTransport)
     fake = FakeMem0()
     original = MemoryService.session
 

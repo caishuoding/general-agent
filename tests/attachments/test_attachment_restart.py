@@ -51,9 +51,6 @@ def test_killed_parser_reports_failed_after_restart(database_url: str, tmp_path:
             assert restored['status'] == 'failed'
             assert '重启中断' in restored['error']
             assert len(client.get(f'/api/conversations/{conversation}/attachments/{attachment["id"]}/file').content) == 20_000_000
-            rejected = client.post(f'/api/conversations/{conversation}/runs', json={'content': '请读资料', 'attachment_ids': [attachment['id']]})
-            assert rejected.status_code == 409
-            assert client.get('/api/usage').json() == []
     finally:
         process.terminate()
         process.wait(timeout=5)

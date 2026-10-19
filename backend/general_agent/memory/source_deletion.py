@@ -30,7 +30,8 @@ class SourceDeletion:
         if kind=='attachment' and (not files or files[0]['status']=='deleting'):
             raise LookupError('附件不存在或正在删除。')
         file_ids=[row['id'] for row in files]
-        message_ids=[row['id'] for row in connection.execute('SELECT id FROM messages WHERE conversation_id=%s',(conversation_id,)).fetchall()] if kind=='conversation' else [row['message_id'] for row in connection.execute('SELECT DISTINCT message_id FROM message_attachments WHERE attachment_id=ANY(%s)',(file_ids,)).fetchall()]
+        # 附件现在是会话级上下文；删除单个附件时通过活动操作定位正在读取它的回答。
+        message_ids=[row['id'] for row in connection.execute('SELECT id FROM messages WHERE conversation_id=%s',(conversation_id,)).fetchall()] if kind=='conversation' else []
         actions=connection.execute("SELECT * FROM memory_actions WHERE status<>'deleted' AND %s AND (conversation_id=%s OR id IN (SELECT action_id FROM memory_updates WHERE source_conversation_id=%s)) ORDER BY id FOR UPDATE",(kind=='conversation',conversation_id,conversation_id)).fetchall()
         valid=self.memories.retainable(actions)
         fingerprint=[kind,str(source_id),str(conversation_id),[(str(row['id']),row['status'],str(row['created_at'])) for row in files],[(str(row['id']),row['status'],row['version'],row['id'] in valid) for row in actions],sorted(map(str,message_ids))]
@@ -78,20 +79,18 @@ class SourceDeletion:
         return self.resume(identifier)
 
     def invalidate(self, connection: Any, identifier: UUID) -> None:
-        """撤回来源关联的旧调用、自动记忆缓存及引用，保留单附件所属会话的已完成正文。"""
+        """撤回来源关联的旧调用和自动记忆缓存，保留单附件所属会话的已完成正文。"""
         row=connection.execute('SELECT * FROM source_deletions WHERE id=%s',(identifier,)).fetchone()
         message_ids=row['message_ids']
         connection.execute('DELETE FROM memory_native_steps WHERE message_id=ANY(%s)',(message_ids,))
         connection.execute("UPDATE memory_tool_runs SET result='{}' WHERE message_id=ANY(%s)",(message_ids,))
         operations={item['operation_id'] for item in connection.execute('SELECT operation_id FROM messages WHERE (id=ANY(%s) OR reply_to=ANY(%s)) AND operation_id IS NOT NULL',(message_ids,message_ids)).fetchall()}
-        jobs={item['id'] for item in connection.execute('SELECT id FROM document_jobs WHERE attachment_ids && %s OR (%s AND conversation_id=%s)',(row['attachment_ids'],row['kind']=='conversation',row['conversation_id'])).fetchall()} | set(row['job_ids'])
-        operations.update(item['operation_id'] for item in connection.execute("SELECT operation_id FROM messages WHERE operation_id IS NOT NULL AND (document_job_id=ANY(%s) OR (%s AND conversation_id=%s AND status IN ('generating','paused')))",(list(jobs),row['phase']=='invalidate',row['conversation_id'])).fetchall())
+        if row['kind'] == 'attachment':
+            operations.update(item['operation_id'] for item in connection.execute("SELECT operation_id FROM messages WHERE conversation_id=%s AND status='generating' AND operation_id IS NOT NULL",(row['conversation_id'],)).fetchall())
         operations.update(item['operation_id'] for item in connection.execute("SELECT operation_id FROM search_requests s WHERE (%s AND conversation_id=%s) OR EXISTS(SELECT 1 FROM jsonb_array_elements(s.sources) source WHERE source->>'kind'='attachment' AND (source->>'id')::uuid=ANY(%s))",(row['kind']=='conversation',row['conversation_id'],row['attachment_ids'])).fetchall())
         if row['kind']=='conversation':
-            operations.update(item['operation_id'] for item in connection.execute('SELECT operation_id FROM history_hits WHERE source_conversation_id=%s',(row['conversation_id'],)).fetchall())
             operations.update(item['operation_id'] for item in connection.execute('SELECT operation_id FROM memory_update_operations WHERE update_id IN (SELECT id FROM memory_updates WHERE source_conversation_id=%s)',(row['conversation_id'],)).fetchall())
         operations.update(item['operation_id'] for item in connection.execute('SELECT operation_id FROM memory_actions WHERE id=ANY(%s) AND operation_id IS NOT NULL',(row['action_ids'],)).fetchall())
-        connection.execute('UPDATE source_deletions SET job_ids=%s WHERE id=%s',(list(jobs),identifier))
         if row['kind']=='conversation':
             operations.update(item['id'] for item in connection.execute('SELECT id FROM cloud_operations WHERE conversation_id=%s',(row['conversation_id'],)).fetchall())
         defaults=[item for item in row['action_ids'] if item not in row['keep_ids']]
@@ -101,16 +100,11 @@ class SourceDeletion:
         connection.execute('UPDATE source_deletions SET operation_ids=%s WHERE id=%s',(list(operations),identifier))
         connection.execute('UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,result=NULL,response_status=NULL WHERE id=ANY(%s)',(list(operations),))
         connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE operation_id=ANY(%s) AND status='reserved'",(list(operations),))
-        connection.execute("UPDATE messages SET status='stopped',content='',error='来源已删除，本次生成已失效。' WHERE operation_id=ANY(%s) AND status IN ('generating','paused')",(list(operations),))
+        connection.execute("UPDATE messages SET status='stopped',content='',error='来源已删除，本次生成已失效。' WHERE operation_id=ANY(%s) AND status='generating'",(list(operations),))
         connection.execute("UPDATE search_requests SET status='expired',query='',results='[]',sources='[]',purpose='',expires_at=0,error='来源已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
-        connection.execute("UPDATE messages SET web_sources='[]',document_progress=NULL WHERE operation_id=ANY(%s) OR document_job_id=ANY(%s)",(list(operations),list(jobs)))
-        connection.execute('DELETE FROM document_jobs WHERE id=ANY(%s)',(list(jobs),))
-        if row['kind']=='conversation':
-            connection.execute('DELETE FROM history_hits WHERE source_conversation_id=%s',(row['conversation_id'],))
-        connection.execute('DELETE FROM attachment_chunks WHERE attachment_id=ANY(%s)',(row['attachment_ids'],))
+        connection.execute("UPDATE messages SET web_sources='[]' WHERE operation_id=ANY(%s)",(list(operations),))
         for message_id in message_ids:
             connection.execute('INSERT INTO memory_source_suppressions(message_id) VALUES(%s) ON CONFLICT DO NOTHING',(message_id,))
-        connection.execute("UPDATE messages SET citations=coalesce((SELECT jsonb_agg(item) FROM jsonb_array_elements(citations) item WHERE NOT ((item->>'attachment_id')::uuid=ANY(%s))),'[]'::jsonb) WHERE conversation_id=%s",(row['attachment_ids'],row['conversation_id']))
 
     def resume(self, identifier: UUID) -> dict[str,Any]:
         """同一删除身份串行逐步清理，失败保留真实阶段，已完成步骤重试不会扩展批准范围。"""
@@ -153,7 +147,6 @@ class SourceDeletion:
         connection.execute("UPDATE memory_updates SET source_deleted=TRUE,source_message_id=NULL,source_conversation_id=NULL,fact='',previous_fact='',error=NULL WHERE source_conversation_id=%s",(row['conversation_id'],))
         connection.execute('UPDATE memory_actions SET source_deleted=TRUE,message_id=NULL,conversation_id=NULL WHERE conversation_id=%s',(row['conversation_id'],))
         connection.execute('DELETE FROM search_requests WHERE conversation_id=%s',(row['conversation_id'],))
-        connection.execute('DELETE FROM document_jobs WHERE conversation_id=%s',(row['conversation_id'],))
         connection.execute('UPDATE model_calls SET assistant_message_id=NULL WHERE assistant_message_id=ANY(%s)',(messages,))
         connection.execute('UPDATE model_calls SET conversation_id=NULL WHERE conversation_id=%s',(row['conversation_id'],))
         connection.execute('UPDATE cloud_operations SET conversation_id=NULL WHERE conversation_id=%s',(row['conversation_id'],))

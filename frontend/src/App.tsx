@@ -1,6 +1,5 @@
 import { SourceDeletion, SourceDeletionPending, type DeleteTarget } from './SourceDeletion';
 import { AnswerContent } from "./AnswerContent";
-import { DocumentProgress } from './DocumentProgress';
 import {
   useEffect,
   useRef,
@@ -17,16 +16,16 @@ import {
   type Conversation,
   type ConversationDetail,
   type Message,
+  type MessageAttachment,
   type Settings,
   type Usage,
 } from "./api";
 import { AttachmentPanel } from "./AttachmentPanel";
-import { SearchCard } from "./SearchCard";
 import { SettingsPanel } from "./SettingsPanel";
 
 type Screen = "chat" | "settings";
 
-// 展示会话、资料与来源删除状态，并隔离过期异步响应。
+// 展示会话、消息内附件与来源删除状态，并隔离过期异步响应。
 export function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(
@@ -40,7 +39,6 @@ export function App() {
   const [usage, setUsage] = useState<Usage[]>([]);
   const [screen, setScreen] = useState<Screen>("chat");
   const [draft, setDraft] = useState("");
-  const [selectedAttachments, setSelectedAttachments] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -52,7 +50,7 @@ export function App() {
   } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [sourceRevision, setSourceRevision] = useState(0);
-  const [sourceMessage, setSourceMessage] = useState<string | null>(null);
+  const [attachmentReset, setAttachmentReset] = useState(0);
   const activeId = useRef<string | null>(null);
   const selection = useRef(0);
   const bottom = useRef<HTMLDivElement>(null);
@@ -65,11 +63,7 @@ export function App() {
     // 从持久化消息状态确定需要订阅的回答。
     (message) => message.status === "generating",
   );
-  const paused = conversation?.messages.find(
-    // 暂停尝试仍占用执行位置，用户恢复或取消前不能发送新的消息。
-    (message) => message.status === "paused",
-  );
-  const activeRun = generating || paused;
+  const activeRun = generating;
   const generatingId = generating?.id;
   const conversationId = conversation?.id;
 
@@ -107,43 +101,21 @@ export function App() {
     [generatingId, conversationId],
   );
 
-  useEffect(
-    // 来源会话加载后定位原消息，直接滚动并标示该条来源。
-    () => {
-      if (sourceMessage && conversation?.messages.some(
-        // 只定位当前已加载会话确实包含的消息标识。
-        (message) => message.id === sourceMessage,
-      )) document.getElementById(`message-${sourceMessage}`)?.scrollIntoView({ block: "center" });
-    }, [sourceMessage, conversation],
-  );
-
-  // 打开历史来源并重新验证消息存在；后续渲染负责定位原处。
-  function openHistorySource(id: string, messageId: string) {
-    setSourceMessage(messageId);
-    void selectConversation(id, messageId);
-  }
-
-  // 切换时隔离旧响应与附件；来源跳转额外核验原消息，失效则明确提示。
-  async function selectConversation(id: string, expectedMessage?: string) {
+  // 切换时隔离旧响应与附件，避免过期请求覆盖当前会话。
+  async function selectConversation(id: string) {
     const current = ++selection.current;
     activeId.current = id;
     localStorage.setItem("active-conversation", id);
-    followLatest.current = !expectedMessage;
+    followLatest.current = true;
     setShowLatest(false);
-    setSourceMessage(expectedMessage || null);
     setScreen("chat");
     setConversation(null);
     setDraft("");
-    setSelectedAttachments([]);
     setError("");
     try {
       const result = await api<ConversationDetail>(`/conversations/${id}`);
       if (current === selection.current) {
         setConversation(result);
-        if (expectedMessage && !result.messages.some(
-          // 来源消息必须仍在当前会话中，不能把仅存在会话当成有效出处。
-          (message) => message.id === expectedMessage,
-        )) setError("原消息已不可用，无法定位这条历史出处。");
       }
     } catch (failure) {
       if (current === selection.current) setError(errorMessage(failure));
@@ -212,7 +184,6 @@ export function App() {
   async function refreshSources() {
     const id = activeId.current;
     const selected = selection.current;
-    setSelectedAttachments([]);
     const items = await api<Conversation[]>("/conversations");
     setConversations(items);
     setSourceRevision(
@@ -294,7 +265,7 @@ export function App() {
     }
   }
 
-  // 将附件绑定到本条消息后启动流式生成，失败保留附件选择和未被新输入覆盖的草稿。
+  // 启动流式生成；当前会话附件会自动进入后端上下文，失败时保留草稿。
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
@@ -320,12 +291,15 @@ export function App() {
     try {
       const result = await api<ConversationDetail>(
         `/conversations/${targetId}/runs`,
-        { method: "POST", body: JSON.stringify({ content, attachment_ids: selectedAttachments }) },
+        { method: "POST", body: JSON.stringify({ content }) },
       );
       if (activeId.current === targetId) {
         selection.current += 1;
         setConversation(result);
-        setSelectedAttachments([]);
+        setAttachmentReset(
+          // 发送成功后清空输入区托盘，附件只保留在对应消息中。
+          (value) => value + 1,
+        );
       }
     } catch (failure) {
       if (activeId.current === targetId) {
@@ -395,9 +369,33 @@ export function App() {
     );
   }
 
-  // 仅更新当前会话的确认结果，切换后的旧请求不能覆盖新会话。
-  function applySearchUpdate(detail: ConversationDetail) {
-    if (activeId.current === detail.id) { selection.current += 1; setConversation(detail); }
+  /** 根据附件处理状态返回聊天记录中的简短说明，无输入返回展示文字。 */
+  function attachmentLabel(attachment: MessageAttachment) {
+    if (attachment.status === "ready") return "可用";
+    if (attachment.status === "failed") return "解析失败";
+    if (attachment.status === "deleting") return "已删除";
+    return "处理中";
+  }
+
+  /** 渲染用户消息随附文件的下载入口，保留原始文件名和处理状态。 */
+  function renderMessageAttachments(attachments: MessageAttachment[]) {
+    return (
+      <ul className="message-attachments" aria-label="本条消息附件">
+        {attachments.map((attachment) => (
+          <li key={attachment.id}>
+            <a
+              className={`message-attachment ${attachment.status}`}
+              href={`/api/conversations/${conversation?.id}/attachments/${attachment.id}/file`}
+              download
+              aria-label={`下载附件 ${attachment.filename}`}
+            >
+              <span className="message-attachment-name">{attachment.filename}</span>
+              <small>{attachmentLabel(attachment)}</small>
+            </a>
+          </li>
+        ))}
+      </ul>
+    );
   }
 
   /** 接收持久化消息并返回消息界面；助手显示 Markdown，用户保留原始输入。 */
@@ -406,7 +404,7 @@ export function App() {
       <article
         key={message.id}
         id={`message-${message.id}`}
-        className={`message ${message.role} ${message.status} ${sourceMessage === message.id ? "source-highlight" : ""}`}
+        className={`message ${message.role} ${message.status}`}
       >
         <div className="message-label">
           {message.role === "user" ? "你" : "助手"}
@@ -418,11 +416,11 @@ export function App() {
           </time>
         </div>
         {message.role === "assistant"
-          ? <AnswerContent message={message} conversationId={conversation?.id} onHistorySource={openHistorySource} />
-          : <div className="message-content">{message.content}</div>}
-        {message.document_progress && <DocumentProgress progress={message.document_progress} status={message.status} />}
-        {!!message.attachment_ids?.length && <div className="message-progress">已附 {message.attachment_ids.length} 个会话文件</div>}
-        {message.search_action && conversation && <SearchCard message={message} conversationId={conversation.id} onUpdated={applySearchUpdate} />}
+          ? <AnswerContent message={message} />
+          : <div className="message-content">
+              <span>{message.content}</span>
+              {!!message.attachments.length && renderMessageAttachments(message.attachments)}
+            </div>}
         {message.status === "generating" && <div className="message-progress" role="status">正在生成…</div>}
         {message.status === "failed" && (
           <div className="message-error" role="alert">回答未完成 · {message.error || "可以重试或检查设置。"}</div>
@@ -553,7 +551,7 @@ export function App() {
                         <article className="message user">
                           <div className="message-label">你</div>
                           <div className="message-content">
-                            {currentPending.content}
+                            <span>{currentPending.content}</span>
                           </div>
                         </article>
                         <div className="thinking" role="status">
@@ -569,9 +567,9 @@ export function App() {
             </div>
             {showLatest && <button type="button" className="return-to-latest" onClick={returnToLatest}>↓ 回到最新</button>}
             <div className="composer-wrap">
-              <AttachmentPanel revision={sourceRevision} onDelete={deleteAttachment} conversationId={activeId.current} selected={selectedAttachments} onSelect={setSelectedAttachments} disabled={!!pending || !!generating || changingRun || creating || loading} />
               {streamNotice && <p className="stream-notice" role="status">{streamNotice}</p>}
               <form className="composer" ref={composer} onSubmit={send}>
+                <AttachmentPanel revision={sourceRevision} resetToken={attachmentReset} onDelete={deleteAttachment} conversationId={activeId.current} disabled={!!pending || !!generating || changingRun || creating || loading} />
                 <textarea
                   aria-label="消息"
                   placeholder={

@@ -46,9 +46,6 @@ class TokenUsage(BaseModel):
         return cls.model_validate({key: value for key, value in data.items() if key in cls.model_fields and type(value) is int and 0 <= value <= 2147483647})
 
 
-RED_IMAGE = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/Afnh+ngAAAAASUVORK5CYII="
-
-
 class EmbeddingVector(BaseModel):
     index: StrictInt = Field(ge=0)
     embedding: list[Annotated[FiniteFloat, Field(strict=True)]] = Field(min_length=1)
@@ -76,8 +73,18 @@ class ToolReply(BaseModel):
     usage: TokenUsage
 
 
+class ToolCallDelta(BaseModel):
+    """保存流式工具调用的单个分片，调用方按 index 累积完整参数。"""
+    index: StrictInt = Field(default=0, ge=0)
+    id: str | None = None
+    name: str | None = None
+    arguments: str | None = None
+
+
 class StreamChunk(BaseModel):
     content: str = ""
+    reasoning_content: str = ""
+    tool_call: ToolCallDelta | None = None
     usage: TokenUsage | None = None
 
 
@@ -129,18 +136,22 @@ class ModelClient:
             raise ModelFailure("模型未返回有效文字回答，请检查模型是否支持此接口。", usage) from None
 
 
-    def stream(self, settings: StoredSettings, messages: list[ModelMessage]) -> Iterator[StreamChunk]:
-        """逐段解析文字或视觉 SSE 并保留结束原因之后的用量；断流或提前结束不标记为完整。"""
+    def stream(self, settings: StoredSettings, messages: list[ModelMessage], tools: list[dict[str, Any]] | None = None) -> Iterator[StreamChunk]:
+        """逐段解析文字、推理和工具调用 SSE；工具参数分片由调用方累积。"""
         usage = TokenUsage()
         has_content = False
+        has_tool_calls = False
         finished = False
         incomplete = False
+        body: dict[str, object] = {"model": settings.model, "messages": messages, "stream": True, "stream_options": {"include_usage": True}}
+        if tools is not None:
+            body.update(tools=tools, tool_choice="auto", parallel_tool_calls=False)
         try:
             with httpx.Client(transport=self.transport, timeout=60, follow_redirects=False, trust_env=False) as client:
                 with client.stream(
                     "POST", settings.base_url.rstrip("/") + "/chat/completions",
                     headers={"Authorization": "Bearer " + settings.api_key},
-                    json={"model": settings.model, "messages": messages, "stream": True, "stream_options": {"include_usage": True}},
+                    json=body,
                 ) as response:
                     if not response.is_success:
                         response.read()
@@ -152,10 +163,15 @@ class ModelClient:
                             raise ModelFailure("模型认证失败，请在设置中检查密钥与访问权限。", usage)
                         raise ModelFailure(f"模型请求失败（HTTP {response.status_code}），请检查配置或重试。", usage)
                     data: list[str] = []
+                    raw_lines: list[str] = []
+                    saw_data = False
                     for line in response.iter_lines():
                         if line.startswith("data:"):
+                            saw_data = True
                             data.append(line[5:].lstrip())
                             continue
+                        if line:
+                            raw_lines.append(line)
                         if line or not data:
                             continue
                         raw = "\n".join(data)
@@ -163,7 +179,7 @@ class ModelClient:
                         if raw == "[DONE]":
                             if incomplete:
                                 raise ModelFailure("模型提前结束回答，内容可能不完整，请重试或调整请求。", usage)
-                            if not has_content or not finished:
+                            if not finished or (not has_content and not has_tool_calls):
                                 raise ModelFailure("模型未返回完整文字回答，请检查模型能力或重试。", usage)
                             return
                         payload = json.loads(raw)
@@ -177,14 +193,36 @@ class ModelClient:
                         for choice in payload.get("choices", []):
                             if choice.get("index", 0) != 0:
                                 continue
-                            content = choice.get("delta", {}).get("content")
+                            delta = choice.get("delta", {})
+                            content = delta.get("content")
                             if content is not None and not isinstance(content, str):
                                 raise ValueError("无效文字片段")
                             if content:
                                 has_content = True
                                 yield StreamChunk(content=content)
+                            reasoning = delta.get("reasoning_content")
+                            if reasoning is not None and not isinstance(reasoning, str):
+                                raise ValueError("无效推理片段")
+                            if reasoning:
+                                yield StreamChunk(reasoning_content=reasoning)
+                            tool_deltas = delta.get("tool_calls") or []
+                            if not isinstance(tool_deltas, list):
+                                raise ValueError("无效工具调用片段")
+                            for item in tool_deltas:
+                                if not isinstance(item, dict):
+                                    raise ValueError("无效工具调用片段")
+                                function = item.get("function") or {}
+                                if not isinstance(function, dict):
+                                    raise ValueError("无效工具函数片段")
+                                has_tool_calls = True
+                                yield StreamChunk(tool_call=ToolCallDelta(
+                                    index=item.get("index", 0) if type(item.get("index", 0)) is int else 0,
+                                    id=item.get("id") if isinstance(item.get("id"), str) else None,
+                                    name=function.get("name") if isinstance(function.get("name"), str) else None,
+                                    arguments=function.get("arguments") if isinstance(function.get("arguments"), str) else None,
+                                ))
                             reason = choice.get("finish_reason")
-                            if reason == "stop":
+                            if reason in ("stop", "tool_calls"):
                                 finished = True
                             elif reason is not None:
                                 incomplete = True
@@ -194,6 +232,13 @@ class ModelClient:
             raise ModelFailure("模型连接中断，已保留部分内容，可以重试。", usage) from None
         except (ValueError, TypeError, KeyError, AttributeError):
             raise ModelFailure("模型流式响应格式无效，已保留部分内容，可以重试。", usage) from None
+        if raw_lines and not saw_data:
+            try:
+                payload = json.loads('\n'.join(raw_lines))
+                usage = TokenUsage.from_payload(payload.get('usage'))
+            except (ValueError, AttributeError):
+                pass
+            raise ModelFailure("模型未返回有效流式回答，请检查模型是否支持流式工具调用。", usage)
         raise ModelFailure("模型回答流中断，已保留部分内容，可以重试。", usage)
 
     def request(self, settings: StoredSettings, endpoint: str, body: dict[str, object]) -> tuple[dict[str, object], TokenUsage]:
@@ -251,37 +296,6 @@ class ModelClient:
             return ToolReply(message=result, usage=usage)
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             raise ModelFailure("模型未返回有效的记忆或工具响应，请检查模型能力后重试。", usage) from None
-
-    def probe(self, settings: StoredSettings, capability: Literal["text", "image", "tools"]) -> TokenUsage:
-        """分别发送文字、图片或工具请求，验证文字内容及工具调用标识和参数。"""
-        body: dict[str, object] = {"stream": False}
-        if capability == "image":
-            body["messages"] = [{"role": "user", "content": [
-                {"type": "text", "text": "Name the dominant color in this image in one English word."},
-                {"type": "image_url", "image_url": {"url": RED_IMAGE, "detail": "low"}},
-            ]}]
-        else:
-            body["messages"] = [{"role": "user", "content": "Reply OK." if capability == "text" else "Call capability_check with value OK."}]
-        if capability == "tools":
-            body["tools"] = [{"type": "function", "function": {"name": "capability_check", "description": "Report the capability check value.", "parameters": {"type": "object", "properties": {"value": {"type": "string", "enum": ["OK"]}}, "required": ["value"], "additionalProperties": False}}}]
-            body["tool_choice"] = {"type": "function", "function": {"name": "capability_check"}}
-        payload, usage = self.request(settings, "/chat/completions", body)
-        try:
-            message = payload["choices"][0]["message"]  # type: ignore[index]
-            if capability == "tools":
-                call = message["tool_calls"][0]
-                if not isinstance(call["id"], str) or not call["id"].strip() or call["type"] != "function" or call["function"]["name"] != "capability_check" or json.loads(call["function"]["arguments"]) != {"value": "OK"}:
-                    raise ValueError("工具响应无效")
-            else:
-                content = message["content"]
-                if not isinstance(content, str) or not content.strip():
-                    raise ValueError("文字为空")
-                if capability == "image" and content.strip().rstrip(".。!").upper() != "RED":
-                    raise ValueError("未识别图片")
-        except (ValueError, KeyError, IndexError, TypeError):
-            label = {"text": "文字回答", "image": "图片识别", "tools": "工具调用"}[capability]
-            raise ModelFailure(f"{label}验证未通过：服务响应缺少预期内容或格式；请核对该模型是否支持此能力。", usage) from None
-        return usage
 
     def embed(self, settings: StoredEmbeddingSettings, texts: list[str]) -> Embedding:
         """调用独立嵌入接口并严格校验模型标识、条数、有限数值及预期维度。"""
