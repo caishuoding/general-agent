@@ -8,6 +8,7 @@ type LoginProps = {
   kicker?: string;
   title?: string;
   description?: string;
+  initialError?: string;
 };
 
 type ChangePasswordProps = {
@@ -25,10 +26,11 @@ export function LoginScreen({
   kicker = "个人对话空间",
   title = "登录",
   description = "账号由管理员创建，不开放注册。",
+  initialError = "",
 }: LoginProps) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(initialError);
   const [submitting, setSubmitting] = useState(false);
 
   // 提交登录信息；成功后把当前账号交给应用根组件。

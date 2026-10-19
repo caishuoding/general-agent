@@ -3,6 +3,8 @@
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 
+BOOTSTRAP_ADMIN_PASSWORD = "123456"
+
 COMMON_PASSWORDS = {
     "123456",
     "12345678",

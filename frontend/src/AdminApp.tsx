@@ -3,7 +3,13 @@ import { useEffect, useState } from "react";
 import { AdminPanel } from "./AdminPanel";
 import { LoginScreen, PasswordChangeScreen } from "./AuthScreens";
 import { SettingsPanel } from "./SettingsPanel";
-import { api, errorMessage, type AuthUser, type Settings } from "./api";
+import {
+  AUTH_EXPIRED_EVENT,
+  api,
+  errorMessage,
+  type AuthUser,
+  type Settings,
+} from "./api";
 
 type AdminTab = "accounts" | "settings";
 
@@ -12,6 +18,7 @@ export function AdminApp() {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [tab, setTab] = useState<AdminTab>("accounts");
+  const [changingPassword, setChangingPassword] = useState(false);
   const [settings, setSettings] = useState<Settings>({
     base_url: "",
     model: "",
@@ -43,6 +50,22 @@ export function AdminApp() {
   );
 
   useEffect(
+    // 监听会话失效广播，避免会话被吊销后仍停留在管理界面。
+    function watchSessionExpiry() {
+      // 会话失效时清空账号并回到管理员登录页。
+      function handleExpired() {
+        setUser(null);
+        setChangingPassword(false);
+        setTab("accounts");
+        setError("登录已失效，请重新登录。");
+      }
+      window.addEventListener(AUTH_EXPIRED_EVENT, handleExpired);
+      return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleExpired);
+    },
+    [],
+  );
+
+  useEffect(
     // 管理员登录后加载全局模型、嵌入和搜索配置。
     function loadSettings() {
       if (!user || user.role !== "admin" || user.must_change_password) return;
@@ -68,12 +91,14 @@ export function AdminApp() {
   function handleAuthenticated(next: AuthUser) {
     setError("");
     setUser(next);
+    setChangingPassword(false);
   }
 
   // 首次改密成功后回到管理端。
   function handlePasswordChanged(next: AuthUser) {
     setError("");
     setUser(next);
+    setChangingPassword(false);
   }
 
   // 退出管理端会话并回到管理员登录页。
@@ -84,6 +109,7 @@ export function AdminApp() {
       /* 网络失败也回到登录页，由下一次请求确认会话状态。 */
     } finally {
       setUser(null);
+      setChangingPassword(false);
       setTab("accounts");
       setError("");
     }
@@ -103,6 +129,7 @@ export function AdminApp() {
             ? "当前登录的是普通用户，请使用管理员账号进入管理端。"
             : "管理员账号只用于账号管理和系统配置。"
         }
+        initialError={error}
         onAuthenticated={handleAuthenticated}
       />
     );
@@ -113,6 +140,17 @@ export function AdminApp() {
         user={user}
         onChanged={handlePasswordChanged}
         onLogout={logout}
+      />
+    );
+  }
+  if (changingPassword) {
+    return (
+      <PasswordChangeScreen
+        user={user}
+        forced={false}
+        onChanged={handlePasswordChanged}
+        onLogout={logout}
+        onCancel={() => setChangingPassword(false)}
       />
     );
   }
@@ -129,6 +167,7 @@ export function AdminApp() {
         </div>
         <div className="admin-session">
           <span>{user.username}</span>
+          <button type="button" onClick={() => setChangingPassword(true)}>修改密码</button>
           <button type="button" onClick={logout}>退出</button>
         </div>
       </header>
@@ -150,7 +189,7 @@ export function AdminApp() {
       </nav>
       {error && <div className="global-error" role="alert">{error}</div>}
       {tab === "accounts" ? (
-        <AdminPanel />
+        <AdminPanel currentUserId={user.id} />
       ) : (
         <div className="page-scroll">
           <SettingsPanel settings={settings} onSaved={setSettings} />

@@ -61,8 +61,13 @@ type AdminUsage = {
   created_at: string;
 };
 
+type AdminPanelProps = {
+  /** 当前登录管理员的账号标识，用于区分“修改自己密码”和“重置他人密码”。 */
+  currentUserId: string;
+};
+
 // 展示管理员账号管理和跨账号只读内容，所有操作都通过后端权限校验。
-export function AdminPanel() {
+export function AdminPanel({ currentUserId }: AdminPanelProps) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [selected, setSelected] = useState<AdminUser | null>(null);
   const [conversations, setConversations] = useState<AdminConversation[]>([]);
@@ -241,6 +246,7 @@ export function AdminPanel() {
                   {user.status === "active" ? "有效" : "已停用"}
                 </span>
                 <small>{user.role === "admin" ? "管理员" : "普通用户"}</small>
+                {user.id === currentUserId && <small>当前账号</small>}
                 {user.must_change_password && <small>待首次改密</small>}
               </div>
               <div className="admin-user-actions">
@@ -248,7 +254,9 @@ export function AdminPanel() {
                 <button type="button" onClick={() => void toggleUser(user)}>
                   {user.status === "active" ? "停用" : "启用"}
                 </button>
-                <button type="button" onClick={() => void resetPassword(user)}>重置密码</button>
+                {user.id !== currentUserId && (
+                  <button type="button" onClick={() => void resetPassword(user)}>重置密码</button>
+                )}
               </div>
             </article>
           ))}

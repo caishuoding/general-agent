@@ -91,8 +91,10 @@ def admin_router(
 
     @router.post("/users/{user_id}/reset-password")
     def reset_password(user_id: UUID, body: ResetPasswordInput, request: Request) -> dict[str, Any]:
-        """重置临时密码并强制目标账号下次登录改密。"""
-        require_admin(request)
+        """重置他人临时密码；修改自己的密码必须走修改密码接口。"""
+        admin = require_admin(request)
+        if user_id == admin.id:
+            raise HTTPException(409, "修改自己的密码请使用“修改密码”，重置会退出当前登录。")
         try:
             return auth.reset_password(user_id, body.password)
         except LookupError as error:

@@ -39,6 +39,9 @@ export type Usage = {
   created_at: string;
 };
 
+// 会话失效事件名：任意业务请求返回 401 时广播，让页面回到登录状态。
+export const AUTH_EXPIRED_EVENT = "general-agent:auth-expired";
+
 // 访问同源 JSON 或文件上传接口，并为写操作附加稳定操作标识。
 export async function api<T>(
   path: string,
@@ -60,12 +63,17 @@ export async function api<T>(
     // 非 JSON 错误使用通用提示，不把原始服务正文放入页面。
     () => ({ detail: "服务暂时不可用，请稍后重试。" }),
   );
-  if (!response.ok)
+  if (!response.ok) {
+    // 登录接口会正常返回 401 表示密码错误，其余 401 视为会话已失效。
+    if (response.status === 401 && path !== "/auth/login") {
+      window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+    }
     throw new Error(
       typeof body.detail === "string"
         ? body.detail
         : "请求未完成，请检查输入。",
     );
+  }
   return body as T;
 }
 

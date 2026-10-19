@@ -112,6 +112,29 @@ def test_non_bootstrap_user_can_login_public_and_must_change_password(
         assert client.get("/api/conversations").status_code == 200
 
 
+def test_admin_reset_to_non_default_temp_password_can_login_public(
+    database_url: str, tmp_path: Path
+) -> None:
+    """管理员临时密码不是默认引导密码时，公网登录应进入强制改密页。"""
+    with TestClient(create_app(database_url, tmp_path), base_url="http://127.0.0.1:8000"):
+        pass
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        connection.execute(
+            "UPDATE users SET password_hash=%s, must_change_password=TRUE, "
+            "password_changed_at=NULL WHERE username='admin'",
+            (hash_password("admin-reset-temp-pass"),),
+        )
+
+    with TestClient(create_app(database_url, tmp_path), base_url="http://127.0.0.1:8000") as client:
+        login = client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-reset-temp-pass"},
+            headers={"X-Forwarded-For": "203.0.113.10"},
+        )
+        assert login.status_code == 200
+        assert login.json()["must_change_password"] is True
+
+
 def test_https_login_uses_secure_httponly_cookie(database_url: str, tmp_path: Path) -> None:
     """HTTPS 登录必须返回 HttpOnly、Secure 和 SameSite=Lax Cookie。"""
     with TestClient(

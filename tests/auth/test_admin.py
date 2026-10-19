@@ -23,6 +23,13 @@ def test_admin_creates_disables_resets_and_protects_last_admin(
     """管理员可管理账号，但停用或降级最后一个管理员会被拒绝。"""
     with admin_client(database_url, tmp_path) as admin:
         admin_id = admin.get("/api/auth/me").json()["id"]
+        self_reset = admin.post(
+            f"/api/admin/users/{admin_id}/reset-password",
+            json={"password": "should-not-apply"},
+        )
+        assert self_reset.status_code == 409
+        assert admin.get("/api/admin/users").status_code == 200
+
         created = admin.post(
             "/api/admin/users",
             json={"username": "alice", "password": "alice-temp-pass", "role": "user"},

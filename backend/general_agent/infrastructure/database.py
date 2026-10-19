@@ -7,7 +7,7 @@ from uuid import UUID, uuid4, uuid5
 import psycopg
 from psycopg.rows import dict_row
 
-from general_agent.auth.passwords import hash_password
+from general_agent.auth.passwords import BOOTSTRAP_ADMIN_PASSWORD, hash_password
 
 
 class Database:
@@ -43,7 +43,7 @@ class Database:
         connection.execute(
             "INSERT INTO users (id, username, password_hash, role, status, must_change_password) "
             "VALUES (%s, %s, %s, 'admin', 'active', TRUE)",
-            (uuid4(), "admin", hash_password("123456")),
+            (uuid4(), "admin", hash_password(BOOTSTRAP_ADMIN_PASSWORD)),
         )
 
     def create_conversation(self, title: str, user_id: UUID) -> dict[str, Any]:

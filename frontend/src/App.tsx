@@ -11,6 +11,7 @@ import {
   type UIEvent,
 } from "react";
 import {
+  AUTH_EXPIRED_EVENT,
   api,
   errorMessage,
   type AuthUser,
@@ -142,6 +143,20 @@ export function App() {
       return () => {
         mounted = false;
       };
+    },
+    [],
+  );
+
+  useEffect(
+    // 监听会话失效广播，避免会话过期后继续显示聊天界面。
+    function watchSessionExpiry() {
+      // 会话失效时清空账号并回到用户登录页。
+      function handleExpired() {
+        setUser(null);
+        setScreen("chat");
+      }
+      window.addEventListener(AUTH_EXPIRED_EVENT, handleExpired);
+      return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleExpired);
     },
     [],
   );

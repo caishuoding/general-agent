@@ -6,6 +6,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from general_agent.auth.passwords import BOOTSTRAP_ADMIN_PASSWORD
 from general_agent.auth.service import AuthService, AuthenticatedUser
 
 COOKIE_NAME = "general_agent_session"
@@ -33,13 +34,18 @@ def auth_router(service: AuthService, secure_cookies: bool) -> APIRouter:
 
     @router.post("/login")
     def login(body: LoginInput, request: Request, response: Response) -> dict[str, Any]:
-        """验证用户名密码并签发登录会话，初始管理员首次改密前只允许本机。"""
+        """验证用户名密码并签发登录会话，默认引导密码首次改密前只允许本机。"""
         user = service.authenticate(body.username, body.password)
         if user is None:
             raise HTTPException(401, "用户名或密码错误。")
         if body.expected_role is not None and user.role != body.expected_role:
             raise HTTPException(403, "该账号不能登录此入口。")
-        if user.username == "admin" and user.must_change_password and not _direct_local_request(request):
+        if (
+            user.username == "admin"
+            and user.must_change_password
+            and body.password == BOOTSTRAP_ADMIN_PASSWORD
+            and not _direct_local_request(request)
+        ):
             raise HTTPException(403, "请在服务器本机完成首次改密后再从公网登录。")
         token = service.create_session(user.id)
         _set_session_cookie(response, token, _cookie_secure(request, secure_cookies))
