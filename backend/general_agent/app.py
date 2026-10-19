@@ -22,6 +22,7 @@ from starlette.responses import Response
 from general_agent.memory.source_deletion import SourceDeletion
 from general_agent.memory.source_deletion_api import source_deletion_router
 from general_agent.auth.api import COOKIE_NAME, auth_router
+from general_agent.auth.admin_api import admin_router
 from general_agent.auth.dependencies import current_user, require_admin
 from general_agent.auth.service import AuthService, AuthenticatedUser
 from general_agent.attachments.api import attachment_router
@@ -139,6 +140,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
     app.include_router(auth_router(auth, cookie_secure))
+    app.include_router(admin_router(auth, database, attachments, memory))
     app.include_router(attachment_router(attachments))
     app.include_router(source_deletion_router(source_deletion))
     app.include_router(correction_router(MemoryCorrection(memory)))

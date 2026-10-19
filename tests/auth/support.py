@@ -64,6 +64,26 @@ def login_admin_http(client: httpx.Client) -> dict[str, Any]:
     return cast(dict[str, Any], response.json())
 
 
+def login_and_change_password(
+    client: TestClient, username: str, temporary_password: str, new_password: str
+) -> dict[str, Any]:
+    """登录指定账号并在首次登录时完成强制改密。"""
+    response = client.post(
+        "/api/auth/login",
+        json={"username": username, "password": temporary_password},
+    )
+    assert response.status_code == 200, response.text
+    user = cast(dict[str, Any], response.json())
+    if user.get("must_change_password"):
+        changed = client.post(
+            "/api/auth/password",
+            json={"current_password": temporary_password, "new_password": new_password},
+        )
+        assert changed.status_code == 200, changed.text
+        user = cast(dict[str, Any], changed.json())
+    return user
+
+
 @contextmanager
 def authenticated_client(
     database_url: str,
