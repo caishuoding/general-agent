@@ -21,6 +21,8 @@ from starlette.responses import Response
 
 from general_agent.memory.source_deletion import SourceDeletion
 from general_agent.memory.source_deletion_api import source_deletion_router
+from general_agent.auth.api import COOKIE_NAME, auth_router
+from general_agent.auth.service import AuthService, AuthenticatedUser
 from general_agent.attachments.api import attachment_router
 from general_agent.attachments.service import AttachmentService
 from general_agent.infrastructure.operations import OperationContext, OperationService
@@ -95,11 +97,17 @@ class UsageRecord(BaseModel):
     created_at: datetime
 
 
-def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None, mem0_transport: httpx.BaseTransport | None = None) -> FastAPI:
+def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None, mem0_transport: httpx.BaseTransport | None = None, secure_cookies: bool | None = None) -> FastAPI:
     """创建聊天、自动记忆和资料应用，测试可指定隔离数据库、目录及模型 HTTP 替身。"""
     database = Database(database_url or os.environ.get(
         "DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/general_agent"
     ))
+    cookie_secure = (
+        secure_cookies
+        if secure_cookies is not None
+        else os.environ.get("COOKIE_SECURE", "false").lower() == "true"
+    )
+    auth = AuthService(database)
     settings = SettingsStore(data_dir or Path(os.environ.get("APP_DATA_DIR", ".local")))
     configure_agent_logging(settings.directory)
     embedding_settings = EmbeddingSettingsStore(settings.directory)
@@ -129,6 +137,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         conversation_graph.close()
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
+    app.include_router(auth_router(auth, cookie_secure))
     app.include_router(attachment_router(attachments))
     app.include_router(source_deletion_router(source_deletion))
     app.include_router(correction_router(MemoryCorrection(memory)))
@@ -136,6 +145,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     app.include_router(deletion_router(execution.deletion))
     app.state.calls = model
     app.state.operations = operations
+    app.state.auth = auth
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
 
     @app.get("/api/memories")
@@ -153,6 +163,25 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         allowed = {str(request.base_url).rstrip("/"), "http://127.0.0.1:5173", "http://localhost:5173"}
         if origin and origin not in allowed:
             return JSONResponse(status_code=403, content={"detail": "请从本机应用页面访问。"})
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def require_login(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """保护业务接口，并在必须改密时只放行账号与密码相关接口。"""
+        path = request.url.path
+        public = path in {"/api/health", "/api/auth/login"} or not path.startswith("/api/")
+        if public:
+            return await call_next(request)
+        user = auth.user_for_token(request.cookies.get(COOKIE_NAME))
+        if user is None:
+            return JSONResponse(status_code=401, content={"detail": "请先登录。"})
+        request.state.user = user
+        if user.must_change_password and path not in {
+            "/api/auth/me",
+            "/api/auth/logout",
+            "/api/auth/password",
+        }:
+            return JSONResponse(status_code=403, content={"detail": "请先修改密码。"})
         return await call_next(request)
 
     @app.get("/api/health")
