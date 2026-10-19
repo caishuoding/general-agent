@@ -166,10 +166,18 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.middleware("http")
     async def local_origin_only(request: Request, call_next: RequestResponseEndpoint) -> Response:
-        """拒绝其他网站发起的浏览器请求，仅允许本机同源或本机开发界面。"""
+        """拒绝其他网站发起的 API 浏览器请求，仅允许当前站点同源或本机开发界面。"""
         origin = request.headers.get("origin")
-        allowed = {str(request.base_url).rstrip("/"), "http://127.0.0.1:5173", "http://localhost:5173"}
-        if origin and origin not in allowed:
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
+        scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+        allowed = {
+            f"{scheme}://{host}",
+            f"https://{host}",
+            f"http://{host}",
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        }
+        if request.url.path.startswith("/api/") and origin and origin not in allowed:
             return JSONResponse(status_code=403, content={"detail": "请从本机应用页面访问。"})
         return await call_next(request)
 
