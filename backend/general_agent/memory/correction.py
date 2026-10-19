@@ -16,15 +16,19 @@ class MemoryCorrection:
         """复用已验证的 Mem0 适配及调用网关，不创建独立云端客户端。"""
         self.memory, self.database = memory, memory.database
 
-    def get(self, identifier: UUID) -> dict[str, Any]:
+    def get(self, identifier: UUID, account_id: UUID | None = None) -> dict[str, Any]:
         """按更新身份取得可恢复的明确批准内容，找不到时不猜测其他条目。"""
         with self.database.connect() as connection:
-            row=connection.execute('SELECT * FROM memory_updates WHERE id=%s',(identifier,)).fetchone()
+            row=connection.execute(
+                "SELECT u.* FROM memory_updates u JOIN memory_actions a ON a.id=u.action_id "
+                "WHERE u.id=%s AND (%s::uuid IS NULL OR a.user_id=%s)",
+                (identifier, account_id, account_id),
+            ).fetchone()
         if row is None:
             raise LookupError('记忆更正记录不存在。')
         return row
 
-    def apply(self, action_id: UUID, fact: str, expected_version: int, identifier: UUID, operation: OperationContext, source_message_id: UUID | None = None, source_conversation_id: UUID | None = None, cached: dict[str, list[float]] | None = None) -> dict[str, Any]:
+    def apply(self, action_id: UUID, fact: str, expected_version: int, identifier: UUID, operation: OperationContext, source_message_id: UUID | None = None, source_conversation_id: UUID | None = None, cached: dict[str, list[float]] | None = None, account_id: UUID | None = None) -> dict[str, Any]:
         """按版本更新并支持原生已计量向量，空间租约覆盖 SDK 写入及来源核验。"""
         with self.database.connect() as lock:
             lock.autocommit=True
@@ -33,6 +37,13 @@ class MemoryCorrection:
             entry=lock.execute('SELECT * FROM memory_actions WHERE id=%s',(action_id,)).fetchone()
             if entry is None or entry['memory_id'] is None or entry['status'] in ('deleting','deleted'):
                 raise LookupError('正式记忆条目不存在，不能更正。')
+            if account_id is not None and entry.get('user_id') != account_id:
+                raise LookupError('正式记忆条目不存在，不能更正。')
+            account_id = entry.get('user_id')
+            if account_id is None and source_conversation_id is not None:
+                account_id = self.memory.account_id_for_conversation(source_conversation_id)
+            if account_id is None:
+                raise LookupError('记忆条目缺少账号归属。')
             if existing:
                 if existing['action_id']!=action_id or existing['fact']!=fact or existing['target_version']!=expected_version+1:
                     raise ValueError('更正标识与原目标或内容不一致。')
@@ -57,7 +68,7 @@ class MemoryCorrection:
                 lock.execute("UPDATE memory_actions SET status='saving',error='正在同步更正，旧事实已停止召回。' WHERE id=%s AND status NOT IN ('deleting','deleted')",(action_id,))
                 with self.memory.session() as sdk:
                     current=sdk.get(str(entry['memory_id']))
-                    if current is None or current.get('user_id')!=self.memory.user_id:
+                    if current is None or current.get('user_id')!=str(account_id):
                         raise ValueError('原正式记忆不存在或身份不符，未更正。')
                     if current['memory']!=fact or (current.get('metadata') or {}).get('correction_id')!=str(identifier):
                         metadata = {**(current.get('metadata') or {}), 'correction_id': str(identifier)}

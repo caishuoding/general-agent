@@ -1,9 +1,0 @@
-FROM postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 AS build
-RUN apk add --no-cache build-base clang21 llvm21-dev
-ADD --checksum=sha256:cac0b10c360f05b2d521200105ba3697e773d4cd3731f5a915a7e37ebe0bea85 https://codeload.github.com/pgvector/pgvector/tar.gz/refs/tags/v0.8.7 /tmp/pgvector.tar.gz
-RUN mkdir /tmp/pgvector && tar -xzf /tmp/pgvector.tar.gz -C /tmp/pgvector --strip-components=1
-WORKDIR /tmp/pgvector
-RUN make OPTFLAGS="" && make install DESTDIR=/tmp/install
-
-FROM postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
-COPY --from=build /tmp/install/usr/local /usr/local

@@ -5,15 +5,16 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 from general_agent.memory.correction import MemoryCorrection
-from general_agent.memory.tools import MemoryTools, memory_tools
+from general_agent.memory.tools import MemoryTools, agent_tools, memory_tools
 
 
-def test_agent_tools_cannot_bypass_explicit_search_authorization() -> None:
-    """验证模型工具集中不包含联网能力，明确联网统一由对话图的授权节点处理。"""
-    names = {item['function']['name'] for item in memory_tools()}
+def test_agent_tools_register_web_search_as_a_normal_model_tool() -> None:
+    """验证联网搜索与记忆工具注册在同一个模型工具循环中。"""
+    memory_names = {item['function']['name'] for item in memory_tools()}
+    names = {item['function']['name'] for item in agent_tools()}
 
-    assert 'web_search' not in names
-    assert {'add_memory', 'search_chat_history', 'search_memories', 'update_memory', 'delete_memory'} == names
+    assert {'add_memory', 'search_memories', 'update_memory', 'delete_memory'} == memory_names
+    assert names == memory_names | {'search_web'}
 
 
 def test_update_tool_does_not_reparse_user_intent(monkeypatch: Any) -> None:
@@ -43,7 +44,7 @@ def test_update_tool_does_not_reparse_user_intent(monkeypatch: Any) -> None:
     checkpoint.get.return_value = None
     monkeypatch.setattr(MemoryCorrection, 'apply', MagicMock(return_value={'status': 'complete'}))
 
-    result = MemoryTools(memory, MagicMock(), MagicMock()).execute(
+    result = MemoryTools(memory, MagicMock()).execute(
         checkpoint,
         'update_memory',
         {'memory_id': str(action_id), 'version': 1, 'fact': '不喜欢吃黄瓜'},

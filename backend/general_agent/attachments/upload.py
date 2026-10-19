@@ -40,7 +40,7 @@ class FileReceiver:
     def part_begin(self) -> None:
         """开始一个新 part，清空头部而保留全部已创建句柄供异常清理。"""
         if len(self.files) >= MAX_FILES:
-            raise HTTPException(422, '每次上传及每条消息最多五个附件。')
+            raise HTTPException(422, '每次上传最多五个附件。')
         self.headers = {}
         self.field.clear()
         self.value.clear()

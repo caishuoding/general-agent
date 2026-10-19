@@ -4,10 +4,10 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4, uuid5
 
-from general_agent.conversation.history import public_history
-
 import psycopg
 from psycopg.rows import dict_row
+
+from general_agent.auth.passwords import BOOTSTRAP_ADMIN_PASSWORD, hash_password
 
 
 class Database:
@@ -31,34 +31,59 @@ class Database:
                 if exists is None:
                     connection.execute(path.read_text(encoding="utf-8"))
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (path.name,))
+            self.ensure_bootstrap_admin(connection)
 
-    def create_conversation(self, title: str) -> dict[str, Any]:
-        """创建会话并返回其持久化后的标识与时间。"""
+    def ensure_bootstrap_admin(self, connection: psycopg.Connection[dict[str, Any]]) -> None:
+        """幂等预置必须改密的初始管理员，已有账号时保持原密码不变。"""
+        existing = connection.execute(
+            "SELECT id FROM users WHERE username = %s", ("admin",)
+        ).fetchone()
+        if existing is not None:
+            return
+        connection.execute(
+            "INSERT INTO users (id, username, password_hash, role, status, must_change_password) "
+            "VALUES (%s, %s, %s, 'admin', 'active', TRUE)",
+            (uuid4(), "admin", hash_password(BOOTSTRAP_ADMIN_PASSWORD)),
+        )
+
+    def create_conversation(self, title: str, user_id: UUID) -> dict[str, Any]:
+        """为指定账号创建会话并返回其持久化后的标识与时间。"""
         with self.connect() as connection:
             row = connection.execute(
-                "INSERT INTO conversations (id, title) VALUES (%s, %s) RETURNING *",
-                (uuid4(), title),
+                "INSERT INTO conversations (id, title, user_id) VALUES (%s, %s, %s) RETURNING *",
+                (uuid4(), title, user_id),
             ).fetchone()
             assert row is not None
             return row
 
-    def list_conversations(self) -> list[dict[str, Any]]:
-        """按创建时间倒序列出仍有效的个人会话，清理失败来源由独立状态入口恢复。"""
+    def list_conversations(self, user_id: UUID) -> list[dict[str, Any]]:
+        """按创建时间倒序列出指定账号仍有效的会话。"""
         with self.connect() as connection:
-            return connection.execute("SELECT * FROM conversations WHERE NOT deleting ORDER BY created_at DESC, id").fetchall()
+            return connection.execute(
+                "SELECT * FROM conversations WHERE user_id = %s AND NOT deleting "
+                "ORDER BY created_at DESC, id",
+                (user_id,),
+            ).fetchall()
 
-    def get_conversation(self, conversation_id: UUID) -> dict[str, Any] | None:
-        """只读取未删除中的会话及其消息与出处；缺失或已停用时返回空值。"""
+    def get_conversation(self, conversation_id: UUID, user_id: UUID) -> dict[str, Any] | None:
+        """只读取指定账号未删除会话及其消息；其他账号的会话视为不存在。"""
         with self.connect() as connection:
-            row = connection.execute("SELECT * FROM conversations WHERE id = %s AND NOT deleting", (conversation_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM conversations WHERE id = %s AND user_id = %s AND NOT deleting",
+                (conversation_id, user_id),
+            ).fetchone()
             if row is not None:
                 row["messages"] = [self.decorate_message(message) for message in connection.execute("SELECT * FROM messages WHERE conversation_id = %s ORDER BY position", (conversation_id,)).fetchall()]
             return row
 
     def decorate_message(self, row: dict[str, Any]) -> dict[str, Any]:
-        """补齐自动记忆及真实来源状态，历史摘录只从仍有效消息重建。"""
+        """补齐自动记忆、搜索、召回及消息附件展示信息，不返回附件正文。"""
         with self.connect() as connection:
-            row['attachment_ids'] = [item['attachment_id'] for item in connection.execute('SELECT attachment_id FROM message_attachments WHERE message_id=%s ORDER BY attachment_id', (row['id'],)).fetchall()]
+            row['attachments'] = connection.execute(
+                "SELECT id,filename,size,status,error FROM attachments "
+                "WHERE user_message_id=%s ORDER BY created_at,id",
+                (row.get('id'),),
+            ).fetchall() if row['role'] == 'user' else []
         if row['role'] == 'assistant' and row.get('reply_to'):
             with self.connect() as connection:
                 row['memory_action'] = connection.execute('SELECT * FROM memory_actions WHERE id=%s', (uuid5(row['reply_to'],'explicit-memory:0'),)).fetchone()
@@ -75,12 +100,13 @@ class Database:
                 ).fetchone()
             row['search_action'] = connection.execute('SELECT id,query,status,error,revision,sources,purpose,expires_at FROM search_requests WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
             row['memory_recall'] = connection.execute('SELECT status,match_count AS count,detail FROM memory_recalls WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
-        row['history_search'], row['history_sources'] = public_history(self, row.get('operation_id'))
-        if row['history_search'] and row['history_search']['status'] == 'unavailable' and row['status'] != 'complete':
-            row['content'] = row['history_search']['detail']
         return row
 
-    def list_usage(self) -> list[dict[str, Any]]:
-        """返回最近的调用记录，未取得的用量保留为空值。"""
+    def list_usage(self, user_id: UUID) -> list[dict[str, Any]]:
+        """返回指定账号最近的调用记录，未取得的用量保留为空值。"""
         with self.connect() as connection:
-            return connection.execute("SELECT * FROM model_calls WHERE status NOT IN ('reserved','cancelled') ORDER BY created_at DESC, id LIMIT 100").fetchall()
+            return connection.execute(
+                "SELECT * FROM model_calls WHERE user_id = %s "
+                "AND status NOT IN ('reserved','cancelled') ORDER BY created_at DESC, id LIMIT 100",
+                (user_id,),
+            ).fetchall()

@@ -1,2 +1,13 @@
-**
-!Dockerfile.postgres
+.git
+.venv
+.local
+.pytest_cache
+__pycache__
+*.pyc
+frontend/node_modules
+frontend/dist
+test-results
+tests
+docs
+.scratch
+deploy

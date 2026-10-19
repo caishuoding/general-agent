@@ -2,7 +2,6 @@
 
 import json
 import os
-import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,20 +27,25 @@ class ControlledModel(BaseHTTPRequestHandler):
     attempts: dict[str, int] = {}
 
     def do_POST(self) -> None:
-        """返回真实历史/资料标记及分段 SSE，支持全文、历史查询与可控慢速和断流。"""
+        """返回受控资料文字及 SSE，支持可控慢速和断流。"""
         payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
         prompt = payload["messages"][-1]["content"]
-        self.attempts[prompt] = self.attempts.get(prompt, 0) + 1
         document_reply: str | None = None
         for message in payload['messages']:
             content = message.get('content', '')
-            if isinstance(content, str) and content.startswith('{'):
-                data = json.loads(content)
-                if isinstance(data, dict) and ('sources' in data or 'summaries' in data):
-                    keys = list(dict.fromkeys(re.findall(r'\bA\d+\b', content)))
-                    document_reply = '全文资料已整理。' + ''.join(f'[{key}]' for key in keys)
+            if isinstance(content, str) and content.startswith('['):
+                try:
+                    attachments = json.loads(content)
+                except ValueError:
+                    attachments = None
+                if isinstance(attachments, list) and attachments:
+                    document_reply = '\n'.join(str(item.get('content', '')) for item in attachments if isinstance(item, dict))
         if not payload.get("stream"):
-            body = json.dumps({"choices": [{"message": {"content": document_reply or "这是受控模型的测试回答。"}}], "usage": {"prompt_tokens": 12, "completion_tokens": 10, "total_tokens": 22}}).encode()
+            if payload.get("tools") and document_reply is None:
+                content = "普通回答"
+            else:
+                content = document_reply or "这是受控模型的测试回答。"
+            body = json.dumps({"choices": [{"message": {"content": content}}], "usage": {"prompt_tokens": 12, "completion_tokens": 10, "total_tokens": 22}}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -51,21 +55,12 @@ class ControlledModel(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
+        self.attempts[prompt] = self.attempts.get(prompt, 0) + 1
         slow = "分段" in prompt or "停止" in prompt or "断流" in prompt
         first = "第一段" if slow else "这是受控"
         second = "，第二段。" if slow else "模型的测试回答。"
         if document_reply is not None:
             first, second = document_reply, ""
-        for item in payload['messages']:
-            if isinstance(item.get('content'), str) and item['content'].startswith('实际历史聊天结果\n'):
-                historical = json.loads(item['content'].split('\n', 1)[1])[0]
-                first, second = '旧聊天有对应讨论。', f"[{historical['key']}]"
-        for item in ([] if document_reply is not None else payload["messages"]):
-            content = item.get("content", "")
-            if isinstance(content, str) and '"attachment_id"' in content:
-                source = json.loads(content.split('\n', 1)[1])[0]
-                first, second = source['excerpt'], f"[{source['key']}]"
-                break
         self.write_event({"choices": [{"delta": {"content": first}}]})
         sleep(2 if slow else 0.05)
         self.write_event({"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 10, "total_tokens": 22}})

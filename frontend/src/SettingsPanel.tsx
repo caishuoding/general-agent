@@ -1,26 +1,28 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { SearchSettings } from "./SearchSettings";
-import { ModelCapabilities } from "./ModelCapabilities";
+import { EmbeddingSettings } from "./EmbeddingSettings";
 import { api, errorMessage, type Settings, type Usage } from "./api";
 
 type Props = {
   settings: Settings;
-  usage: Usage[];
+  usage?: Usage[];
   onSaved: (value: Settings) => void;
 };
 
 // 管理聊天、独立嵌入与搜索设置以及真实调用用量；保存不代表验证通过。
 export function SettingsPanel({ settings, usage, onSaved }: Props) {
-  const [recentUsage, setRecentUsage] = useState(usage);
+  const [recentUsage, setRecentUsage] = useState(usage ?? []);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
-  // 同步页面首次进入后加载的用量，能力检查也可更新本地列表。
-  useEffect(() => { setRecentUsage(usage); }, [usage]);
+  // 同步页面首次进入后加载的调用用量。
+  useEffect(() => { setRecentUsage(usage ?? []); }, [usage]);
 
   // 搜索连接保存后刷新最近调用记录。
-  async function searchSaved() { setRecentUsage(await api<Usage[]>("/usage")); }
+  async function searchSaved() {
+    if (usage !== undefined) setRecentUsage(await api<Usage[]>("/usage"));
+  }
 
   // 从表单读取连接信息，成功后清空密钥输入并更新公开配置状态。
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -38,7 +40,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
       onSaved(next);
       const keyInput = form.elements.namedItem("api_key") as HTMLInputElement;
       keyInput.value = "";
-      setNotice("配置已保存。修改后的连接请重新检查能力。");
+      setNotice("配置已保存，后续调用会使用新连接。");
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -138,9 +140,9 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
           </div>
         </form>
       </div>
-      <ModelCapabilities settings={settings} onUsageChanged={setRecentUsage} />
+      <EmbeddingSettings settings={settings} />
       <SearchSettings onSaved={searchSaved} />
-      <div className="settings-card usage-card">
+      {usage !== undefined && <div className="settings-card usage-card">
         <div className="card-heading">
           <h3>最近调用</h3>
           <span className="small-label">本应用</span>
@@ -168,7 +170,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
             还没有调用记录，开始一次对话后会显示在这里。
           </div>
         )}
-      </div>
+      </div>}
     </section>
   );
 }

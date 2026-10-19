@@ -5,13 +5,25 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
+from tests.auth.support import admin_client
 
 
 def test_external_website_cannot_write_local_configuration(database_url: str, tmp_path: Path) -> None:
     """其他网站的 Origin 不得修改本机模型配置，同源请求仍可使用。"""
-    with TestClient(create_app(database_url, tmp_path), base_url="http://127.0.0.1:8000") as client:
+    with admin_client(database_url, tmp_path) as client:
         payload = {"base_url": "https://model.example/v1", "model": "chat", "api_key": "test-key"}
         blocked = client.put("/api/settings", json=payload, headers={"Origin": "https://unrelated.example"})
         assert blocked.status_code == 403
         allowed = client.put("/api/settings", json=payload, headers={"Origin": "http://127.0.0.1:8000"})
         assert allowed.status_code == 200
+
+
+def test_https_same_origin_static_request_is_not_blocked(
+    database_url: str, tmp_path: Path
+) -> None:
+    """HTTPS 同源页面加载静态资源时不能被 API 来源校验误拦截。"""
+    with TestClient(
+        create_app(database_url, tmp_path), base_url="https://127.0.0.1:8000"
+    ) as client:
+        response = client.get("/", headers={"Origin": "https://127.0.0.1:8000"})
+        assert response.status_code != 403

@@ -8,6 +8,7 @@ from pathlib import Path
 from time import monotonic, sleep
 
 import httpx
+from tests.auth.support import login_admin_http, switch_to_normal_user
 
 
 def test_killed_parser_reports_failed_after_restart(database_url: str, tmp_path: Path) -> None:
@@ -37,7 +38,9 @@ def test_killed_parser_reports_failed_after_restart(database_url: str, tmp_path:
     try:
         with httpx.Client(base_url=f'http://127.0.0.1:{port}', trust_env=False, timeout=15) as client:
             ready(client)
+            login_admin_http(client)
             client.put('/api/settings', json={'base_url': 'https://unused.example/v1', 'model': 'unused', 'api_key': 'unused'})
+            switch_to_normal_user(client)
             conversation = client.post('/api/conversations', json={}).json()['id']
             response = client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('long.txt', b'a' * 20_000_000)})
             assert response.status_code == 201
@@ -51,9 +54,6 @@ def test_killed_parser_reports_failed_after_restart(database_url: str, tmp_path:
             assert restored['status'] == 'failed'
             assert '重启中断' in restored['error']
             assert len(client.get(f'/api/conversations/{conversation}/attachments/{attachment["id"]}/file').content) == 20_000_000
-            rejected = client.post(f'/api/conversations/{conversation}/runs', json={'content': '请读资料', 'attachment_ids': [attachment['id']]})
-            assert rejected.status_code == 409
-            assert client.get('/api/usage').json() == []
     finally:
         process.terminate()
         process.wait(timeout=5)

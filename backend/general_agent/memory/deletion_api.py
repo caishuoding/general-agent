@@ -2,11 +2,12 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from general_agent.memory.deletion import MemoryDeletion
+from general_agent.auth.dependencies import current_user
 
 
 def deletion_router(deletion: MemoryDeletion) -> APIRouter:
@@ -14,10 +15,10 @@ def deletion_router(deletion: MemoryDeletion) -> APIRouter:
     router = APIRouter()
 
     @router.delete("/api/memories/{action_id}")
-    def delete_memory(action_id: UUID) -> JSONResponse:
+    def delete_memory(action_id: UUID, request: Request) -> JSONResponse:
         """按稳定记忆标识执行删除并返回清理状态。"""
         try:
-            return JSONResponse(jsonable_encoder(deletion.delete(action_id)))
+            return JSONResponse(jsonable_encoder(deletion.delete(action_id, account_id=current_user(request).id)))
         except LookupError as error:
             raise HTTPException(404, str(error)) from None
         except ValueError as error:

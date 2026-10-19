@@ -12,6 +12,7 @@ from time import monotonic, sleep
 
 import httpx
 import pytest
+from tests.auth.support import login_admin_http, switch_to_normal_user
 
 
 @pytest.mark.parametrize("stop_before_kill", [False, True])
@@ -24,15 +25,7 @@ def test_killed_process_recovers_partial_answer_as_failed(database_url: str, tmp
 
         def do_POST(self) -> None:
             """发送部分回答后等待测试清理，模拟尚未完成的真实网络连接。"""
-            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-            if payload.get("tools"):
-                body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "NO_TOOL_ACTION"}}], "usage": {}}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
+            json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
@@ -71,7 +64,9 @@ def test_killed_process_recovers_partial_answer_as_failed(database_url: str, tmp
     try:
         with httpx.Client(base_url=f"http://127.0.0.1:{app_port}", trust_env=False, timeout=2) as client:
             ready(client)
+            login_admin_http(client)
             client.put("/api/settings", json={"base_url": f"http://127.0.0.1:{provider.server_port}/v1", "model": "controlled", "api_key": "test-key"})
+            switch_to_normal_user(client)
             conversation_id = client.post("/api/conversations", json={}).json()["id"]
             client.post(f"/api/conversations/{conversation_id}/runs", json={"content": "hello"})
             deadline = monotonic() + 5

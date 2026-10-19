@@ -1,6 +1,5 @@
 """只把当前用户已明确批准的事实交给 Mem0，并核对部分提交及来源。"""
 
-import os
 from collections.abc import Iterator, Callable
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,8 +21,16 @@ class MemoryService:
         """绑定业务持久化、统一调用网关和附件配置目录。"""
         self.database, self.embedding, self.calls, self.directory = database, embedding, calls, directory
         self.transport = transport
-        # 单机默认使用本地用户；测试通过独立用户标识隔离共享 Mem0 服务中的数据。
-        self.user_id = os.getenv("MEM0_USER_ID", "local-person")
+
+    def account_id_for_conversation(self, conversation_id: UUID) -> UUID:
+        """从会话读取账号归属，作为 Mem0 用户空间和记忆操作的唯一来源。"""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT user_id FROM conversations WHERE id = %s", (conversation_id,)
+            ).fetchone()
+        if row is None or row["user_id"] is None:
+            raise LookupError("会话不存在。")
+        return UUID(str(row["user_id"]))
 
     @contextmanager
     def session(self) -> Iterator[Mem0Client]:
@@ -46,8 +53,13 @@ class MemoryService:
             with self.session() as sdk:
                 for row in actions:
                     if row['status']=='complete' and row['memory_id']:
+                        account_id = row.get("user_id")
+                        if account_id is None and row.get("conversation_id"):
+                            account_id = self.account_id_for_conversation(row["conversation_id"])
+                        if account_id is None:
+                            continue
                         entry=sdk.get(str(row['memory_id']))
-                        if entry and entry.get('user_id')==self.user_id and entry.get('memory')==row['fact']:
+                        if entry and entry.get('user_id')==str(account_id) and entry.get('memory')==row['fact']:
                             valid.add(row['id'])
         return valid
 
@@ -56,10 +68,10 @@ class MemoryService:
         with self.database.connect() as connection:
             return connection.execute('SELECT * FROM memory_actions WHERE id=%s', (uuid5(message_id,'explicit-memory:0'),)).fetchone()
 
-    def list(self) -> list[dict[str, Any]]:
+    def list(self, account_id: UUID) -> list[dict[str, Any]]:
         """展示未删除条目、清理状态及消息和更正来源，正式有效事实再从 SDK 核验。"""
         with self.database.connect() as connection:
-            rows = connection.execute("SELECT a.*, c.title AS conversation_title FROM memory_actions a LEFT JOIN conversations c ON c.id=a.conversation_id WHERE a.status <> 'deleted' ORDER BY a.created_at DESC,a.id").fetchall()
+            rows = connection.execute("SELECT a.*, c.title AS conversation_title FROM memory_actions a LEFT JOIN conversations c ON c.id=a.conversation_id WHERE a.user_id=%s AND a.status <> 'deleted' ORDER BY a.created_at DESC,a.id", (account_id,)).fetchall()
             for row in rows:
                 row["deletion"] = connection.execute('SELECT status,error FROM memory_deletions WHERE action_id=%s',(row['id'],)).fetchone()
                 row["updates"] = connection.execute("SELECT u.*,c.title AS conversation_title FROM memory_updates u LEFT JOIN conversations c ON c.id=u.source_conversation_id WHERE action_id=%s ORDER BY u.created_at,u.id",(row["id"],)).fetchall()
@@ -69,7 +81,7 @@ class MemoryService:
             for row in rows:
                 if row['status'] == 'complete':
                     entry = memory.get(str(row['memory_id']))
-                    if entry is None or entry.get('user_id') != self.user_id:
+                    if entry is None or entry.get('user_id') != str(account_id):
                         row.update(status='failed', error='正式记忆暂时不可读取，请重试核对。')
                     else:
                         row['fact'] = entry['memory']
@@ -92,6 +104,7 @@ class MemoryService:
 
     def save(self, conversation_id: UUID, message_id: UUID, fact: str, operation: OperationContext, reserved: UUID | None = None, action_id: UUID | None = None, validate_source: Callable[[], None] | None = None, cached: dict[str, List[float]] | None = None) -> dict[str, Any]:
         """按稳定身份核对部分提交，可复用原生向量；空间租约至发布结束，删除墓碑优先。"""
+        account_id = self.account_id_for_conversation(conversation_id)
         if validate_source:
             validate_source()
         action_id = action_id or uuid5(message_id, 'explicit-memory:0')
@@ -100,11 +113,13 @@ class MemoryService:
             lock.execute('SELECT pg_advisory_lock(%s)', (action_id.int % (2**63 - 1),))
             with lock.transaction():
                 self.guard_source(lock,conversation_id,message_id,operation)
-                lock.execute("INSERT INTO memory_actions(id,message_id,conversation_id,operation_id,fact,status) VALUES(%s,%s,%s,%s,%s,'pending') ON CONFLICT(id) DO NOTHING", (action_id,message_id,conversation_id,operation.operation_id,fact))
+                lock.execute("INSERT INTO memory_actions(id,message_id,conversation_id,user_id,operation_id,fact,status) VALUES(%s,%s,%s,%s,%s,%s,'pending') ON CONFLICT(id) DO NOTHING", (action_id,message_id,conversation_id,account_id,operation.operation_id,fact))
             existing = lock.execute('SELECT * FROM memory_actions WHERE id=%s',(action_id,)).fetchone()
             assert existing is not None
             if existing['status'] in ('deleting','deleted'):
                 raise ValueError('该长期记忆已删除，旧保存批准已失效。')
+            if existing.get('user_id') not in (None, account_id):
+                raise ValueError('保存动作不属于当前账号。')
             if existing['fact'] != fact:
                 raise ValueError('保存内容与原批准不一致，请重新明确具体事实。')
             if existing['status'] == 'complete':
@@ -112,13 +127,13 @@ class MemoryService:
             lock.execute("UPDATE memory_actions SET status='saving',error=NULL,operation_id=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status NOT IN ('deleting','deleted')", (operation.operation_id,action_id))
             try:
                 with self.session() as memory:
-                    rows = [item for item in memory.get_all(self.user_id) if (item.get('metadata') or {}).get('action_id') == str(action_id)]
+                    rows = [item for item in memory.get_all(str(account_id)) if (item.get('metadata') or {}).get('action_id') == str(action_id)]
                     if len(rows) > 1:
                         raise ValueError('发现重复的正式记忆，需先核对存储，未继续保存。')
                     if rows:
                         memory_id = str(rows[0]['id'])
                     else:
-                        result = memory.add([{'role':'user','content':fact}], user_id=self.user_id, metadata={'action_id': str(action_id), 'source_message_id': str(message_id), 'source_conversation_id': str(conversation_id)}, infer=False)
+                        result = memory.add([{'role':'user','content':fact}], user_id=str(account_id), metadata={'action_id': str(action_id), 'source_message_id': str(message_id), 'source_conversation_id': str(conversation_id)}, infer=False)
                         found = memory._results(result)
                         if not found or not found[0].get('id'):
                             raise ValueError('Mem0 未返回新记忆 ID。')
@@ -143,11 +158,12 @@ class MemoryService:
 
     def register_existing(self, conversation_id: UUID, message_id: UUID, fact: str, memory_id: str, operation: OperationContext, action_id: UUID) -> dict[str, Any]:
         """登记 Mem0 2.x 已写入的 ADD 结果，不重复写向量或历史。"""
+        account_id = self.account_id_for_conversation(conversation_id)
         with self.database.connect() as connection:
             self.guard_source(connection, conversation_id, message_id, operation)
             connection.execute(
-                "INSERT INTO memory_actions(id,message_id,conversation_id,operation_id,memory_id,fact,status) VALUES(%s,%s,%s,%s,%s,%s,'complete') ON CONFLICT(id) DO UPDATE SET memory_id=EXCLUDED.memory_id,fact=EXCLUDED.fact,status='complete',error=NULL,updated_at=CURRENT_TIMESTAMP",
-                (action_id, message_id, conversation_id, operation.operation_id, memory_id, fact),
+                "INSERT INTO memory_actions(id,message_id,conversation_id,user_id,operation_id,memory_id,fact,status) VALUES(%s,%s,%s,%s,%s,%s,%s,'complete') ON CONFLICT(id) DO UPDATE SET memory_id=EXCLUDED.memory_id,fact=EXCLUDED.fact,status='complete',error=NULL,updated_at=CURRENT_TIMESTAMP",
+                (action_id, message_id, conversation_id, account_id, operation.operation_id, memory_id, fact),
             )
             row = connection.execute("SELECT * FROM memory_actions WHERE id=%s", (action_id,)).fetchone()
             assert row is not None
@@ -155,11 +171,12 @@ class MemoryService:
 
     def begin_explicit(self, conversation_id: UUID, message_id: UUID, operation: OperationContext, action_id: UUID) -> dict[str, Any]:
         """在外部推断前登记明确保存动作，使中途停止或进程中断仍能核对真实结果。"""
+        account_id = self.account_id_for_conversation(conversation_id)
         with self.database.connect() as connection:
             self.guard_source(connection, conversation_id, message_id, operation)
             connection.execute(
-                "INSERT INTO memory_actions(id,message_id,conversation_id,operation_id,fact,status) VALUES(%s,%s,%s,%s,'','pending') ON CONFLICT(id) DO NOTHING",
-                (action_id, message_id, conversation_id, operation.operation_id),
+                "INSERT INTO memory_actions(id,message_id,conversation_id,user_id,operation_id,fact,status) VALUES(%s,%s,%s,%s,%s,'','pending') ON CONFLICT(id) DO NOTHING",
+                (action_id, message_id, conversation_id, account_id, operation.operation_id),
             )
             row = connection.execute('SELECT * FROM memory_actions WHERE id=%s', (action_id,)).fetchone()
             assert row is not None
@@ -167,11 +184,12 @@ class MemoryService:
 
     def complete_explicit(self, conversation_id: UUID, message_id: UUID, operation: OperationContext, action_id: UUID, fact: str, memory_id: str) -> dict[str, Any]:
         """核对来源仍有效后完成明确保存动作，迟到的结果不能覆盖已停止或已删除来源。"""
+        account_id = self.account_id_for_conversation(conversation_id)
         with self.database.connect() as connection:
             self.guard_source(connection, conversation_id, message_id, operation)
             changed = connection.execute(
-                "UPDATE memory_actions SET fact=%s,memory_id=%s,status='complete',error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status NOT IN ('deleting','deleted') RETURNING *",
-                (fact, memory_id, action_id),
+                "UPDATE memory_actions SET fact=%s,memory_id=%s,status='complete',error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s AND user_id=%s AND status NOT IN ('deleting','deleted') RETURNING *",
+                (fact, memory_id, action_id, account_id),
             ).fetchone()
             if changed is None:
                 raise ValueError('该长期记忆已删除，迟到的保存未生效。')
@@ -187,11 +205,12 @@ class MemoryService:
 
     def apply_native_update(self, conversation_id: UUID, message_id: UUID, operation: OperationContext, memory_id: str, fact: str, previous_fact: str | None = None) -> dict[str, Any]:
         """把 Mem0 已完成的语义更新同步到业务账本，并清理同一来源的待定明确动作。"""
+        account_id = self.account_id_for_conversation(conversation_id)
         with self.database.connect() as connection:
             self.guard_source(connection, conversation_id, message_id, operation)
             row = connection.execute(
-                "UPDATE memory_actions SET fact=%s,status='complete',version=version+1,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE memory_id=%s AND status='complete' RETURNING *",
-                (fact, memory_id),
+                "UPDATE memory_actions SET fact=%s,status='complete',version=version+1,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE memory_id=%s AND user_id=%s AND status='complete' RETURNING *",
+                (fact, memory_id, account_id),
             ).fetchone()
             if row is None:
                 raise ValueError('Mem0 更新了未登记的记忆，未同步业务账本。')
@@ -202,8 +221,3 @@ class MemoryService:
             )
             connection.execute("DELETE FROM memory_actions WHERE id=%s AND status='pending'", (uuid5(message_id, 'explicit-memory:0'),))
             return row
-
-    def discard_pending_explicit(self, message_id: UUID) -> None:
-        """Mem0 已合并为更新或删除时移除空白的待定动作，避免管理页出现重复条目。"""
-        with self.database.connect() as connection:
-            connection.execute("DELETE FROM memory_actions WHERE id=%s AND status='pending'", (uuid5(message_id, 'explicit-memory:0'),))

@@ -1,21 +1,20 @@
+import { configureChatModel, loginUser } from "./auth";
 import { test, expect } from "@playwright/test";
+
+// 每个用例先通过 API 登录管理员。
+test.beforeEach(async ({ page }) => {
+  await loginUser(page);
+});
 
 const modelUrl = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18081"}/v1`;
 const appUrl = `http://127.0.0.1:${process.env.TEST_APP_PORT || "18080"}`;
 
 // 从浏览器精确核对配置保存提示，并验证发送、刷新持久化和会话切换。
 test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
+  await configureChatModel(page, modelUrl, "controlled-model");
   await page.goto("/");
   await expect(
     page.getByRole("heading", { name: "个人对话空间" }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "设置", exact: true }).click();
-  await page.getByLabel("API 地址", { exact: true }).fill(modelUrl);
-  await page.getByLabel("模型名称", { exact: true }).fill("controlled-model");
-  await page.getByLabel("API 密钥", { exact: true }).fill("browser-test-key");
-  await page.getByRole("button", { name: "保存配置" }).click();
-  await expect(
-    page.getByText("配置已保存。修改后的连接请重新检查能力。", { exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "新建会话" }).click();
   await page
@@ -42,15 +41,9 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
 });
 
 // 真实接口的旧读取响应延迟到发送完成后送达，最新回答仍应保留在页面上。
-test("较慢的会话读取不会覆盖刚收到的回答", async ({ page, request }) => {
-  await request.put("/api/settings", {
-    data: {
-      base_url: modelUrl,
-      model: "controlled-model",
-      api_key: "browser-test-key",
-    },
-  });
-  const created = await request.post("/api/conversations", {
+test("较慢的会话读取不会覆盖刚收到的回答", async ({ page }) => {
+  await configureChatModel(page, modelUrl, "controlled-model");
+  const created = await page.request.post("/api/conversations", {
     data: { title: "延迟读取验收" },
   });
   const conversation = await created.json();

@@ -86,7 +86,7 @@ def _apply_windows_limits() -> object | None:
 
 def main() -> None:
     """限制资源后输出结构化结果；Windows 使用 Job Object 并由父进程补充监控。"""
-    windows_limits = _apply_windows_limits()
+    _apply_windows_limits()
     if sys.platform != 'win32':
         import resource
 

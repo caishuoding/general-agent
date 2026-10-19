@@ -1,5 +1,7 @@
 """将当前用户授权与回答材料分开，供同步和流式入口共用。"""
 
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID
 from typing import Any
@@ -12,13 +14,15 @@ from general_agent.memory.correction import MemoryCorrection
 from general_agent.memory.recall import MemoryRecall
 from general_agent.infrastructure.provider import ModelMessage
 from general_agent.infrastructure.settings import StoredSettings
-from general_agent.conversation.summary import DocumentSummary, SummaryPreparation, summary_mode
 from general_agent.attachments.service import AttachmentContext
-from general_agent.conversation.history import HistoryContext, HistorySearch
 from general_agent.search.service import SearchService
 from general_agent.memory.automatic import AutomaticMemory
-from general_agent.memory.tools import MemoryTools
-from general_agent.prompts import user_response_instruction
+from general_agent.memory.tools import MemoryTools, ToolOutcome
+from general_agent.prompts import (
+    attachment_context_fragment,
+    compose_system_prompt,
+    memory_context_fragment,
+)
 
 
 @dataclass(frozen=True)
@@ -26,26 +30,21 @@ class AnswerPreparation:
     """统一回答材料和本地可复用结果，传输入口只负责发送与持久化各自的答案。"""
     messages: list[ModelMessage]
     material: AttachmentContext
-    history: HistoryContext | None
-    summary: SummaryPreparation | None
     reserved: UUID | None
-    local_answer: str | None
 
 
 class ChatExecution:
-    """共用批准动作和回答准备；传输、线程及答案尝试留给聊天入口。"""
+    """共用工具、来源管理和回答准备；传输、线程及答案尝试留给聊天入口。"""
 
     def __init__(self, calls: CallGateway, memory: MemoryService, search: SearchService) -> None:
         """绑定自动记忆、工具和材料路由，所有聊天入口共用同一执行流程。"""
         self.calls, self.memory = calls, memory
         self.recall = MemoryRecall(memory)
         self.search = search
-        self.history = HistorySearch(memory.database)
         self.correction = MemoryCorrection(memory)
         self.deletion = MemoryDeletion(memory)
-        self.documents = DocumentSummary(memory.database,calls,search.attachments)
         self.automatic = AutomaticMemory(memory)
-        self.memory_tools = MemoryTools(memory, self.automatic, self.history)
+        self.memory_tools = MemoryTools(memory, self.automatic, search)
 
     def embedding_revision(self, content: str) -> str | None:
         """返回当前嵌入配置版本；Agent 每轮都可能选择记忆工具，因此每轮都绑定版本。"""
@@ -76,6 +75,7 @@ class ChatExecution:
     def prepare_response(
         self,
         conversation_id: UUID,
+        account_id: UUID,
         user_id: UUID,
         message_id: UUID,
         settings: StoredSettings,
@@ -83,34 +83,31 @@ class ChatExecution:
         reserved: UUID | None,
         rows: list[dict[str, Any]],
         *,
-        routed_history: HistoryContext | None = None,
-        routed_external: list[ModelMessage] | None = None,
         routed_material: AttachmentContext | None = None,
         routes_prepared: bool = False,
     ) -> AnswerPreparation:
-        """统一历史→联网→附件/记忆/全文优先级，复用检查点和真实首步预留，不执行传输。"""
-        content=str(rows[-1]['content'])
-        history = routed_history if routes_prepared else self.history.prepare(conversation_id,user_id,content,operation)
-        external = routed_external if routes_prepared else (None if history else self.search.prepare(conversation_id,user_id,content,settings,operation))
-        chat_reserved=self.chat_reservation(content,reserved)
-        material=AttachmentContext()
-        summary=None
-        if history is not None:
-            # 历史查询只向模型提供本机检索到的历史消息，不混入附件或长期记忆。
-            memory_material = history.messages
-        elif external is None:
-            if summary_mode(content) is None:
-                material = routed_material if routes_prepared and routed_material is not None else self.search.attachments.prepare(conversation_id,user_id,content,settings=settings)
-            memory_material=self.prepare_answer(user_id,content,operation,reserved)
-            summary=self.documents.prepare(conversation_id,user_id,message_id,content,settings,operation,chat_reserved,memory_material)
-            if summary:
-                material=summary.material
-        else:
-            memory_material=external
-        conversation: list[ModelMessage]=[{'role':'system','content':user_response_instruction()}]
-        conversation.extend({'role':str(row['role']),'content':str(row['content'])} for row in (rows[-1:] if summary or history else rows))
-        local_answer=history.local_answer if history else summary.cached_answer if summary else None
-        return AnswerPreparation(memory_material+material.messages+conversation,material,history,summary,chat_reserved,local_answer)
+        """统一当前会话附件、长期记忆和历史消息，直接发送完整资料。"""
+        content = str(rows[-1]['content'])
+        chat_reserved = self.chat_reservation(content, reserved)
+        material = (
+            routed_material
+            if routes_prepared and routed_material is not None
+            else self.search.attachments.prepare(conversation_id, account_id)
+        )
+        memory_material = self.prepare_answer(user_id, content, operation, reserved)
+        context_fragments = []
+        if memory_material:
+            context_fragments.append(memory_context_fragment())
+        if material.messages:
+            context_fragments.append(attachment_context_fragment())
+        system_prompt: ModelMessage = {
+            'role': 'system',
+            'content': compose_system_prompt(*context_fragments),
+        }
+        data_messages: list[ModelMessage] = [*memory_material, *material.messages]
+        conversation: list[ModelMessage] = [system_prompt, *data_messages]
+        conversation.extend({'role': str(row['role']), 'content': str(row['content'])} for row in rows)
+        return AnswerPreparation(conversation, material, chat_reserved)
 
     def chat_reservation(self, content: str, reserved: UUID | None) -> UUID | None:
         """仅复用尚未启动的聊天预留；保存或召回已经用过的请求不得再次启动。"""
@@ -120,6 +117,55 @@ class ChatExecution:
             row=connection.execute('SELECT unit,status FROM model_calls WHERE id=%s',(reserved,)).fetchone()
         return reserved if row and row['unit']=='chat_tokens' and row['status']=='reserved' else None
 
-    def prepare(self, conversation_id: UUID, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None, settings: StoredSettings | None = None) -> str | None:
-        """每轮都把工具交给模型自主选择；应用不做意图分类，工具未处理时返回空进入普通回答。"""
-        return self.memory_tools.prepare(conversation_id,user_id,content,settings,operation) if settings is not None else None
+    def prepare(
+        self,
+        conversation_id: UUID,
+        account_id: UUID,
+        user_id: UUID,
+        content: str,
+        operation: OperationContext,
+        reserved: UUID | None,
+        settings: StoredSettings | None = None,
+        *,
+        messages: list[ModelMessage],
+        assistant_message_id: UUID,
+        on_content: Callable[[str], None] | None = None,
+        material: AttachmentContext | None = None,
+    ) -> ToolOutcome:
+        """把完整回答上下文交给统一流式工具循环。"""
+        if settings is None:
+            return ToolOutcome(None, False)
+        source_attachment_ids = self.material_attachment_ids(material)
+        return self.memory_tools.prepare(
+            conversation_id,
+            account_id,
+            user_id,
+            content,
+            settings,
+            operation,
+            messages=messages,
+            assistant_message_id=assistant_message_id,
+            on_content=on_content,
+            source_attachment_ids=source_attachment_ids,
+        )
+
+    @staticmethod
+    def material_attachment_ids(material: AttachmentContext | None) -> list[UUID]:
+        """从原始附件 user 数据中提取稳定附件标识，供搜索操作记录关联来源。"""
+        identifiers: list[UUID] = []
+        for message in material.messages if material is not None else []:
+            content = message.get("content")
+            if not isinstance(content, str) or '"attachment_id"' not in content:
+                continue
+            try:
+                rows = json.loads(content)
+            except ValueError:
+                continue
+            if not isinstance(rows, list):
+                continue
+            identifiers.extend(
+                UUID(str(item["attachment_id"]))
+                for item in rows
+                if isinstance(item, dict) and item.get("attachment_id")
+            )
+        return list(dict.fromkeys(identifiers))

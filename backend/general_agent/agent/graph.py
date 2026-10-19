@@ -4,13 +4,16 @@ import json
 import logging
 from collections.abc import Callable
 from typing import Any, Literal, cast
+from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
 
 from general_agent.agent.state import AgentState
 from general_agent.infrastructure.calls import BoundCalls
+from general_agent.infrastructure.provider import ModelFailure, ModelMessage
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.memory.automatic import MemoryCheckpoint
+from general_agent.prompts import tool_result_fragment, tool_turn_fragment
 
 
 ToolExecutor = Callable[[MemoryCheckpoint, str, dict[str, Any], StoredSettings], dict[str, Any]]
@@ -33,18 +36,69 @@ class AgentToolGraph:
         checkpoint: MemoryCheckpoint,
         tools: list[dict[str, Any]],
         execute_tool: ToolExecutor,
+        context_messages: list[dict[str, Any]] | None = None,
+        context_fragments: list[str] | None = None,
+        assistant_message_id: UUID | None = None,
+        on_content: Callable[[str], None] | None = None,
     ) -> AgentState:
-        """按稳定消息身份运行图，返回是否处理请求及最终内部回答。"""
+        """运行统一流式工具循环，边接收文字边输出，工具调用分片累积后执行。"""
 
         def call_model(state: AgentState) -> dict[str, Any]:
-            """调用模型生成下一步工具请求或工具流程的最终回答。"""
+            """组装当前原始消息并调用模型生成工具请求或最终回答。"""
             index = state["round_index"]
             if index >= self.maximum_rounds:
-                raise ValueError("记忆工具达到本次执行上限；已完成的操作保留，请缩小范围后继续。")
+                raise ValueError("工具调用达到本次执行上限；已完成的操作保留，请缩小范围后继续。")
             key = checkpoint.key("tools:round", [settings.revision, index, state["messages"]])
             reply = checkpoint.get(key)
             if reply is None:
-                reply = calls.structured(settings, state["messages"], tools=tools).message
+                fragments = [tool_turn_fragment(), *(context_fragments or [])]
+                if any(message.get("role") == "tool" for message in state["messages"]):
+                    fragments.append(tool_result_fragment())
+                model_messages = [
+                    {"role": "system", "content": "\n\n".join(fragments)},
+                    *state["messages"],
+                ]
+                content: list[str] = []
+                reasoning: list[str] = []
+                partial_calls: dict[int, dict[str, Any]] = {}
+                for chunk in calls.stream(
+                    settings,
+                    cast(list[ModelMessage], model_messages),
+                    assistant_message_id=assistant_message_id,
+                    tools=tools,
+                ):
+                    if chunk.content:
+                        content.append(chunk.content)
+                        if on_content is not None:
+                            on_content(chunk.content)
+                    if chunk.reasoning_content:
+                        reasoning.append(chunk.reasoning_content)
+                    if chunk.tool_call is not None:
+                        current = partial_calls.setdefault(
+                            chunk.tool_call.index,
+                            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                        )
+                        if chunk.tool_call.id:
+                            current["id"] += chunk.tool_call.id
+                        if chunk.tool_call.name:
+                            current["function"]["name"] += chunk.tool_call.name
+                        if chunk.tool_call.arguments:
+                            current["function"]["arguments"] += chunk.tool_call.arguments
+                tool_calls = [partial_calls[item] for item in sorted(partial_calls)]
+                for call in tool_calls:
+                    if not call["id"] or not call["function"]["name"]:
+                        raise ValueError("模型返回了不完整的工具调用。")
+                    if not isinstance(json.loads(call["function"]["arguments"]), dict):
+                        raise ValueError("模型返回了无效的工具参数。")
+                reply = {
+                    "role": "assistant",
+                    "content": "".join(content) or None,
+                    "tool_calls": tool_calls,
+                }
+                if reasoning:
+                    reply["reasoning_content"] = "".join(reasoning)
+                if not content and not tool_calls:
+                    raise ValueError("模型没有返回回答或工具调用。")
                 checkpoint.put(key, reply)
             tool_calls = reply.get("tool_calls") or []
             LOGGER.info("event=tool_model round=%s tools=%s", index, [item.get("function", {}).get("name") for item in tool_calls])
@@ -69,7 +123,7 @@ class AgentToolGraph:
                 if result is None:
                     try:
                         result = execute_tool(checkpoint, function["name"], arguments, settings)
-                    except (ValueError, LookupError) as error:
+                    except (ValueError, LookupError, ModelFailure) as error:
                         # 业务拒绝也作为工具观察返回，让模型有机会修正参数或停止操作。
                         result = {"error": str(error)}
                     checkpoint.put(tool_key, result)
@@ -86,13 +140,12 @@ class AgentToolGraph:
             }
 
         def finish(state: AgentState) -> dict[str, Any]:
-            """提取工具流程最终回答，并区分无需工具与已由 Agent 处理的请求。"""
+            """返回最后一轮流式文本作为回答，并保留是否执行过工具。"""
             reply = state["messages"][-1]
             answer = str(reply.get("content") or "").strip()
-            # 明确哨兵表示需要后续资料节点；其他文本是模型已完成澄清或直接回答。
-            handled = state["used_tools"] or bool(answer and answer != "NO_TOOL_ACTION")
-            LOGGER.info("event=tool_finish handled=%s round=%s", handled, state["round_index"])
-            return {"answer": answer if handled else None, "handled": handled}
+            handled = bool(answer)
+            LOGGER.info("event=tool_finish used_tools=%s round=%s", state["used_tools"], state["round_index"])
+            return {"answer": answer or None, "handled": handled}
 
         builder = StateGraph(AgentState)
         builder.add_node("call_model", call_model)
@@ -107,8 +160,9 @@ class AgentToolGraph:
         builder.add_edge("execute_tools", "call_model")
         builder.add_edge("finish", END)
         graph = builder.compile()
+        raw_messages = [*(context_messages or []), *messages]
         initial: AgentState = {
-            "messages": messages,
+            "messages": raw_messages,
             "tool_calls": [],
             "round_index": 0,
             "used_tools": False,

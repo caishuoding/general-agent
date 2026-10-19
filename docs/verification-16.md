@@ -1,5 +1,7 @@
 # 任务 16：按明确要求检索旧聊天
 
+2026-10-19 更新：用户已明确要求删除本功能，现行实现由[任务 20](../.scratch/general-agent/issues/20-remove-history-search.md)移除；本文保留为当时的验收记录。
+
 独立分支 `codex/ticket-16-history-search`，从集成 `80e222c` 创建并确认祖先。沿已批准的公开应用 HTTP seam 实现；只使用 15433 上随机隔离 PostgreSQL、必要的真实 Mem0 与受控外部 HTTP。未读取主 `.local`、调用真实服务或变更用户数据库/8000 应用。
 
 ## 行为、接口与执行边界

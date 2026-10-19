@@ -2,12 +2,13 @@
 
 from uuid import UUID, uuid5
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from general_agent.memory.correction import MemoryCorrection
+from general_agent.auth.dependencies import current_user
 
 
 class CorrectionInput(BaseModel):
@@ -30,16 +31,17 @@ def correction_router(correction: MemoryCorrection) -> APIRouter:
     router = APIRouter()
     operations = correction.memory.calls.operations
 
-    def perform(action_id: UUID, body: CorrectionInput, operation_id: UUID | None, update_id: UUID | None = None) -> JSONResponse:
+    def perform(action_id: UUID, body: CorrectionInput, operation_id: UUID | None, request: Request, update_id: UUID | None = None) -> JSONResponse:
         """执行带版本和幂等保护的更正操作。"""
+        account_id = current_user(request).id
         scope = [str(action_id), body.fact, body.expected_version, str(update_id) if update_id else None]
         try:
-            with operations.operation("memory_correction", scope, operation_id) as (operation, previous):
+            with operations.operation("memory_correction", scope, operation_id, account_id=account_id) as (operation, previous):
                 if previous and previous["result"] is not None:
                     return JSONResponse(previous["result"], status_code=previous["response_status"])
                 identifier = update_id or uuid5(operation.operation_id, "memory-correction")
                 try:
-                    result = correction.apply(action_id, body.fact, body.expected_version, identifier, operation)
+                    result = correction.apply(action_id, body.fact, body.expected_version, identifier, operation, account_id=account_id)
                 except ValueError as error:
                     failure = {"detail": str(error)}
                     operations.cache_result(operation, failure, 409)
@@ -53,18 +55,18 @@ def correction_router(correction: MemoryCorrection) -> APIRouter:
             raise HTTPException(409, str(error)) from None
 
     @router.put("/api/memories/{action_id}")
-    def edit_memory(action_id: UUID, body: CorrectionInput, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
+    def edit_memory(action_id: UUID, body: CorrectionInput, request: Request, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
         """通过记忆标识提交一次明确更正。"""
-        return perform(action_id, body, operation_id)
+        return perform(action_id, body, operation_id, request)
 
     @router.post("/api/memory-updates/{identifier}/retry")
-    def retry_memory(identifier: UUID, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
+    def retry_memory(identifier: UUID, request: Request, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
         """重试未完成的更正，并复用原目标版本。"""
         try:
-            row = correction.get(identifier)
+            row = correction.get(identifier, current_user(request).id)
             if row["status"] == "deleted":
                 raise HTTPException(409, "该记忆已删除，旧更正批准已失效。")
-            return perform(row["action_id"], CorrectionInput(fact=row["fact"], expected_version=row["target_version"] - 1), operation_id, identifier)
+            return perform(row["action_id"], CorrectionInput(fact=row["fact"], expected_version=row["target_version"] - 1), operation_id, request, identifier)
         except LookupError as error:
             raise HTTPException(404, str(error)) from None
 

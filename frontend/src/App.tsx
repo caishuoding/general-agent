@@ -1,6 +1,5 @@
 import { SourceDeletion, SourceDeletionPending, type DeleteTarget } from './SourceDeletion';
 import { AnswerContent } from "./AnswerContent";
-import { DocumentProgress } from './DocumentProgress';
 import {
   useEffect,
   useRef,
@@ -12,35 +11,30 @@ import {
   type UIEvent,
 } from "react";
 import {
+  AUTH_EXPIRED_EVENT,
   api,
   errorMessage,
+  type AuthUser,
   type Conversation,
   type ConversationDetail,
   type Message,
-  type Settings,
-  type Usage,
+  type MessageAttachment,
 } from "./api";
 import { AttachmentPanel } from "./AttachmentPanel";
-import { SearchCard } from "./SearchCard";
-import { SettingsPanel } from "./SettingsPanel";
+import { LoginScreen, PasswordChangeScreen } from "./AuthScreens";
 
-type Screen = "chat" | "settings";
+type Screen = "chat" | "password";
 
-// 展示会话、资料与来源删除状态，并隔离过期异步响应。
+// 展示会话、消息内附件与来源删除状态，并隔离过期异步响应。
 export function App() {
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(
     null,
   );
-  const [settings, setSettings] = useState<Settings>({
-    base_url: "",
-    model: "",
-    api_key_configured: false,
-  });
-  const [usage, setUsage] = useState<Usage[]>([]);
   const [screen, setScreen] = useState<Screen>("chat");
   const [draft, setDraft] = useState("");
-  const [selectedAttachments, setSelectedAttachments] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -52,7 +46,7 @@ export function App() {
   } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [sourceRevision, setSourceRevision] = useState(0);
-  const [sourceMessage, setSourceMessage] = useState<string | null>(null);
+  const [attachmentReset, setAttachmentReset] = useState(0);
   const activeId = useRef<string | null>(null);
   const selection = useRef(0);
   const bottom = useRef<HTMLDivElement>(null);
@@ -65,11 +59,7 @@ export function App() {
     // 从持久化消息状态确定需要订阅的回答。
     (message) => message.status === "generating",
   );
-  const paused = conversation?.messages.find(
-    // 暂停尝试仍占用执行位置，用户恢复或取消前不能发送新的消息。
-    (message) => message.status === "paused",
-  );
-  const activeRun = generating || paused;
+  const activeRun = generating;
   const generatingId = generating?.id;
   const conversationId = conversation?.id;
 
@@ -107,43 +97,21 @@ export function App() {
     [generatingId, conversationId],
   );
 
-  useEffect(
-    // 来源会话加载后定位原消息，直接滚动并标示该条来源。
-    () => {
-      if (sourceMessage && conversation?.messages.some(
-        // 只定位当前已加载会话确实包含的消息标识。
-        (message) => message.id === sourceMessage,
-      )) document.getElementById(`message-${sourceMessage}`)?.scrollIntoView({ block: "center" });
-    }, [sourceMessage, conversation],
-  );
-
-  // 打开历史来源并重新验证消息存在；后续渲染负责定位原处。
-  function openHistorySource(id: string, messageId: string) {
-    setSourceMessage(messageId);
-    void selectConversation(id, messageId);
-  }
-
-  // 切换时隔离旧响应与附件；来源跳转额外核验原消息，失效则明确提示。
-  async function selectConversation(id: string, expectedMessage?: string) {
+  // 切换时隔离旧响应与附件，避免过期请求覆盖当前会话。
+  async function selectConversation(id: string) {
     const current = ++selection.current;
     activeId.current = id;
     localStorage.setItem("active-conversation", id);
-    followLatest.current = !expectedMessage;
+    followLatest.current = true;
     setShowLatest(false);
-    setSourceMessage(expectedMessage || null);
     setScreen("chat");
     setConversation(null);
     setDraft("");
-    setSelectedAttachments([]);
     setError("");
     try {
       const result = await api<ConversationDetail>(`/conversations/${id}`);
       if (current === selection.current) {
         setConversation(result);
-        if (expectedMessage && !result.messages.some(
-          // 来源消息必须仍在当前会话中，不能把仅存在会话当成有效出处。
-          (message) => message.id === expectedMessage,
-        )) setError("原消息已不可用，无法定位这条历史出处。");
       }
     } catch (failure) {
       if (current === selection.current) setError(errorMessage(failure));
@@ -151,19 +119,62 @@ export function App() {
   }
 
   useEffect(
-    // 首次进入时恢复公开配置、会话列表以及上一次打开的会话。
+    // 首次进入时读取服务端登录会话，未登录时只显示登录页。
+    function restoreSession() {
+      let mounted = true;
+      // 只在组件仍有效时应用会话恢复结果。
+      async function load() {
+        try {
+          const current = await api<AuthUser>("/auth/me");
+          if (!mounted) return;
+          if (current.role === "admin") {
+            window.location.replace("/admin");
+            return;
+          }
+          setUser(current);
+        } catch {
+          if (mounted) setUser(null);
+        } finally {
+          if (mounted) setAuthReady(true);
+        }
+      }
+      void load();
+      // 卸载后丢弃迟到的会话结果。
+      return () => {
+        mounted = false;
+      };
+    },
+    [],
+  );
+
+  useEffect(
+    // 监听会话失效广播，避免会话过期后继续显示聊天界面。
+    function watchSessionExpiry() {
+      // 会话失效时清空账号并回到用户登录页。
+      function handleExpired() {
+        setUser(null);
+        setScreen("chat");
+      }
+      window.addEventListener(AUTH_EXPIRED_EVENT, handleExpired);
+      return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleExpired);
+    },
+    [],
+  );
+
+  useEffect(
+    // 登录后恢复会话列表；普通用户不请求仅管理员可见的配置。
     function loadWorkspace() {
+      if (!authReady || !user || user.must_change_password) {
+        setLoading(false);
+        return;
+      }
       let mounted = true;
       // 只在组件仍有效时应用初始化结果，避免卸载后更新状态。
       async function load() {
         try {
-          const [items, saved] = await Promise.all([
-            api<Conversation[]>("/conversations"),
-            api<Settings>("/settings"),
-          ]);
+          const items = await api<Conversation[]>("/conversations");
           if (!mounted) return;
           setConversations(items);
-          setSettings(saved);
           const remembered = localStorage.getItem("active-conversation");
           // 仅恢复列表中仍然存在的会话。
           const target =
@@ -175,14 +186,15 @@ export function App() {
           if (mounted) setLoading(false);
         }
       }
+      setLoading(true);
       void load();
-      // 卸载时使尚未返回的加载结果失效。
+      // 卸载或切换账号时使尚未返回的加载结果失效。
       return () => {
         mounted = false;
         selection.current += 1;
       };
     },
-    [],
+    [authReady, user?.id, user?.must_change_password, user?.role],
   );
 
   useEffect(
@@ -212,7 +224,6 @@ export function App() {
   async function refreshSources() {
     const id = activeId.current;
     const selected = selection.current;
-    setSelectedAttachments([]);
     const items = await api<Conversation[]>("/conversations");
     setConversations(items);
     setSourceRevision(
@@ -266,15 +277,40 @@ export function App() {
     if (id) void selectConversation(id);
   }
 
-  // 打开设置并取得最新用量；加载失败时保留明确错误。
-  async function openSettings() {
-    setScreen("settings");
-    setError("");
+  // 结束服务端会话并清空前端中的账号相关状态。
+  async function logout() {
     try {
-      setUsage(await api<Usage[]>("/usage"));
-    } catch (failure) {
-      setError(errorMessage(failure));
+      await api("/auth/logout", { method: "POST" });
+    } catch {
+      /* 即使网络失败，也回到未登录界面，由下一次请求确认会话状态。 */
+    } finally {
+      activeId.current = null;
+      selection.current += 1;
+      localStorage.removeItem("active-conversation");
+      setUser(null);
+      setConversations([]);
+      setConversation(null);
+      setScreen("chat");
+      setError("");
+      setDraft("");
     }
+  }
+
+  // 登录成功后保存当前账号并触发工作区加载。
+  function handleAuthenticated(next: AuthUser) {
+    setError("");
+    if (next.role === "admin") {
+      window.location.replace("/admin");
+      return;
+    }
+    setUser(next);
+  }
+
+  // 强制改密成功后更新当前账号状态。
+  function handlePasswordChanged(next: AuthUser) {
+    setError("");
+    setUser(next);
+    setScreen("chat");
   }
 
   // 更新当前输入草稿。
@@ -294,7 +330,7 @@ export function App() {
     }
   }
 
-  // 将附件绑定到本条消息后启动流式生成，失败保留附件选择和未被新输入覆盖的草稿。
+  // 启动流式生成；当前会话附件会自动进入后端上下文，失败时保留草稿。
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
@@ -304,8 +340,7 @@ export function App() {
       activeRun ||
       changingRun ||
       creating ||
-      loading ||
-      !settings.api_key_configured
+      loading
     )
       return;
     let id = activeId.current;
@@ -320,12 +355,15 @@ export function App() {
     try {
       const result = await api<ConversationDetail>(
         `/conversations/${targetId}/runs`,
-        { method: "POST", body: JSON.stringify({ content, attachment_ids: selectedAttachments }) },
+        { method: "POST", body: JSON.stringify({ content }) },
       );
       if (activeId.current === targetId) {
         selection.current += 1;
         setConversation(result);
-        setSelectedAttachments([]);
+        setAttachmentReset(
+          // 发送成功后清空输入区托盘，附件只保留在对应消息中。
+          (value) => value + 1,
+        );
       }
     } catch (failure) {
       if (activeId.current === targetId) {
@@ -395,9 +433,33 @@ export function App() {
     );
   }
 
-  // 仅更新当前会话的确认结果，切换后的旧请求不能覆盖新会话。
-  function applySearchUpdate(detail: ConversationDetail) {
-    if (activeId.current === detail.id) { selection.current += 1; setConversation(detail); }
+  /** 根据附件处理状态返回聊天记录中的简短说明，无输入返回展示文字。 */
+  function attachmentLabel(attachment: MessageAttachment) {
+    if (attachment.status === "ready") return "可用";
+    if (attachment.status === "failed") return "解析失败";
+    if (attachment.status === "deleting") return "已删除";
+    return "处理中";
+  }
+
+  /** 渲染用户消息随附文件的下载入口，保留原始文件名和处理状态。 */
+  function renderMessageAttachments(attachments: MessageAttachment[]) {
+    return (
+      <ul className="message-attachments" aria-label="本条消息附件">
+        {attachments.map((attachment) => (
+          <li key={attachment.id}>
+            <a
+              className={`message-attachment ${attachment.status}`}
+              href={`/api/conversations/${conversation?.id}/attachments/${attachment.id}/file`}
+              download
+              aria-label={`下载附件 ${attachment.filename}`}
+            >
+              <span className="message-attachment-name">{attachment.filename}</span>
+              <small>{attachmentLabel(attachment)}</small>
+            </a>
+          </li>
+        ))}
+      </ul>
+    );
   }
 
   /** 接收持久化消息并返回消息界面；助手显示 Markdown，用户保留原始输入。 */
@@ -406,7 +468,7 @@ export function App() {
       <article
         key={message.id}
         id={`message-${message.id}`}
-        className={`message ${message.role} ${message.status} ${sourceMessage === message.id ? "source-highlight" : ""}`}
+        className={`message ${message.role} ${message.status}`}
       >
         <div className="message-label">
           {message.role === "user" ? "你" : "助手"}
@@ -418,11 +480,11 @@ export function App() {
           </time>
         </div>
         {message.role === "assistant"
-          ? <AnswerContent message={message} conversationId={conversation?.id} onHistorySource={openHistorySource} />
-          : <div className="message-content">{message.content}</div>}
-        {message.document_progress && <DocumentProgress progress={message.document_progress} status={message.status} />}
-        {!!message.attachment_ids?.length && <div className="message-progress">已附 {message.attachment_ids.length} 个会话文件</div>}
-        {message.search_action && conversation && <SearchCard message={message} conversationId={conversation.id} onUpdated={applySearchUpdate} />}
+          ? <AnswerContent message={message} />
+          : <div className="message-content">
+              <span>{message.content}</span>
+              {!!message.attachments.length && renderMessageAttachments(message.attachments)}
+            </div>}
         {message.status === "generating" && <div className="message-progress" role="status">正在生成…</div>}
         {message.status === "failed" && (
           <div className="message-error" role="alert">回答未完成 · {message.error || "可以重试或检查设置。"}</div>
@@ -438,6 +500,36 @@ export function App() {
   }
 
   const currentPending = pending?.id === activeId.current ? pending : null;
+  if (!authReady) {
+    return <div className="auth-loading" role="status">正在检查登录状态…</div>;
+  }
+  if (!user) {
+    return (
+      <LoginScreen
+        onAuthenticated={handleAuthenticated}
+      />
+    );
+  }
+  if (user.must_change_password) {
+    return (
+      <PasswordChangeScreen
+        user={user}
+        onChanged={handlePasswordChanged}
+        onLogout={logout}
+      />
+    );
+  }
+  if (screen === "password") {
+    return (
+      <PasswordChangeScreen
+        user={user}
+        forced={false}
+        onChanged={handlePasswordChanged}
+        onLogout={logout}
+        onCancel={() => setScreen("chat")}
+      />
+    );
+  }
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -467,12 +559,15 @@ export function App() {
           )}
         </nav>
         <div className="sidebar-bottom">
-          <button
-            className={`nav-button ${screen === "settings" ? "selected" : ""}`}
-            onClick={openSettings}
-          >
-            <span aria-hidden="true">⚙</span>设置
-          </button>
+          <div className="user-menu">
+            <span className="user-name">{user.username}</span>
+            <button className="logout-button" onClick={() => setScreen("password")}>
+              修改密码
+            </button>
+            <button className="logout-button" onClick={logout}>
+              退出
+            </button>
+          </div>
           <div className="local-note">
             <span className="status-dot" />
             本机保存 · 云端回答
@@ -484,19 +579,9 @@ export function App() {
           <div>
             <h1>个人对话空间</h1>
             <span className="topbar-divider">/</span>
-            <span className="topbar-subtitle">
-              {screen === "settings"
-                ? "设置"
-                : "日常、灵感与思考"}
-            </span>
+            <span className="topbar-subtitle">日常、灵感与思考</span>
           </div>
-          <button className="model-pill" onClick={openSettings}>
-            <span
-              className={`status-dot ${settings.api_key_configured ? "configured" : ""}`}
-            />
-            {settings.model || "配置模型"}
-            <span aria-hidden="true">⌄</span>
-          </button>
+          <span className="user-pill">{user.username}</span>
         </header>
         {error && (
           <div className="global-error" role="alert">
@@ -506,16 +591,7 @@ export function App() {
         <SourceDeletionPending revision={sourceRevision} onChanged={refreshSources} />
         {deleteTarget && <SourceDeletion key={deleteTarget.path} target={deleteTarget} onClose={closeDeletion} onChanged={refreshSources} />}
         {screen === 'chat' && conversation && <button className="delete-conversation" onClick={deleteConversation}>删除当前会话</button>}
-        {screen === "settings" ? (
-          <div className="page-scroll">
-            <SettingsPanel
-              settings={settings}
-              usage={usage}
-              onSaved={setSettings}
-            />
-          </div>
-        ) : (
-          <div className="chat-layout">
+        <div className="chat-layout">
             <div className="chat-scroll" onScroll={trackReadingPosition}>
               <div className="chat-content">
                 {loading ? (
@@ -534,11 +610,6 @@ export function App() {
                       <br />
                       或把脑海里还没成形的想法说出来。
                     </p>
-                    {!settings.api_key_configured && (
-                      <button className="setup-link" onClick={openSettings}>
-                        先连接你的模型 <span aria-hidden="true">↗</span>
-                      </button>
-                    )}
                     <div className="topic-tags">
                       <span>日常问答</span>
                       <span>写作灵感</span>
@@ -553,7 +624,7 @@ export function App() {
                         <article className="message user">
                           <div className="message-label">你</div>
                           <div className="message-content">
-                            {currentPending.content}
+                            <span>{currentPending.content}</span>
                           </div>
                         </article>
                         <div className="thinking" role="status">
@@ -569,21 +640,17 @@ export function App() {
             </div>
             {showLatest && <button type="button" className="return-to-latest" onClick={returnToLatest}>↓ 回到最新</button>}
             <div className="composer-wrap">
-              <AttachmentPanel revision={sourceRevision} onDelete={deleteAttachment} conversationId={activeId.current} selected={selectedAttachments} onSelect={setSelectedAttachments} disabled={!!pending || !!generating || changingRun || creating || loading} />
               {streamNotice && <p className="stream-notice" role="status">{streamNotice}</p>}
               <form className="composer" ref={composer} onSubmit={send}>
+                <AttachmentPanel revision={sourceRevision} resetToken={attachmentReset} onDelete={deleteAttachment} conversationId={activeId.current} disabled={!!pending || !!generating || changingRun || creating || loading} />
                 <textarea
                   aria-label="消息"
-                  placeholder={
-                    settings.api_key_configured
-                      ? "把你的想法写在这里…"
-                      : "先在设置中连接一个模型，即可开始对话"
-                  }
+                  placeholder="把你的想法写在这里…"
                   value={draft}
                   onChange={editDraft}
                   onKeyDown={composeKey}
                   maxLength={32000}
-                  disabled={!settings.api_key_configured || loading || creating}
+                  disabled={loading || creating}
                   rows={2}
                 />
                 <div className="composer-bottom">
@@ -601,8 +668,7 @@ export function App() {
                       !draft.trim() ||
                       !!pending ||
                       creating ||
-                      loading ||
-                      !settings.api_key_configured
+                      loading
                     }
                   >
                     <span aria-hidden="true">↑</span>
@@ -611,8 +677,7 @@ export function App() {
               </form>
               <p className="composer-note">回答可能有误，请核对重要信息。停止生成不会撤回已经发出的服务请求。</p>
             </div>
-          </div>
-        )}
+        </div>
       </main>
     </div>
   );

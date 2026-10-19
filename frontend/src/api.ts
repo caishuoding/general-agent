@@ -3,23 +3,24 @@ export type Settings = {
   model: string;
   api_key_configured: boolean;
 };
+export type AuthUser = {
+  id: string;
+  username: string;
+  role: "admin" | "user";
+  must_change_password: boolean;
+};
 export type Conversation = { id: string; title: string; created_at: string };
 export type DocumentParseInfo = { format?: string; total_units?: number; readable_units?: number; coverage?: string; missing_units?: string[]; limitations?: string[] };
 export type Attachment = { id: string; filename: string; size: number; status: "processing" | "ready" | "failed" | "deleting"; error: string | null; parse_info?: DocumentParseInfo; image_metadata: { format: string; mime: string; width: number; height: number } | null };
-export type FileCitation = { key: string; attachment_id: string; filename: string; location: string; excerpt: string };
-export type DocumentProcessing = { status: string; mode: string; completed: number; total: number; coverage: string; files: { attachment_id: string; filename: string; chunks: number; missing: string[]; limitations: string[] }[] };
+export type MessageAttachment = Pick<Attachment, "id" | "filename" | "size" | "status" | "error">;
 export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  status: "generating" | "paused" | "complete" | "stopped" | "failed";
+  status: "generating" | "complete" | "stopped" | "failed";
+  attachments: MessageAttachment[];
   search_action: { id: string; query: string; status: string; revision: string; purpose: string; sources: { id: string; label: string }[]; error: string | null } | null;
-  history_search: { status: "complete" | "empty" | "unavailable"; count: number; detail: string } | null;
-  history_sources: { key: string; conversation_id: string; conversation_title: string; message_id: string; role: "user" | "assistant"; created_at: string; excerpt: string }[];
   web_sources: { key: string; title: string; url: string; excerpt: string }[];
-  document_progress?: DocumentProcessing | null;
-  attachment_ids: string[];
-  citations: FileCitation[];
   reply_to: string | null;
   error: string | null;
   created_at: string;
@@ -37,6 +38,9 @@ export type Usage = {
   completion_tokens: number | null;
   created_at: string;
 };
+
+// 会话失效事件名：任意业务请求返回 401 时广播，让页面回到登录状态。
+export const AUTH_EXPIRED_EVENT = "general-agent:auth-expired";
 
 // 访问同源 JSON 或文件上传接口，并为写操作附加稳定操作标识。
 export async function api<T>(
@@ -59,12 +63,17 @@ export async function api<T>(
     // 非 JSON 错误使用通用提示，不把原始服务正文放入页面。
     () => ({ detail: "服务暂时不可用，请稍后重试。" }),
   );
-  if (!response.ok)
+  if (!response.ok) {
+    // 登录接口会正常返回 401 表示密码错误，其余 401 视为会话已失效。
+    if (response.status === 401 && path !== "/auth/login") {
+      window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+    }
     throw new Error(
       typeof body.detail === "string"
         ? body.detail
         : "请求未完成，请检查输入。",
     );
+  }
   return body as T;
 }
 
