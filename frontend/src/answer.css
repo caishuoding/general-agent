@@ -1,5 +1,5 @@
 /* 回答排版独立于设置页，避免全局表格和段落规则影响 Markdown 阅读。 */
-.message.assistant { max-width: 100%; padding: 5px 0 16px; }
+.message.assistant { max-width: 100%; padding: 0 0 2px; }
 .message-content.answer-markdown {
   font-size: 15px;
   line-height: 1.85;
@@ -103,7 +103,7 @@
 .answer-sources .file-citation { background: #f2f4ed; border-left-color: #c4d0bc; }
 .answer-sources summary { cursor: pointer; overflow-wrap: anywhere; }
 .answer-sources .file-citation:focus { outline: 2px solid #9caf90; outline-offset: 3px; }
-.answer-actions { margin-top: 12px; }
+.answer-actions { margin-top: 4px; }
 .copy-action { display: inline-flex; align-items: center; gap: 10px; font-size: 11px; color: #75826c; }
 .copy-action button { padding: 3px 7px; border: 1px solid transparent; border-radius: 5px; font-size: 11px; }
 .copy-action button:hover { background: #e9eee1; border-color: #d8e1cf; }

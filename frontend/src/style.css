@@ -811,7 +811,7 @@ button:hover:not(:disabled) {
   padding-top: 12px;
 }
 .message {
-  margin-bottom: 28px;
+  margin-bottom: 16px;
   max-width: 94%;
 }
 .message-label {
@@ -820,7 +820,7 @@ button:hover:not(:disabled) {
   gap: 12px;
   font-size: 11px;
   color: #687b60;
-  margin-bottom: 9px;
+  margin-bottom: 5px;
 }
 .message-label time {
   font-size: 9px;
@@ -882,8 +882,9 @@ button:hover:not(:disabled) {
   color: #9b443a;
 }
 .message.assistant {
-  padding: 5px 4px 12px;
+  padding: 0 4px 2px;
 }
+.messages > .message:last-child { margin-bottom: 0; }
 .message.failed .message-content {
   color: #86624c;
 }
@@ -1256,6 +1257,7 @@ td {
   .attachment-chip-main { max-width: 100%; }
   .attachment-chip-main > span { min-width: 0; }
   .message.user { max-width: 92%; }
+  .message { margin-bottom: 12px; }
   .message.user .message-content { padding: 10px 14px; }
   .message-attachment { flex-wrap: wrap; }
   .delete-conversation { min-height: 36px; margin: 0 16px; font-size: 12px; }
