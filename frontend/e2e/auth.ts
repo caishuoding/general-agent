@@ -1,4 +1,4 @@
-import type { APIRequestContext, Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
 
 export const TEST_ADMIN_PASSWORD = "browser-admin-password";
 
@@ -25,25 +25,3 @@ export async function loginAdmin(page: Page) {
   }
 }
 
-// 为独立的 APIRequestContext 登录管理员，供只通过 request 准备数据的测试使用。
-export async function loginAdminApi(request: APIRequestContext) {
-  let response = await request.post("/api/auth/login", {
-    data: { username: "admin", password: "123456" },
-  });
-  if (!response.ok()) {
-    response = await request.post("/api/auth/login", {
-      data: { username: "admin", password: TEST_ADMIN_PASSWORD },
-    });
-  }
-  if (!response.ok()) throw new Error("浏览器 API 管理员登录失败");
-  const user = await response.json();
-  if (user.must_change_password) {
-    const changed = await request.post("/api/auth/password", {
-      data: {
-        current_password: "123456",
-        new_password: TEST_ADMIN_PASSWORD,
-      },
-    });
-    if (!changed.ok()) throw new Error("浏览器 API 管理员首次改密失败");
-  }
-}

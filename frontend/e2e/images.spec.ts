@@ -1,9 +1,13 @@
-import "./auth-setup";
+import { loginAdmin } from "./auth";
 import { test, expect } from '@playwright/test';
 
+test.beforeEach(async ({ page }) => {
+  await loginAdmin(page);
+});
+
 // 从真实上传走到视觉回答，检查临时状态、消息归属和会话隔离。
-test('图片上传后按消息展示并保持会话隔离', async ({ page, request }) => {
-  await request.put('/api/settings', { data: { base_url: `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18097'}/v1`, model: 'controlled-image-model', api_key: 'browser-test-key' } });
+test('图片上传后按消息展示并保持会话隔离', async ({ page }) => {
+  await page.request.put('/api/settings', { data: { base_url: `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18097'}/v1`, model: 'controlled-image-model', api_key: 'browser-test-key' } });
   await page.goto('/');
   await page.getByRole('button', { name: '新建会话' }).click();
   const upload = page.getByLabel('上传会话附件');

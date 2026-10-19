@@ -1,6 +1,9 @@
-import "./auth-setup";
-
+import { loginAdmin } from "./auth";
 import { expect, test } from "@playwright/test";
+
+test.beforeEach(async ({ page }) => {
+  await loginAdmin(page);
+});
 
 test("管理员可以在后台创建、停用和重置账号", async ({ page }) => {
   await page.goto("/");

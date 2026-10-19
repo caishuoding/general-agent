@@ -6,7 +6,7 @@
 
 2026-10-17：附件只用于当前会话的问答和资料处理，不再从附件提取长期记忆。聊天记忆仍使用 Mem0 原生自动记忆和对话记忆工具；详见 [ADR 0005](docs/adr/0005-native-automatic-memory.md) 与 [ADR 0006](docs/adr/0006-attachments-do-not-create-memories.md)。
 
-当前已实现本机 Web 对话、模型配置与独立嵌入、会话持久化、流式回答、停止与失败重试、逐次调用用量、通过独立 Mem0 服务自动提取、更新、删除和召回长期记忆，以及会话 TXT / Markdown / PDF / DOCX 全文材料、PNG / JPEG 视觉问答和模型工具联网搜索。任务 16 的历史聊天检索已按任务 20 移除；附件总结、分段检索和文件引用已移除。附件不会生成长期记忆，项目也不维护本地向量索引或索引重建流程。
+当前已实现本机 Web 对话、预创建多账号登录、管理员后台、模型配置与独立嵌入、会话持久化、流式回答、停止与失败重试、逐次调用用量、通过独立 Mem0 服务自动提取、更新、删除和召回长期记忆，以及会话 TXT / Markdown / PDF / DOCX 全文材料、PNG / JPEG 视觉问答和模型工具联网搜索。任务 16 的历史聊天检索已按任务 20 移除；附件总结、分段检索和文件引用已移除。附件不会生成长期记忆，项目也不维护本地向量索引或索引重建流程。
 
 此前任务 01–18 整合版通过 179 项 Python 测试及 23 项浏览器测试，真实服务待验范围、审查修复和数据保留检查见 [整体交付验证](docs/verification-final.md)。
 
@@ -32,11 +32,28 @@ bash scripts/start.sh
 
 按 Ctrl+C 停止应用。停止数据库可执行 `docker compose stop`；再次启动后数据仍保留。数据库默认仅监听 `127.0.0.1:15432`，应用仅监听 `127.0.0.1:8000`。
 
+## 登录与账号
+
+系统不开放注册。首次启动预置管理员 `admin / 123456`，第一次登录会强制设置至少 10 个字符的新密码。管理员可以在左侧“管理员后台”创建普通用户或其他管理员、停用或启用账号、重置临时密码；普通用户只能使用自己的会话、附件、记忆和用量。
+
+管理员可以在后台只读查看所有账号的会话、消息、附件、记忆、搜索记录和调用用量，并下载附件，但不能代替用户发消息、修改记忆或删除内容；查看他人内容会写入审计记录。模型、嵌入和搜索配置仅管理员可修改。
+
+登录会话保存在业务 PostgreSQL，浏览器 Cookie 为 `HttpOnly`、`SameSite=Lax`，有效期 7 天；HTTPS 访问时自动加 `Secure`。退出、改密、重置密码或停用账号会吊销旧会话。本期不提供登录失败次数限制或账号锁定，这是已接受的个人项目风险。
+
+## 公网部署与升级
+
+完整步骤见 [deploy/README.md](deploy/README.md)。简要流程：
+
+- 云服务器使用 `服务器IP.sslip.io` 作为临时主机名，`PUBLIC_HOST` 设置为该主机名，Caddy 自动申请 HTTPS 证书并反向代理到 `127.0.0.1:8000`。
+- 首次启动先不开放 Caddy，通过 SSH 隧道访问 `127.0.0.1:8000`，用 `admin / 123456` 完成改密后再开放公网。
+- 升级旧单用户数据时，先停止应用并运行 `uv run python scripts/auth_upgrade.py`。脚本先生成数据库 CSV 和附件归档备份，备份成功后才清空旧业务数据；现有模型、嵌入和搜索配置保留。
+- 恢复使用 `uv run python scripts/restore_auth_backup.py`，目标数据库必须与备份结构兼容。清空操作不可逆，执行前请核对备份目录中的 `manifest.json`。
+
 ## 数据与配置
 
 | 内容 | 位置 |
 | --- | --- |
-| 会话、消息、调用记录、幂等操作、记忆来源及操作状态、结构版本 | 业务 PostgreSQL 的 `general-agent_postgres_data` 持久化卷 |
+| 账号、登录会话、管理员审计、会话、消息、调用记录、幂等操作、记忆来源及操作状态、结构版本 | 业务 PostgreSQL 的 `general-agent_postgres_data` 持久化卷 |
 | Mem0 记忆正文、向量和内部历史 | 独立 Mem0 PostgreSQL 与 `mem0-history` 卷 |
 | 搜索地址与独立智谱密钥 | `.local/search.json`，或 `APP_DATA_DIR/search.json`，仅当前用户可读写 |
 | 搜索具体查询、来源版本、实际结果和回答引用 | PostgreSQL 的 `search_requests` 与消息记录 |
@@ -45,11 +62,12 @@ bash scripts/start.sh
 | 附件归属、处理状态、文字提取范围与缺口、完整可读文字 | PostgreSQL 同一业务库中的附件表 |
 | 附件原文件 | `.local/attachments/<附件 UUID>`，或 `APP_DATA_DIR/attachments/` |
 | 前端构建 | `frontend/dist/`，可重新生成 |
-| 规格与任务 | `.scratch/general-agent/` |
+| 升级前备份 | 应用数据目录下的 `backups/auth-<时间戳>/` |
+| 规格与任务 | `.scratch/general-agent/`、`.scratch/login/` |
 
 `.local/`、环境文件、依赖和构建产物均已排除 Git。业务后端只通过 `MEM0_API_URL` 调用官方 Mem0 REST API，不导入 Mem0 SDK、不直接访问 Mem0 数据库，也不在业务库复制记忆正文或向量。附件原文件与业务 PostgreSQL 中的派生文本分别保存。密钥仅由后端和一次性配置容器读取，配置接口不回传完整密钥；模型错误正文不会直接展示。
 
-可用环境变量：`DATABASE_URL` 指定业务 PostgreSQL；`MEM0_API_URL` 指定 Mem0 API；`MEM0_API_KEY` 设置可选认证；`MEM0_USER_ID` 指定 Mem0 用户范围（默认 `local-person`）；`APP_DATA_DIR` 指定本机配置目录；`POSTGRES_PORT` 修改业务数据库宿主端口。Compose 内的密码仅用于本机开发实例。
+可用环境变量：`DATABASE_URL` 指定业务 PostgreSQL；`MEM0_API_URL` 指定 Mem0 API；`MEM0_API_KEY` 设置可选认证；`APP_DATA_DIR` 指定本机配置目录；`POSTGRES_PORT` 修改业务数据库宿主端口；`PUBLIC_HOST` 指定公网临时主机名；`COOKIE_SECURE=true` 可强制登录 Cookie 使用 `Secure`（HTTPS 反向代理下会自动启用）。Mem0 使用账号 UUID 作为用户空间，不再使用固定 `MEM0_USER_ID`。
 
 数据库结构在应用启动时按版本迁移，已应用的迁移不会重复执行。应用使用单个后端进程运行；启动时会将上次进程中断的生成记录标为失败并保留已提交的内容与用量，请勿用多个 worker 共用同一业务库。请保留数据库卷；`docker compose down -v` 会删除其数据。
 

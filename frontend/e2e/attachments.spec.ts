@@ -1,9 +1,13 @@
-import "./auth-setup";
+import { loginAdmin } from "./auth";
 import { test, expect } from '@playwright/test';
 
+test.beforeEach(async ({ page }) => {
+  await loginAdmin(page);
+});
+
 // 通过真实上传、刷新、回答和切换验证临时托盘、消息归属与会话隔离。
-test('上传文本只显示本次文件，刷新后按消息展示并继续用于回答', async ({ page, request }) => {
-  await request.put('/api/settings', { data: { base_url: `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18081'}/v1`, model: 'controlled-model', api_key: 'browser-test-key' } });
+test('上传文本只显示本次文件，刷新后按消息展示并继续用于回答', async ({ page }) => {
+  await page.request.put('/api/settings', { data: { base_url: `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18081'}/v1`, model: 'controlled-model', api_key: 'browser-test-key' } });
   await page.goto('/');
   await page.getByRole('button', { name: '新建会话' }).click();
   await expect(page.getByLabel('上传会话附件')).toBeEnabled();

@@ -39,14 +39,20 @@ def auth_router(service: AuthService, secure_cookies: bool) -> APIRouter:
         if user.username == "admin" and user.must_change_password and not _direct_local_request(request):
             raise HTTPException(403, "请在服务器本机完成首次改密后再从公网登录。")
         token = service.create_session(user.id)
-        _set_session_cookie(response, token, secure_cookies)
+        _set_session_cookie(response, token, _cookie_secure(request, secure_cookies))
         return _public_user(user)
 
     @router.post("/logout")
     def logout(request: Request, response: Response) -> dict[str, str]:
         """删除当前服务端会话并清除浏览器 Cookie。"""
         service.logout(request.cookies.get(COOKIE_NAME))
-        response.delete_cookie(COOKIE_NAME, path="/", secure=secure_cookies, httponly=True, samesite="lax")
+        response.delete_cookie(
+            COOKIE_NAME,
+            path="/",
+            secure=_cookie_secure(request, secure_cookies),
+            httponly=True,
+            samesite="lax",
+        )
         return {"status": "ok"}
 
     @router.get("/me")
@@ -63,7 +69,7 @@ def auth_router(service: AuthService, secure_cookies: bool) -> APIRouter:
             token = service.change_password(user, body.current_password, body.new_password)
         except ValueError as error:
             raise HTTPException(422, str(error)) from None
-        _set_session_cookie(response, token, secure_cookies)
+        _set_session_cookie(response, token, _cookie_secure(request, secure_cookies))
         updated = service.user_for_token(token)
         assert updated is not None
         return _public_user(updated)
@@ -103,3 +109,8 @@ def _direct_local_request(request: Request) -> bool:
         return False
     host = request.client.host if request.client else ""
     return host in {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def _cookie_secure(request: Request, configured: bool) -> bool:
+    """HTTPS 或可信反向代理转发时必须使用 Secure，SSH 隧道本机 HTTP 引导除外。"""
+    return configured or request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"

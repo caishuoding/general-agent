@@ -1,5 +1,9 @@
-import "./auth-setup";
+import { loginAdmin } from "./auth";
 import { test, expect } from '@playwright/test';
+
+test.beforeEach(async ({ page }) => {
+  await loginAdmin(page);
+});
 
 // 只延迟后端真实详情GET返回，验证删除后的旧会话刷新不能覆盖已经切换到的另一会话。
 test('删除附件后的迟到详情不会覆盖新选会话', async ({ page }) => {

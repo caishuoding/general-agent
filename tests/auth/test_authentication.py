@@ -6,6 +6,7 @@ from uuid import uuid4
 import psycopg
 from fastapi.testclient import TestClient
 from psycopg.rows import dict_row
+from pytest import MonkeyPatch
 
 from general_agent.app import create_app
 from general_agent.auth.api import COOKIE_NAME
@@ -106,3 +107,39 @@ def test_non_bootstrap_user_can_login_public_and_must_change_password(
         )
         assert changed.status_code == 200
         assert client.get("/api/conversations").status_code == 200
+
+
+def test_https_login_uses_secure_httponly_cookie(database_url: str, tmp_path: Path) -> None:
+    """HTTPS 登录必须返回 HttpOnly、Secure 和 SameSite=Lax Cookie。"""
+    with TestClient(
+        create_app(database_url, tmp_path, secure_cookies=True),
+        base_url="https://127.0.0.1:8000",
+    ) as client:
+        response = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "123456"}
+        )
+        assert response.status_code == 200
+        cookie = response.headers["set-cookie"]
+        assert "HttpOnly" in cookie
+        assert "Secure" in cookie
+        assert "SameSite=lax" in cookie
+
+
+def test_public_host_is_allowed_only_when_configured(
+    database_url: str, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """配置 PUBLIC_HOST 后，反向代理使用的临时主机名才能通过 Host 校验。"""
+    monkeypatch.setenv("PUBLIC_HOST", "203.0.113.5.sslip.io")
+    with TestClient(
+        create_app(database_url, tmp_path),
+        base_url="http://203.0.113.5.sslip.io",
+    ) as client:
+        assert client.get("/api/health").status_code == 200
+
+
+def test_business_api_requires_login(database_url: str, tmp_path: Path) -> None:
+    """未登录时业务接口返回 401，健康检查仍可用于部署探活。"""
+    with TestClient(create_app(database_url, tmp_path), base_url="http://127.0.0.1:8000") as client:
+        assert client.get("/api/health").status_code == 200
+        assert client.get("/api/conversations").status_code == 401
+        assert client.get("/api/settings").status_code == 401

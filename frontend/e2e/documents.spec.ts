@@ -1,9 +1,13 @@
-import "./auth-setup";
+import { loginAdmin } from "./auth";
 import { test, expect } from '@playwright/test';
 
+test.beforeEach(async ({ page }) => {
+  await loginAdmin(page);
+});
+
 // 使用真实混合PDF上传，验证当前上传状态、消息归属和刷新后的全文上下文。
-test('PDF当前上传状态可见，刷新后按消息展示并继续用于回答', async ({ page, request }) => {
-  await request.put('/api/settings', { data: { base_url: `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18081'}/v1`, model: 'controlled', api_key: 'browser-test-key' } });
+test('PDF当前上传状态可见，刷新后按消息展示并继续用于回答', async ({ page }) => {
+  await page.request.put('/api/settings', { data: { base_url: `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18081'}/v1`, model: 'controlled', api_key: 'browser-test-key' } });
   await page.goto('/');
   await page.getByRole('button', { name: '新建会话' }).click();
   await expect(page.getByLabel('上传会话附件')).toBeEnabled();

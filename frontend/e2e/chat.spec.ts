@@ -1,5 +1,9 @@
-import "./auth-setup";
+import { loginAdmin } from "./auth";
 import { test, expect } from "@playwright/test";
+
+test.beforeEach(async ({ page }) => {
+  await loginAdmin(page);
+});
 
 const modelUrl = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18081"}/v1`;
 const appUrl = `http://127.0.0.1:${process.env.TEST_APP_PORT || "18080"}`;
@@ -43,15 +47,15 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
 });
 
 // 真实接口的旧读取响应延迟到发送完成后送达，最新回答仍应保留在页面上。
-test("较慢的会话读取不会覆盖刚收到的回答", async ({ page, request }) => {
-  await request.put("/api/settings", {
+test("较慢的会话读取不会覆盖刚收到的回答", async ({ page }) => {
+  await page.request.put("/api/settings", {
     data: {
       base_url: modelUrl,
       model: "controlled-model",
       api_key: "browser-test-key",
     },
   });
-  const created = await request.post("/api/conversations", {
+  const created = await page.request.post("/api/conversations", {
     data: { title: "延迟读取验收" },
   });
   const conversation = await created.json();

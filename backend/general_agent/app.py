@@ -149,7 +149,11 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     app.state.calls = model
     app.state.operations = operations
     app.state.auth = auth
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
+    trusted_hosts = ["127.0.0.1", "localhost", "[::1]"]
+    public_host = os.environ.get("PUBLIC_HOST", "").strip()
+    if public_host:
+        trusted_hosts.append(public_host)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
 
     @app.get("/api/memories")
     def list_memories(request: Request) -> list[dict[str, Any]]:
