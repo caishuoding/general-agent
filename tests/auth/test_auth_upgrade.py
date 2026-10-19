@@ -32,8 +32,10 @@ def test_upgrade_backs_up_then_clears_legacy_business_data(database_url: str, tm
         apply_migrations_through(connection, "035_attachment_message_history.sql")
         connection.execute("INSERT INTO conversations (id, title) VALUES (gen_random_uuid(), '旧会话')")
 
-    backup = run_auth_upgrade(database_url, tmp_path)
+    cleared: list[bool] = []
+    backup = run_auth_upgrade(database_url, tmp_path, clear_memories=lambda: cleared.append(True))
     assert backup is not None
+    assert cleared == [True]
     assert (backup / "manifest.json").exists()
     assert (backup / "database" / "conversations.csv").exists()
     assert (backup / "attachments.tar.gz").exists()
@@ -65,7 +67,7 @@ def test_backup_failure_does_not_clear_business_data(database_url: str, tmp_path
     blocking_file = tmp_path / "not-a-directory"
     blocking_file.write_text("x", encoding="utf-8")
     with pytest.raises(OSError):
-        run_auth_upgrade(database_url, blocking_file)
+        run_auth_upgrade(database_url, blocking_file, clear_memories=lambda: None)
 
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         assert connection.execute(
@@ -75,3 +77,28 @@ def test_backup_failure_does_not_clear_business_data(database_url: str, tmp_path
             "SELECT version FROM schema_migrations WHERE version = %s", (AUTH_UPGRADE_MARKER,)
         ).fetchone()
         assert marker is None
+
+
+def test_memory_clear_failure_does_not_clear_business_tables(
+    database_url: str, tmp_path: Path
+) -> None:
+    """Mem0 清理失败时升级中止，旧业务表保持原样。"""
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        apply_migrations_through(connection, "035_attachment_message_history.sql")
+        connection.execute("INSERT INTO conversations (id, title) VALUES (gen_random_uuid(), '等待迁移')")
+
+    def fail_memory_clear() -> None:
+        """模拟 Mem0 服务不可用。"""
+        raise RuntimeError("Mem0 unavailable")
+
+    with pytest.raises(RuntimeError):
+        run_auth_upgrade(database_url, tmp_path, clear_memories=fail_memory_clear)
+
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        assert connection.execute(
+            "SELECT count(*) AS count FROM conversations WHERE title = '等待迁移'"
+        ).fetchone() == {"count": 1}
+        assert connection.execute(
+            "SELECT version FROM schema_migrations WHERE version = %s",
+            (AUTH_UPGRADE_MARKER,),
+        ).fetchone() is None

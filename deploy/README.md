@@ -43,7 +43,9 @@
 ```sh
 uv run python scripts/auth_upgrade.py \
   --database-url "$DATABASE_URL" \
-  --data-dir "$APP_DATA_DIR"
+  --data-dir "$APP_DATA_DIR" \
+  --mem0-url "$MEM0_API_URL" \
+  --mem0-user-id "${MEM0_USER_ID:-local-person}"
 ```
 
 脚本会先在应用数据目录的 `backups/auth-<时间戳>/` 生成：
@@ -52,7 +54,7 @@ uv run python scripts/auth_upgrade.py \
 - `attachments.tar.gz`：附件原件归档。
 - `manifest.json`：备份时间和各表行数。
 
-备份成功后才会清空旧业务数据。清空不可逆；请先确认 `manifest.json` 存在。随后启动新应用，数据库迁移会创建账号、会话和审计表，并预置 `admin / 123456`。
+备份成功后才会删除旧 Mem0 记忆、附件文件和业务表；Mem0 删除失败时不会清空业务数据。清空不可逆；请先确认 `manifest.json` 存在。随后启动新应用，数据库迁移会创建账号、会话和审计表，并预置 `admin / 123456`。
 
 恢复时，先准备与备份相同结构的数据库，再执行：
 

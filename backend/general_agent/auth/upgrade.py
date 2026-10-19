@@ -5,7 +5,7 @@ import shutil
 import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import psycopg
 from psycopg import sql
@@ -14,7 +14,11 @@ from psycopg.rows import dict_row
 AUTH_UPGRADE_MARKER = "auth_pre_reset_v1"
 
 
-def run_auth_upgrade(database_url: str, data_dir: Path) -> Path | None:
+def run_auth_upgrade(
+    database_url: str,
+    data_dir: Path,
+    clear_memories: Callable[[], None] | None = None,
+) -> Path | None:
     """备份旧业务数据后清空一次；已执行过或检测到新账号数据时跳过。"""
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         _ensure_schema_migrations(connection)
@@ -26,10 +30,13 @@ def run_auth_upgrade(database_url: str, data_dir: Path) -> Path | None:
         tables = _business_tables(connection)
         backup_directory = _create_backup(connection, data_dir, tables)
         try:
+            if clear_memories is not None:
+                clear_memories()
             _clear_attachment_files(data_dir)
             connection.commit()
             with connection.transaction():
                 _truncate_tables(connection, tables)
+                connection.execute("DROP SCHEMA IF EXISTS langgraph CASCADE")
                 connection.execute(
                     "INSERT INTO schema_migrations (version) VALUES (%s)",
                     (AUTH_UPGRADE_MARKER,),
