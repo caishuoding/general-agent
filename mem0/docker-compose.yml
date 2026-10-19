@@ -43,6 +43,9 @@ services:
 
   mem0-config:
     image: mem0-official-local:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     depends_on:
       mem0:
         condition: service_started
@@ -57,3 +60,6 @@ services:
 volumes:
   mem0-postgres-data:
   mem0-history:
+networks:
+  default:
+    name: general-agent-mem0

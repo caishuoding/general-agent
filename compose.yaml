@@ -15,5 +15,30 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://general_agent:local-development-only@db:5432/general_agent
+      MEM0_API_URL: http://mem0:8000
+      APP_DATA_DIR: /app/.local
+      PUBLIC_HOST: ${PUBLIC_HOST:-101.37.161.159}
+      COOKIE_SECURE: "true"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./.local:/app/.local
+    networks:
+      - default
+      - mem0
 volumes:
   postgres_data:
+networks:
+  mem0:
+    external: true
+    name: general-agent-mem0

@@ -1,40 +1,77 @@
-# 公网部署
+# 云服务器部署（Docker + Nginx）
 
-## 前提
+当前部署目标：
 
-- 云服务器已安装 Docker、uv、Node.js 和 Caddy。
-- 服务器公网 IP 为 `203.0.113.5` 时，临时主机名是 `203.0.113.5.sslip.io`。`sslip.io` 会把该名称解析回服务器 IP，不需要购买域名。
-- 业务 PostgreSQL、Mem0 和应用按项目 README 启动。
+- 公网 IP：`101.37.161.159`
+- 用户端：`https://101.37.161.159/`
+- 管理端：`https://101.37.161.159/admin`
+- Nginx 监听 `443`，反向代理到 Docker 应用的 `127.0.0.1:8000`
+- PostgreSQL、Mem0 和应用都由 Docker 运行
+- 暂时没有域名，因此使用自签名证书；浏览器会提示证书不受信任，需要手动继续访问
 
-## 首次初始化
+## 首次部署
 
-1. 先只启动应用，暂不启动 Caddy。应用配置：
+在服务器上安装 Docker、Docker Compose 和 Nginx：
 
-   ```sh
-   PUBLIC_HOST=203.0.113.5.sslip.io
-   DATABASE_URL=postgresql://general_agent:...@127.0.0.1:15432/general_agent
-   APP_DATA_DIR=/srv/general-agent/data
-   ```
+```sh
+apt-get update -y
+DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 nginx openssl rsync
+```
 
-   不要在 SSH 引导阶段设置 `COOKIE_SECURE=true`；应用会根据 HTTPS 反向代理自动给公网 Cookie 加 `Secure`。
+把项目放到 `/opt/general-agent`，并把 `.local/model.json`、`.local/embedding.json`、`.local/search.json` 放到 `/opt/general-agent/.local/`（权限 600）。这些文件包含服务密钥，不要提交到 Git。
 
-2. 在本地电脑建立 SSH 隧道：
+先启动 Mem0 网络和容器：
 
-   ```sh
-   ssh -L 8000:127.0.0.1:8000 user@203.0.113.5
-   ```
+```sh
+cd /opt/general-agent
+docker compose -f mem0/docker-compose.yml up -d --build
+```
 
-   浏览器打开 `http://127.0.0.1:8000/admin`，使用 `admin / 123456` 登录管理端。首次登录会强制设置新密码；完成后再关闭隧道。
+再启动业务数据库和应用：
 
-3. 启动 Caddy：
+```sh
+docker compose up -d --build
+```
 
-   ```sh
-   PUBLIC_HOST=203.0.113.5.sslip.io caddy run --config deploy/Caddyfile
-   ```
+应用容器只绑定 `127.0.0.1:8000`；PostgreSQL、Mem0 和 Mem0 PostgreSQL 也只绑定本机回环地址。
 
-   用户端打开 `https://203.0.113.5.sslip.io`，管理端打开 `https://203.0.113.5.sslip.io/admin`。Caddy 自动申请和续期证书，并反向代理到 `127.0.0.1:8000`。
+## Nginx 443
 
-4. 防火墙只开放 `80` 和 `443`，不要开放 `8000`、`15432` 或 Mem0 端口。
+生成自签名证书：
+
+```sh
+mkdir -p /etc/nginx/ssl
+openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
+  -keyout /etc/nginx/ssl/general-agent.key \
+  -out /etc/nginx/ssl/general-agent.crt \
+  -subj "/CN=101.37.161.159" \
+  -addext "subjectAltName=IP:101.37.161.159"
+chmod 600 /etc/nginx/ssl/general-agent.key
+```
+
+安装配置并启动 Nginx：
+
+```sh
+cp deploy/nginx-general-agent.conf /etc/nginx/sites-available/general-agent
+ln -sf /etc/nginx/sites-available/general-agent /etc/nginx/sites-enabled/general-agent
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+systemctl enable --now nginx
+systemctl reload nginx
+```
+
+云服务器安全组只需放行 `22`、`80`、`443`，不要放行 `8000`、`15432`、`8888`、`8432`。
+
+## 首次管理员改密
+
+应用在 Docker 内部，管理员的“仅服务器本机”判断需要使用容器内部请求完成。应用启动后执行：
+
+```sh
+cd /opt/general-agent
+docker compose exec -T app python -c "import json,urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/api/auth/login',data=json.dumps({'username':'admin','password':'123456','expected_role':'admin'}).encode(),headers={'Content-Type':'application/json'},method='POST'); r=urllib.request.urlopen(req); cookie=r.headers['Set-Cookie'].split(';')[0]; req2=urllib.request.Request('http://127.0.0.1:8000/api/auth/password',data=json.dumps({'current_password':'123456','new_password':'请替换成你的强密码'}).encode(),headers={'Content-Type':'application/json','Cookie':cookie},method='POST'); print(req2.read().decode())"
+```
+
+执行前把 `请替换成你的强密码` 换成至少 10 个字符的新密码。改密成功后，用 `admin` 和新密码登录 `https://101.37.161.159/admin`，再在管理端创建普通用户。
 
 ## 升级与备份
 
@@ -54,9 +91,9 @@ uv run python scripts/auth_upgrade.py \
 - `attachments.tar.gz`：附件原件归档。
 - `manifest.json`：备份时间和各表行数。
 
-备份成功后才会删除旧 Mem0 记忆、附件文件和业务表；Mem0 删除失败时不会清空业务数据。清空不可逆；请先确认 `manifest.json` 存在。随后启动新应用，数据库迁移会创建账号、会话和审计表，并预置 `admin / 123456`。
+备份成功后才会删除旧 Mem0 记忆、附件文件和业务表；Mem0 删除失败时不会清空业务数据。清空不可逆；请先确认 `manifest.json` 存在。
 
-恢复时，先准备与备份相同结构的数据库，再执行：
+恢复时，先准备与备份结构兼容的数据库，再执行：
 
 ```sh
 uv run python scripts/restore_auth_backup.py \
@@ -65,10 +102,9 @@ uv run python scripts/restore_auth_backup.py \
   --data-dir "$RESTORE_DATA_DIR"
 ```
 
-恢复脚本按 CSV 表头写入同名表和列，并解压附件归档。结构已经变化时，不能直接把旧 CSV 导入新表；应先恢复旧结构或手工转换。
-
 ## 安全说明
 
+- 没有域名时只能使用自签名证书，浏览器显示“不安全”提示；以后有域名后换成 Let's Encrypt 或云厂商证书即可。
 - 初始管理员密码是已知引导凭据，必须在首次登录时修改；改密前应用拒绝公网登录。
-- 本期没有登录失败次数限制或账号锁定。公网暴露后应监控登录日志，必要时在 Caddy 或云防火墙增加限流。
-- `COOKIE_SECURE` 可用于强制 Cookie 安全属性；反向代理提供 `X-Forwarded-Proto: https` 时，应用也会自动启用 `Secure`。
+- 本期没有登录失败次数限制或账号锁定。公网暴露后应监控登录日志，必要时在 Nginx 或云防火墙增加限流。
+- `COOKIE_SECURE=true` 时，登录 Cookie 使用 `Secure`；Nginx 终止 HTTPS 后会把请求转发给应用。

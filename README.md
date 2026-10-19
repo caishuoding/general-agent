@@ -44,8 +44,9 @@ bash scripts/start.sh
 
 完整步骤见 [deploy/README.md](deploy/README.md)。简要流程：
 
-- 云服务器使用 `服务器IP.sslip.io` 作为临时主机名，`PUBLIC_HOST` 设置为该主机名，Caddy 自动申请 HTTPS 证书并反向代理到 `127.0.0.1:8000`。
-- 首次启动先不开放 Caddy，通过 SSH 隧道访问 `127.0.0.1:8000`，用 `admin / 123456` 完成改密后再开放公网。
+- 云服务器使用 Docker 运行应用、PostgreSQL 和 Mem0；Nginx 监听 `443`，使用自签名证书反向代理到 `127.0.0.1:8000`。
+- 当前公网入口为 `https://101.37.161.159/`（用户端）和 `https://101.37.161.159/admin`（管理端）。只有 IP 时浏览器会提示证书不受信任。
+- 首次启动后通过容器内本机请求完成 `admin / 123456` 改密，再开放公网登录。
 - 升级旧单用户数据时，先停止应用并运行 `uv run python scripts/auth_upgrade.py`。脚本先生成数据库 CSV 和附件归档备份，再删除旧 Mem0 记忆、附件文件和业务数据；Mem0 删除失败时不会清空业务表。现有模型、嵌入和搜索配置保留。
 - 恢复使用 `uv run python scripts/restore_auth_backup.py`，目标数据库必须与备份结构兼容。清空操作不可逆，执行前请核对备份目录中的 `manifest.json`。
 
