@@ -211,9 +211,20 @@ Mem0 由 `mem0/` 下的官方源码 Docker 服务运行，业务后端只使用 
 
 查询直接执行，不展示编辑或批准卡片。即使模型生成的查询包含当前会话附件或长期记忆中的个人信息，也不会增加额外确认步骤。搜索结果仍会保存操作记录、实际请求用量和可核验来源；来源删除或操作停止后，迟到的结果不会继续使用。
 
+当前每次回答只允许一个搜索词：相同查询可复用已完成结果，换查询会被拒绝，因此尚不支持一次回答中多关键词连续搜索。返回内容是搜索服务提供的标题、链接和摘要，应用不额外抓取网页全文。
+
 搜索与最终回答分别记录调用。搜索请求成功发出并收到 HTTP 响应后记录一次 credit；连接中断或超时时 credit 可能为空。搜索结束不代表回答也已完成，已发请求在停止后仍可能由服务商计费。
 
-搜索设置不需要新增启动步骤。`pnpm --dir frontend test:search` 默认使用隔离端口 18102 / 18103 / 18104；可用 `TEST_APP_PORT`、`TEST_MODEL_PORT`、`TEST_SEARCH_PORT` 覆盖。搜索结果、失败、停止和来源核验见 [智谱搜索验证](docs/verification-zhipu-search.md)；当前工具化决策见 [ADR 0008](docs/adr/0008-tool-driven-web-search-and-prompt-composition.md)。
+搜索设置不需要新增启动步骤。`pnpm --dir frontend test:search` 默认使用隔离端口 18102 / 18103 / 18104；可用 `TEST_APP_PORT`、`TEST_MODEL_PORT`、`TEST_SEARCH_PORT` 覆盖。供应商协议的历史验证见 [智谱搜索验证](docs/verification-zhipu-search.md)；当前工具化决策见 [ADR 0008](docs/adr/0008-tool-driven-web-search-and-prompt-composition.md)。
+
+
+### DeepSeek 搜索能力与当前接入边界
+
+截至 2026-10-19，DeepSeek 已提供独立的 [Search / Fetch API](https://api-docs.deepseek.com/zh-cn/guides/search/)：`POST /v1/tools/search` 返回结构化搜索结果，`POST /v1/tools/fetch` 返回网页 Markdown，使用 DeepSeek API 密钥鉴权。它们可作为现有搜索工具的后端候选，但项目目前仍调用智谱，并未接入这两个端点。
+
+这与模型服务端内置搜索是两条接入路径。DeepSeek 当前 [Responses 工具兼容性文档](https://api-docs.deepseek.com/zh-cn/guides/responses_api/#tools) 标明：`web_search` 由 `deepseek-v4-pro` 在服务端执行，`deepseek-flash` 下会被忽略。项目目前使用 Chat Completions 和本地函数工具循环，仅把模型名改为 `deepseek-flash` 不会自动获得内置联网。
+
+如果后续改用独立 DeepSeek Search，仍需要由应用执行搜索工具，再把结果交给模型；可替换智谱协议和独立凭据配置。若改用受支持模型的服务端内置搜索，需另外适配 Responses 流式事件、搜索来源和实际用量，再评估移除本地搜索执行层。以上为接入边界说明，本轮未切换供应商，也未做真实 DeepSeek 搜索验收。
 
 
 ## 附件与长期记忆边界
