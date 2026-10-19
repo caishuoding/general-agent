@@ -36,6 +36,8 @@ def test_upgrade_backs_up_then_clears_legacy_business_data(database_url: str, tm
     backup = run_auth_upgrade(database_url, tmp_path, clear_memories=lambda: cleared.append(True))
     assert backup is not None
     assert cleared == [True]
+    manifest_text = (backup / "manifest.json").read_text(encoding="utf-8")
+    assert "password" not in manifest_text.lower()
     assert (backup / "manifest.json").exists()
     assert (backup / "database" / "conversations.csv").exists()
     assert (backup / "attachments.tar.gz").exists()

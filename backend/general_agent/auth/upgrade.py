@@ -93,7 +93,10 @@ def _create_backup(
         database_directory.mkdir(parents=True)
         manifest: dict[str, Any] = {
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "database_url": connection.info.dsn,
+            "database": {
+                "host": connection.info.host,
+                "name": connection.info.dbname,
+            },
             "tables": {},
         }
         for table in tables:
