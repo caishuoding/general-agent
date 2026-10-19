@@ -1,3 +1,4 @@
+import "./auth-setup";
 import { test, expect } from '@playwright/test';
 
 // 通过真实上传、刷新、回答和切换验证临时托盘、消息归属与会话隔离。

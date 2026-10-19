@@ -1,3 +1,4 @@
+import "./auth-setup";
 import { test, expect } from '@playwright/test';
 
 // 使用真实混合PDF上传，验证当前上传状态、消息归属和刷新后的全文上下文。

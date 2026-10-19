@@ -1,3 +1,4 @@
+import "./auth-setup";
 import { test, expect } from '@playwright/test';
 
 // 只延迟后端真实详情GET返回，验证删除后的旧会话刷新不能覆盖已经切换到的另一会话。

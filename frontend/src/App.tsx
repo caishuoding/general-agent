@@ -13,6 +13,7 @@ import {
 import {
   api,
   errorMessage,
+  type AuthUser,
   type Conversation,
   type ConversationDetail,
   type Message,
@@ -21,12 +22,15 @@ import {
   type Usage,
 } from "./api";
 import { AttachmentPanel } from "./AttachmentPanel";
+import { LoginScreen, PasswordChangeScreen } from "./AuthScreens";
 import { SettingsPanel } from "./SettingsPanel";
 
 type Screen = "chat" | "settings";
 
 // 展示会话、消息内附件与来源删除状态，并隔离过期异步响应。
 export function App() {
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(
     null,
@@ -123,15 +127,46 @@ export function App() {
   }
 
   useEffect(
-    // 首次进入时恢复公开配置、会话列表以及上一次打开的会话。
+    // 首次进入时读取服务端登录会话，未登录时只显示登录页。
+    function restoreSession() {
+      let mounted = true;
+      // 只在组件仍有效时应用会话恢复结果。
+      async function load() {
+        try {
+          const current = await api<AuthUser>("/auth/me");
+          if (mounted) setUser(current);
+        } catch {
+          if (mounted) setUser(null);
+        } finally {
+          if (mounted) setAuthReady(true);
+        }
+      }
+      void load();
+      // 卸载后丢弃迟到的会话结果。
+      return () => {
+        mounted = false;
+      };
+    },
+    [],
+  );
+
+  useEffect(
+    // 登录后恢复会话列表；普通用户不请求仅管理员可见的配置。
     function loadWorkspace() {
+      if (!authReady || !user || user.must_change_password) {
+        setLoading(false);
+        return;
+      }
+      const currentUser = user;
       let mounted = true;
       // 只在组件仍有效时应用初始化结果，避免卸载后更新状态。
       async function load() {
         try {
           const [items, saved] = await Promise.all([
             api<Conversation[]>("/conversations"),
-            api<Settings>("/settings"),
+            currentUser.role === "admin"
+              ? api<Settings>("/settings")
+              : Promise.resolve({ base_url: "", model: "", api_key_configured: true }),
           ]);
           if (!mounted) return;
           setConversations(items);
@@ -147,14 +182,15 @@ export function App() {
           if (mounted) setLoading(false);
         }
       }
+      setLoading(true);
       void load();
-      // 卸载时使尚未返回的加载结果失效。
+      // 卸载或切换账号时使尚未返回的加载结果失效。
       return () => {
         mounted = false;
         selection.current += 1;
       };
     },
-    [],
+    [authReady, user?.id, user?.must_change_password, user?.role],
   );
 
   useEffect(
@@ -248,6 +284,27 @@ export function App() {
     }
   }
 
+  // 结束服务端会话并清空前端中的账号相关状态。
+  async function logout() {
+    try {
+      await api("/auth/logout", { method: "POST" });
+    } catch {
+      /* 即使网络失败，也回到未登录界面，由下一次请求确认会话状态。 */
+    } finally {
+      activeId.current = null;
+      selection.current += 1;
+      localStorage.removeItem("active-conversation");
+      setUser(null);
+      setConversations([]);
+      setConversation(null);
+      setSettings({ base_url: "", model: "", api_key_configured: false });
+      setUsage([]);
+      setScreen("chat");
+      setError("");
+      setDraft("");
+    }
+  }
+
   // 更新当前输入草稿。
   function editDraft(event: ChangeEvent<HTMLTextAreaElement>) {
     setDraft(event.target.value);
@@ -275,8 +332,7 @@ export function App() {
       activeRun ||
       changingRun ||
       creating ||
-      loading ||
-      !settings.api_key_configured
+      loading
     )
       return;
     let id = activeId.current;
@@ -436,6 +492,31 @@ export function App() {
   }
 
   const currentPending = pending?.id === activeId.current ? pending : null;
+  if (!authReady) {
+    return <div className="auth-loading" role="status">正在检查登录状态…</div>;
+  }
+  if (!user) {
+    return (
+      <LoginScreen
+        onAuthenticated={(next) => {
+          setError("");
+          setUser(next);
+        }}
+      />
+    );
+  }
+  if (user.must_change_password) {
+    return (
+      <PasswordChangeScreen
+        user={user}
+        onChanged={(next) => {
+          setError("");
+          setUser(next);
+        }}
+        onLogout={() => void logout()}
+      />
+    );
+  }
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -465,12 +546,20 @@ export function App() {
           )}
         </nav>
         <div className="sidebar-bottom">
-          <button
-            className={`nav-button ${screen === "settings" ? "selected" : ""}`}
-            onClick={openSettings}
-          >
-            <span aria-hidden="true">⚙</span>设置
-          </button>
+          {user.role === "admin" && (
+            <button
+              className={`nav-button ${screen === "settings" ? "selected" : ""}`}
+              onClick={openSettings}
+            >
+              <span aria-hidden="true">⚙</span>设置
+            </button>
+          )}
+          <div className="user-menu">
+            <span className="user-name">{user.username}</span>
+            <button className="logout-button" onClick={() => void logout()}>
+              退出
+            </button>
+          </div>
           <div className="local-note">
             <span className="status-dot" />
             本机保存 · 云端回答
@@ -488,13 +577,17 @@ export function App() {
                 : "日常、灵感与思考"}
             </span>
           </div>
-          <button className="model-pill" onClick={openSettings}>
-            <span
-              className={`status-dot ${settings.api_key_configured ? "configured" : ""}`}
-            />
-            {settings.model || "配置模型"}
-            <span aria-hidden="true">⌄</span>
-          </button>
+          {user.role === "admin" ? (
+            <button className="model-pill" onClick={openSettings}>
+              <span
+                className={`status-dot ${settings.api_key_configured ? "configured" : ""}`}
+              />
+              {settings.model || "配置模型"}
+              <span aria-hidden="true">⌄</span>
+            </button>
+          ) : (
+            <span className="user-pill">{user.username}</span>
+          )}
         </header>
         {error && (
           <div className="global-error" role="alert">

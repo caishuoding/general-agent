@@ -1,3 +1,4 @@
+import "./auth-setup";
 import { test, expect } from "@playwright/test";
 
 const modelUrl = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18081"}/v1`;

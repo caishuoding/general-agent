@@ -1,3 +1,4 @@
+import "./auth-setup";
 import { test, expect } from '@playwright/test';
 
 // 从真实上传走到视觉回答，检查临时状态、消息归属和会话隔离。

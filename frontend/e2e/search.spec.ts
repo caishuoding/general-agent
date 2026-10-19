@@ -1,3 +1,4 @@
+import "./auth-setup";
 import { test, expect } from '@playwright/test';
 
 // 验证模型自主联网直接执行，并展示真实网页来源。

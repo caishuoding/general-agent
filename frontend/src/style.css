@@ -72,6 +72,138 @@ button:hover:not(:disabled) {
   height: 100dvh;
   min-height: 500px;
 }
+
+.auth-loading {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  color: #718773;
+}
+
+.auth-shell {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at 15% 10%, #e6eee1 0, transparent 34%),
+    linear-gradient(140deg, #fbfaf7 0%, #f3f2eb 100%);
+}
+
+.auth-card {
+  width: min(100%, 420px);
+  padding: 40px;
+  border: 1px solid #e2e2d8;
+  border-radius: 24px;
+  background: rgba(255, 255, 252, 0.94);
+  box-shadow: 0 24px 70px rgba(48, 56, 49, 0.09);
+}
+
+.auth-brand {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 24px;
+  place-items: center;
+  border-radius: 14px;
+  background: #303831;
+  color: #f7f5ee;
+  font-size: 22px;
+}
+
+.auth-kicker {
+  color: #718773;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.auth-card h1 {
+  margin-top: 6px;
+  font-size: 30px;
+  letter-spacing: -0.03em;
+}
+
+.auth-description {
+  margin-top: 10px;
+  color: #737b73;
+}
+
+.auth-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 28px;
+}
+
+.auth-field {
+  display: grid;
+  gap: 6px;
+  color: #5e685f;
+  font-size: 13px;
+}
+
+.auth-field input {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid #d9ddd5;
+  border-radius: 12px;
+  background: #fbfbf8;
+}
+
+.auth-submit {
+  margin-top: 4px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: #303831;
+  color: #fbfaf7;
+  font-weight: 600;
+}
+
+.auth-link {
+  justify-self: center;
+  color: #718773;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.auth-error {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fbebe8;
+  color: #9a4035;
+  font-size: 13px;
+}
+
+.user-menu {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.user-name {
+  overflow: hidden;
+  color: #5e685f;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.logout-button {
+  color: #8b5b50;
+  font-size: 12px;
+}
+
+.user-pill {
+  padding: 7px 12px;
+  border: 1px solid #e0e2da;
+  border-radius: 999px;
+  color: #5e685f;
+  font-size: 12px;
+}
 .sidebar {
   width: 250px;
   flex-shrink: 0;

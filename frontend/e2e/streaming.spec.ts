@@ -1,3 +1,4 @@
+import "./auth-setup";
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
 
 // 通过真实应用接口配置受控模型，并用页面发送当前测试消息。
