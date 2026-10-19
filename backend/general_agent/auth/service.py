@@ -178,9 +178,9 @@ class AuthService:
             )
             if removes_admin:
                 active_admins = connection.execute(
-                    "SELECT count(*) AS count FROM users WHERE role='admin' AND status='active'"
-                ).fetchone()
-                if active_admins is not None and int(active_admins["count"]) <= 1:
+                    "SELECT id FROM users WHERE role='admin' AND status='active' FOR UPDATE"
+                ).fetchall()
+                if len(active_admins) <= 1:
                     raise ValueError("不能停用或降级最后一个有效管理员。")
             row = connection.execute(
                 "UPDATE users SET status=COALESCE(%s,status), role=COALESCE(%s,role), "

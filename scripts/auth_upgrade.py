@@ -41,10 +41,14 @@ def parse_args() -> argparse.Namespace:
 def clear_old_memories(url: str, user_id: str) -> None:
     """删除旧单用户空间中的全部 Mem0 记忆，失败时阻止清空业务数据。"""
     with Mem0Client(base_url=url) as client:
-        for entry in client.get_all(user_id):
-            memory_id = entry.get("id")
-            if memory_id:
-                client.delete(str(memory_id))
+        while True:
+            entries = client.get_all(user_id)
+            if not entries:
+                return
+            for entry in entries:
+                memory_id = entry.get("id")
+                if memory_id:
+                    client.delete(str(memory_id))
 
 
 def main() -> None:
