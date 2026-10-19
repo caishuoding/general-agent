@@ -42,4 +42,5 @@ test("新账号首次登录显示强制改密页", async ({ page }) => {
   await page.getByRole("button", { name: "保存新密码" }).click();
   await expect(page.getByRole("heading", { name: "个人对话空间" })).toBeVisible();
   await expect(page.getByRole("button", { name: "设置", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "管理员后台", exact: true })).toHaveCount(0);
 });

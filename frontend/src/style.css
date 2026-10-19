@@ -204,6 +204,204 @@ button:hover:not(:disabled) {
   color: #5e685f;
   font-size: 12px;
 }
+
+.admin-page {
+  display: grid;
+  gap: 18px;
+  align-content: start;
+  padding: 28px 40px 60px;
+}
+
+.admin-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.admin-header h2 {
+  font-size: 24px;
+  letter-spacing: -0.02em;
+}
+
+.section-eyebrow {
+  color: #718773;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.readonly-badge {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #eef2e9;
+  color: #5d705f;
+  font-size: 12px;
+}
+
+.admin-card {
+  padding: 20px;
+  border: 1px solid #e4e4db;
+  border-radius: 16px;
+  background: #fffefa;
+}
+
+.admin-card h3 {
+  margin-bottom: 14px;
+  font-size: 16px;
+}
+
+.admin-card h4 {
+  margin: 0 0 10px;
+  color: #5e685f;
+  font-size: 13px;
+}
+
+.admin-create-form {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 0.8fr auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.admin-create-form label {
+  display: grid;
+  gap: 5px;
+  color: #737b73;
+  font-size: 12px;
+}
+
+.admin-create-form input,
+.admin-create-form select {
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid #dfe1d9;
+  border-radius: 9px;
+  background: #fbfbf8;
+}
+
+.admin-primary {
+  padding: 9px 14px;
+  border-radius: 9px;
+  background: #303831;
+  color: #fbfaf7;
+  white-space: nowrap;
+}
+
+.admin-user-list {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-user {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid #ecece4;
+  border-radius: 11px;
+}
+
+.admin-user.selected {
+  border-color: #aebfa9;
+  background: #f7faf3;
+}
+
+.admin-user > div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-user small,
+.admin-row small {
+  color: #8a928a;
+  font-size: 11px;
+}
+
+.account-state {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.account-state.active {
+  background: #e8f2e4;
+  color: #4d6b4f;
+}
+
+.account-state.disabled {
+  background: #f3e9e6;
+  color: #8a5a50;
+}
+
+.admin-user-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-user-actions button {
+  padding: 5px 9px;
+  border: 1px solid #e0e2da;
+  border-radius: 8px;
+  color: #5e685f;
+  font-size: 12px;
+}
+
+.admin-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.admin-conversation {
+  display: block;
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: #f6f6f0;
+  text-align: left;
+}
+
+.admin-row {
+  display: grid;
+  gap: 2px;
+  padding: 7px 0;
+  border-bottom: 1px solid #f0f0e8;
+  font-size: 12px;
+}
+
+.admin-empty {
+  color: #9aa19a;
+  font-size: 12px;
+}
+
+.admin-conversation-detail {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #ecece4;
+}
+
+.admin-message {
+  max-width: 760px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f7f7f1;
+}
+
+.admin-message.user {
+  margin-left: auto;
+  background: #eef3e9;
+}
+
+.admin-message p {
+  white-space: pre-wrap;
+}
 .sidebar {
   width: 250px;
   flex-shrink: 0;

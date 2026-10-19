@@ -22,10 +22,11 @@ import {
   type Usage,
 } from "./api";
 import { AttachmentPanel } from "./AttachmentPanel";
+import { AdminPanel } from "./AdminPanel";
 import { LoginScreen, PasswordChangeScreen } from "./AuthScreens";
 import { SettingsPanel } from "./SettingsPanel";
 
-type Screen = "chat" | "settings";
+type Screen = "chat" | "settings" | "admin";
 
 // 展示会话、消息内附件与来源删除状态，并隔离过期异步响应。
 export function App() {
@@ -547,12 +548,22 @@ export function App() {
         </nav>
         <div className="sidebar-bottom">
           {user.role === "admin" && (
-            <button
-              className={`nav-button ${screen === "settings" ? "selected" : ""}`}
-              onClick={openSettings}
-            >
-              <span aria-hidden="true">⚙</span>设置
-            </button>
+            <>
+              <button
+                className={`nav-button ${screen === "admin" ? "selected" : ""}`}
+                aria-label="管理员后台"
+                onClick={() => setScreen("admin")}
+              >
+                <span aria-hidden="true">▦</span>管理员后台
+              </button>
+              <button
+                className={`nav-button ${screen === "settings" ? "selected" : ""}`}
+                aria-label="设置"
+                onClick={openSettings}
+              >
+                <span aria-hidden="true">⚙</span>设置
+              </button>
+            </>
           )}
           <div className="user-menu">
             <span className="user-name">{user.username}</span>
@@ -574,7 +585,9 @@ export function App() {
             <span className="topbar-subtitle">
               {screen === "settings"
                 ? "设置"
-                : "日常、灵感与思考"}
+                : screen === "admin"
+                  ? "管理员后台"
+                  : "日常、灵感与思考"}
             </span>
           </div>
           {user.role === "admin" ? (
@@ -605,6 +618,8 @@ export function App() {
               onSaved={setSettings}
             />
           </div>
+        ) : screen === "admin" ? (
+          <AdminPanel />
         ) : (
           <div className="chat-layout">
             <div className="chat-scroll" onScroll={trackReadingPosition}>
