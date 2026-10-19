@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi.testclient import TestClient
@@ -11,6 +11,7 @@ from general_agent.app import create_app
 from general_agent.infrastructure.calls import CallGateway
 from general_agent.infrastructure.operations import OperationService
 from general_agent.infrastructure.settings import StoredEmbeddingSettings
+from tests.auth.support import login_admin
 
 
 def test_explicit_thread_context_records_each_cloud_call_and_honours_cancellation(database_url: str, tmp_path: Path) -> None:
@@ -24,11 +25,13 @@ def test_explicit_thread_context_records_each_cloud_call_and_honours_cancellatio
 
     app = create_app(database_url, tmp_path, httpx.MockTransport(provider))
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        login_admin(client)
+        account_id = UUID(client.get("/api/auth/me").json()["id"])
         operations: OperationService = app.state.operations
         gateway: CallGateway = app.state.calls
         saved = StoredEmbeddingSettings(base_url="https://vectors.test/v1", model="embed", api_key="test", dimensions=2)
         operation_id = uuid4()
-        with operations.operation("memory_save", "source-identity", operation_id) as (context, _), ThreadPoolExecutor(max_workers=1) as executor:
+        with operations.operation("memory_save", "source-identity", operation_id, account_id=account_id) as (context, _), ThreadPoolExecutor(max_workers=1) as executor:
             bound = gateway.bind(context)
             result = executor.submit(bound.embed, saved, ["已确认事实"]).result()
             assert result.dimensions == 2

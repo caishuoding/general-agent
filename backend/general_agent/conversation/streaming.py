@@ -40,11 +40,11 @@ class StreamingChat:
             connection.execute("UPDATE memory_actions SET status='failed',error='应用重启中断了记忆同步，请重试核对已有写入。' WHERE status='saving'")
             connection.execute("UPDATE memory_native_runs SET status='failed',detail='应用重启中断了自动记忆，可重试原来源；已完成步骤会先核对。' WHERE status='pending' AND operation_id IN (SELECT id FROM cloud_operations WHERE cancelled)")
 
-    def start(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext) -> UUID:
+    def start(self, conversation_id: UUID, account_id: UUID, content: str, settings: StoredSettings, operation: OperationContext) -> UUID:
         """仅在有效会话登记消息并标记附件展示位置，随后执行完整附件回答。"""
         message_id = uuid4()
         with self.database.connect() as connection:
-            found = connection.execute("SELECT id FROM conversations WHERE id = %s AND NOT deleting FOR NO KEY UPDATE", (conversation_id,)).fetchone()
+            found = connection.execute("SELECT id FROM conversations WHERE id = %s AND user_id = %s AND NOT deleting FOR NO KEY UPDATE", (conversation_id, account_id)).fetchone()
             if found is None:
                 raise LookupError("会话不存在。")
             if connection.execute("SELECT id FROM messages WHERE conversation_id = %s AND status='generating'", (conversation_id,)).fetchone():
@@ -56,18 +56,18 @@ class StreamingChat:
             connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to, operation_id, model_revision, embedding_revision) VALUES (%s, %s, 'assistant', '', 'generating', %s, %s, %s, %s)", (message_id, conversation_id, user_id, operation.operation_id, settings.revision,self.execution.embedding_revision(content)))
             connection.execute("UPDATE conversations SET title = %s WHERE id = %s AND title = '新会话'", (content[:40], conversation_id))
             connection.execute("UPDATE model_calls SET assistant_message_id=%s WHERE id=%s", (message_id, call_id))
-        thread = Thread(target=self.execute, args=(conversation_id, message_id, user_id, settings, operation, call_id), daemon=True)
+        thread = Thread(target=self.execute, args=(conversation_id, account_id, message_id, user_id, settings, operation, call_id), daemon=True)
         with self.lock:
             self.threads = {item for item in self.threads if item.is_alive()}
             self.threads.add(thread)
             thread.start()
         return message_id
 
-    def retry(self, conversation_id: UUID, message_id: UUID, settings: StoredSettings, operation: OperationContext) -> UUID:
+    def retry(self, conversation_id: UUID, account_id: UUID, message_id: UUID, settings: StoredSettings, operation: OperationContext) -> UUID:
         """为最新失败或停止回答创建尝试；来源删除使旧范围永久失效，不能回退到其他附件。"""
         new_id = uuid4()
         with self.database.connect() as connection:
-            if not connection.execute("SELECT id FROM conversations WHERE id = %s AND NOT deleting FOR NO KEY UPDATE", (conversation_id,)).fetchone():
+            if not connection.execute("SELECT id FROM conversations WHERE id = %s AND user_id = %s AND NOT deleting FOR NO KEY UPDATE", (conversation_id, account_id)).fetchone():
                 raise LookupError("会话不存在。")
             row = connection.execute("SELECT * FROM messages WHERE conversation_id = %s ORDER BY position DESC LIMIT 1", (conversation_id,)).fetchone()
             if row is None or row["id"] != message_id or row["role"] != "assistant" or row["status"] not in ("failed", "stopped"):
@@ -85,14 +85,14 @@ class StreamingChat:
             call_id = self.execution.reserve_first(source["content"], settings, operation, user_id)
             connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to, operation_id, model_revision, embedding_revision) VALUES (%s, %s, 'assistant', '', 'generating', %s, %s, %s, %s)", (new_id, conversation_id, user_id, operation.operation_id, settings.revision,self.execution.embedding_revision(source['content'])))
             connection.execute("UPDATE model_calls SET assistant_message_id=%s WHERE id=%s", (new_id, call_id))
-        thread = Thread(target=self.execute, args=(conversation_id, new_id, user_id, settings, operation, call_id), daemon=True)
+        thread = Thread(target=self.execute, args=(conversation_id, account_id, new_id, user_id, settings, operation, call_id), daemon=True)
         with self.lock:
             self.threads = {item for item in self.threads if item.is_alive()}
             self.threads.add(thread)
             thread.start()
         return new_id
 
-    def execute(self, conversation_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
+    def execute(self, conversation_id: UUID, account_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
         """把后台回答尝试交给统一 LangGraph，线程仅负责不阻塞 HTTP 请求。"""
         with self.database.connect() as connection:
             rows = connection.execute(
@@ -101,6 +101,7 @@ class StreamingChat:
             ).fetchall()
         context = ConversationContext(
             conversation_id=conversation_id,
+            account_id=account_id,
             user_message_id=user_id,
             assistant_message_id=message_id,
             settings=settings,
@@ -111,9 +112,9 @@ class StreamingChat:
         )
         self.graph.run(context)
 
-    def stop(self, conversation_id: UUID, message_id: UUID) -> None:
+    def stop(self, conversation_id: UUID, account_id: UUID, message_id: UUID) -> None:
         """冻结回答并撤销未用搜索许可；已发出的请求仍可回传真实用量。"""
-        message=self.message(conversation_id, message_id)
+        message=self.message(conversation_id, account_id, message_id)
         if message.get('operation_id'):
             self.execution.search.cancel(message['operation_id'])
         with self.database.connect() as connection:
@@ -129,10 +130,15 @@ class StreamingChat:
         for thread in threads:
             thread.join()
 
-    def message(self, conversation_id: UUID, message_id: UUID) -> dict[str, Any]:
+    def message(self, conversation_id: UUID, account_id: UUID, message_id: UUID) -> dict[str, Any]:
         """仅返回指定会话中的助手消息，不允许用其他会话标识访问。"""
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM messages WHERE conversation_id = %s AND id = %s AND role = 'assistant'", (conversation_id, message_id)).fetchone()
+            row = connection.execute(
+                "SELECT m.* FROM messages m JOIN conversations c ON c.id=m.conversation_id "
+                "WHERE m.conversation_id = %s AND m.id = %s AND m.role = 'assistant' "
+                "AND c.user_id = %s",
+                (conversation_id, message_id, account_id),
+            ).fetchone()
             if row is None:
                 raise LookupError("回答不存在。")
             return self.database.decorate_message(row)

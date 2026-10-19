@@ -11,6 +11,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
+from tests.auth.support import authenticated_client
 
 
 class ControlledStream(httpx.SyncByteStream):
@@ -64,7 +65,7 @@ def test_stream_is_visible_before_completion_and_survives_restart(database_url: 
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ControlledStream(release))
 
     transport = httpx.MockTransport(provider)
-    with TestClient(create_app(database_url, tmp_path, transport), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, transport) as client:
         conversation_id = configure(client)
         try:
             started = client.post(f"/api/conversations/{conversation_id}/runs", json={"content": "hello"})
@@ -80,7 +81,7 @@ def test_stream_is_visible_before_completion_and_survives_restart(database_url: 
         assert '"status":"complete"' in events.text
         call = client.get("/api/usage").json()[0]
         assert (call["status"], call["prompt_tokens"], call["completion_tokens"]) == ("complete", 12, 5)
-    with TestClient(create_app(database_url, tmp_path, transport), base_url="http://127.0.0.1:8000") as restarted:
+    with authenticated_client(database_url, tmp_path, transport) as restarted:
         wait_message(restarted, conversation_id, "complete", "first second")
 
 
@@ -92,7 +93,7 @@ def test_stop_freezes_partial_answer_and_keeps_late_usage(database_url: str, tmp
         """暂停外部模型，直到接口确认停止后才返回后续内容与用量。"""
         return httpx.Response(200, stream=ControlledStream(release))
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation_id = configure(client)
         try:
             client.post(f"/api/conversations/{conversation_id}/runs", json={"content": "hello"})
@@ -132,7 +133,7 @@ def test_interrupted_answer_retries_without_duplicate_user_message(database_url:
         assert dialogue == [{"role": "user", "content": "hello"}]
         return httpx.Response(200, stream=ControlledStream(release, interrupted=attempts == 1))
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation_id = configure(client)
         client.post(f"/api/conversations/{conversation_id}/runs", json={"content": "hello"})
         failed = wait_message(client, conversation_id, "failed", "first ")
@@ -160,7 +161,7 @@ def test_other_send_interfaces_cannot_overlap_live_answer(database_url: str, tmp
             return httpx.Response(500)
         return httpx.Response(200, stream=ControlledStream(release))
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation_id = configure(client)
         try:
             client.post(f"/api/conversations/{conversation_id}/runs", json={"content": "hello"})
@@ -179,7 +180,7 @@ def test_incomplete_finish_still_collects_usage_tail(database_url: str, tmp_path
         """按服务协议先返回长度限制结束事件，再返回独立的用量尾帧。"""
         return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"partial"},"finish_reason":"length"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12}}\n\ndata: [DONE]\n\n')
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation_id = configure(client)
         client.post(f"/api/conversations/{conversation_id}/runs", json={"content": "hello"})
         wait_message(client, conversation_id, "failed", "partial")
@@ -193,7 +194,7 @@ def test_stream_error_keeps_usage_without_exposing_provider_details(database_url
         """返回带敏感原始正文和已知用量的错误事件。"""
         return httpx.Response(200, text='data: {"error":"private-provider-detail","usage":{"prompt_tokens":4,"completion_tokens":0,"total_tokens":4}}\n\n')
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation_id = configure(client)
         client.post(f"/api/conversations/{conversation_id}/runs", json={"content": "hello"})
         message = wait_message(client, conversation_id, "failed", "")

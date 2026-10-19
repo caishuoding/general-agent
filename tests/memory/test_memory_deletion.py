@@ -6,6 +6,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
+from tests.auth.support import authenticated_client
 from tests.memory.test_memory import configure_memory
 from tests.memory.test_memory_recall import recall_provider
 
@@ -13,7 +14,7 @@ from tests.memory.test_memory_recall import recall_provider
 def test_delete_memory_preserves_chat_and_other_entries_without_cloud_calls(database_url: str, tmp_path: Path) -> None:
     """管理页删除只忘记指定条目且不发云端请求，原聊天及其他记忆跨重启保留。"""
     transport = httpx.MockTransport(recall_provider)
-    with TestClient(create_app(database_url, tmp_path, transport), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, transport) as client:
         source = configure_memory(client)
         for fact in ['我喜欢简洁的中文回答', '我住在苏州']:
             assert client.post(f'/api/conversations/{source}/messages', json={'content': '请记住：' + fact}).status_code == 200
@@ -32,7 +33,7 @@ def test_delete_memory_preserves_chat_and_other_entries_without_cloud_calls(data
         assert original['messages'][0]['content'] == '请记住：我喜欢简洁的中文回答'
         assert original['messages'][1]['memory_action']['status'] == 'deleted'
         assert original['messages'][1]['memory_action']['fact'] == ''
-    with TestClient(create_app(database_url, tmp_path, transport), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, transport) as client:
         assert client.get('/api/memories').json()[0]['id'] == other['id']
         conversation = client.post('/api/conversations', json={}).json()['id']
         response = client.post(f'/api/conversations/{conversation}/messages', json={'content': '按我的偏好回答'})
@@ -45,7 +46,7 @@ def test_explicit_chat_delete_is_local_and_ambiguous_request_only_clarifies(data
     """明确完整事实可从聊天删除；含糊或混合写作指令只澄清且不触发云端调用。"""
     from tests.conversation.test_streaming import wait_message
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(recall_provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(recall_provider)) as client:
         source = configure_memory(client)
         for fact in ['我喜欢简洁的中文回答', '我住在苏州']:
             client.post(f'/api/conversations/{source}/messages', json={'content': '请记住：' + fact})
@@ -82,7 +83,7 @@ def test_delete_during_inflight_update_cannot_be_overwritten_by_late_result(data
             assert release.wait(10)
         return memories.handle(request)
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(recall_provider), httpx.MockTransport(mem0_provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(recall_provider), httpx.MockTransport(mem0_provider)) as client:
         source = configure_memory(client)
         client.post(f'/api/conversations/{source}/messages', json={'content': '请记住：我住在杭州'})
         entry = client.get('/api/memories').json()[0]

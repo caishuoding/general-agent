@@ -15,9 +15,10 @@ from general_agent.memory.tools import ToolOutcome
 
 def run_context() -> ConversationContext:
     """构造不含真实凭据和外部连接的回答运行上下文。"""
-    conversation_id, user_id, answer_id, operation_id = uuid4(), uuid4(), uuid4(), uuid4()
+    conversation_id, account_id, user_id, answer_id, operation_id = uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
     return ConversationContext(
         conversation_id=conversation_id,
+        account_id=account_id,
         user_message_id=user_id,
         assistant_message_id=answer_id,
         settings=StoredSettings(base_url="https://model.example/v1", model="chat", api_key="test-key", revision="r1"),

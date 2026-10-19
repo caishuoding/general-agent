@@ -38,13 +38,13 @@ class AttachmentService:
         for path in self.directory.glob('*.upload'):
             path.unlink(missing_ok=True)
 
-    def register(self, conversation_id: UUID, uploaded: list[UploadedFile]) -> list[dict[str, Any]]:
+    def register(self, conversation_id: UUID, account_id: UUID, uploaded: list[UploadedFile]) -> list[dict[str, Any]]:
         """仅在仍有效会话原子登记上传，删除中拒绝登记，数据库失败清理本次原文件。"""
         stored: list[Path] = []
         rows: list[dict[str, Any]] = []
         try:
             with self.database.connect() as connection:
-                if not connection.execute('SELECT id FROM conversations WHERE id=%s AND NOT deleting FOR KEY SHARE', (conversation_id,)).fetchone():
+                if not connection.execute('SELECT id FROM conversations WHERE id=%s AND user_id=%s AND NOT deleting FOR KEY SHARE', (conversation_id, account_id)).fetchone():
                     raise LookupError('会话不存在。')
                 for item in uploaded:
                     identifier = uuid4()
@@ -119,25 +119,30 @@ class AttachmentService:
         """把解析器的页或段落片段合并成保留位置的完整文字。"""
         return '\n\n'.join(f'[{location}]\n{text}' for location, text in chunks)
 
-    def list_attachments(self, conversation_id: UUID) -> list[dict[str, Any]]:
+    def list_attachments(self, conversation_id: UUID, account_id: UUID) -> list[dict[str, Any]]:
         """列出仍有效会话附件的持久状态，删除中不能重新获取资料。"""
         with self.database.connect() as connection:
-            if not connection.execute('SELECT id FROM conversations WHERE id=%s AND NOT deleting', (conversation_id,)).fetchone():
+            if not connection.execute('SELECT id FROM conversations WHERE id=%s AND user_id=%s AND NOT deleting', (conversation_id, account_id)).fetchone():
                 raise LookupError('会话不存在。')
             return connection.execute('SELECT id,conversation_id,filename,size,status,error,created_at,parse_info,image_metadata FROM attachments WHERE conversation_id=%s ORDER BY created_at,id', (conversation_id,)).fetchall()
 
-    def file(self, conversation_id: UUID, attachment_id: UUID) -> tuple[Path, str]:
+    def file(self, conversation_id: UUID, attachment_id: UUID, account_id: UUID) -> tuple[Path, str]:
         """按仍有效会话与附件授权下载；删除中即使文件尚在也不能读取，路径仅由 UUID 决定。"""
         with self.database.connect() as connection:
-            row = connection.execute("SELECT a.filename FROM attachments a JOIN conversations c ON c.id=a.conversation_id WHERE a.conversation_id=%s AND a.id=%s AND a.status<>'deleting' AND NOT c.deleting", (conversation_id, attachment_id)).fetchone()
+            row = connection.execute("SELECT a.filename FROM attachments a JOIN conversations c ON c.id=a.conversation_id WHERE a.conversation_id=%s AND a.id=%s AND c.user_id=%s AND a.status<>'deleting' AND NOT c.deleting", (conversation_id, attachment_id, account_id)).fetchone()
         path = self.directory / str(attachment_id)
         if row is None or not path.is_file():
             raise LookupError('当前会话中没有这个附件。')
         return path, str(row['filename'])
 
-    def prepare(self, conversation_id: UUID) -> AttachmentContext:
+    def prepare(self, conversation_id: UUID, account_id: UUID) -> AttachmentContext:
         """读取当前会话全部可用附件，并把完整文字或图片原字节交给模型。"""
         with self.database.connect() as connection:
+            if not connection.execute(
+                "SELECT id FROM conversations WHERE id=%s AND user_id=%s AND NOT deleting",
+                (conversation_id, account_id),
+            ).fetchone():
+                raise LookupError("会话不存在。")
             rows = connection.execute(
                 "SELECT id,filename,content,parse_info,image_metadata FROM attachments "
                 "WHERE conversation_id=%s AND status='ready' ORDER BY created_at,id",

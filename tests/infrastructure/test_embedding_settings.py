@@ -5,11 +5,12 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
+from tests.auth.support import authenticated_client
 
 
 def test_independent_embedding_configuration_survives_restart(database_url: str, tmp_path: Path) -> None:
     """嵌入服务独立持久化，复用连接只复制地址与凭据，且保存不发出云端请求。"""
-    with TestClient(create_app(database_url, tmp_path), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path) as client:
         client.put("/api/settings", json={"base_url": "https://chat.example/v1", "model": "chat", "api_key": "chat-secret"})
         conversation = client.post("/api/conversations", json={"title": "保留会话"}).json()
         response = client.put("/api/settings/embedding", json={
@@ -19,7 +20,7 @@ def test_independent_embedding_configuration_survives_restart(database_url: str,
         assert response.json()["dimensions"] == 3
         assert "secret" not in response.text
         assert client.get("/api/usage").json() == []
-    with TestClient(create_app(database_url, tmp_path), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path) as client:
         embedding = client.get("/api/settings/embedding").json()
         assert (embedding["base_url"], embedding["model"], embedding["dimensions"]) == ("https://vectors.example/v1", "embed", 3)
         assert client.get("/api/settings").json()["model"] == "chat"
@@ -33,7 +34,7 @@ def test_independent_embedding_configuration_survives_restart(database_url: str,
 
 def test_embedding_validation_does_not_echo_credentials(database_url: str, tmp_path: Path) -> None:
     """嵌入配置地址校验的错误不能回显 URL 凭据或输入密钥。"""
-    with TestClient(create_app(database_url, tmp_path), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path) as client:
         for address in ("https://user:url-secret@vector.example/v1", "https://vector.example/v1?key=url-secret", "https://vector.example:wrong/v1"):
             response = client.put("/api/settings/embedding", json={"base_url": address, "model": "embed", "api_key": "body-secret", "dimensions": 3})
             assert response.status_code == 422

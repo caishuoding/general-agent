@@ -10,6 +10,7 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from general_agent.app import create_app
+from tests.auth.support import authenticated_client
 from tests.attachments.test_attachments import attachment_documents, configure
 from tests.conversation.test_streaming import wait_message
 
@@ -43,7 +44,7 @@ def test_pdf_question_cites_actual_page_and_survives_restart(database_url: str, 
         return httpx.Response(200, text='data: ' + json.dumps(event) + '\n\ndata: [DONE]\n\n')
 
     transport = httpx.MockTransport(provider)
-    with TestClient(create_app(database_url, tmp_path, transport), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, transport) as client:
         conversation = configure(client)
         result = client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('报告.pdf', pdf_bytes(['Background.', 'ORBIT deadline is Friday.']), 'application/pdf')})
         assert result.status_code == 201
@@ -55,7 +56,7 @@ def test_pdf_question_cites_actual_page_and_survives_restart(database_url: str, 
         message = wait_message(client, conversation, 'complete')
         assert message['content'] == 'Friday.'
         assert client.get('/api/usage').json()[0]['total_tokens'] == 35
-    with TestClient(create_app(database_url, tmp_path), base_url='http://127.0.0.1:8000') as restarted:
+    with authenticated_client(database_url, tmp_path) as restarted:
         listed = restarted.get(f'/api/conversations/{conversation}/attachments').json()[0]
         assert listed['parse_info'] == attachment['parse_info']
         assert restarted.get(f'/api/conversations/{conversation}').json()['messages'][-1]['content'] == 'Friday.'
@@ -88,7 +89,7 @@ def test_docx_body_and_table_have_real_structural_locations(database_url: str, t
         assert 'CEDAR星期五交付。' in document['content']
         return httpx.Response(200, json={'choices': [{'message': {'content': '林女士负责，周五交付。'}}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 8, 'total_tokens': 28}})
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation = configure(client)
         uploaded = client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('计划.docx', docx_bytes())})
         assert uploaded.status_code == 201
@@ -110,7 +111,7 @@ def test_compressed_package_and_extracted_text_limits_fail_truthfully(database_u
         for name in original.namelist():
             output.writestr(name, original.read(name))
         output.writestr('word/oversized.xml', b'X' * 10_000_001)
-    with TestClient(create_app(database_url, tmp_path), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path) as client:
         conversation = configure(client)
         for name, content in [('compressed.docx', package.getvalue()), ('too-much-text.pdf', pdf_bytes(['X' * 2_000_001]))]:
             response = client.post(f'/api/conversations/{conversation}/attachments', files={'files': (name, content)})
@@ -136,7 +137,7 @@ def test_pdf_199_200_and_201_page_boundaries(database_url: str, tmp_path: Path) 
         assert any(f'PAGE_{expected}_SENTINEL' in item['content'] for item in documents)
         return httpx.Response(200, json={'choices': [{'message': {'content': '找到了末页。'}}], 'usage': {'prompt_tokens': 10, 'completion_tokens': 4, 'total_tokens': 14}})
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation = configure(client)
         for count in (199, 200, 201):
             response = client.post(f'/api/conversations/{conversation}/attachments', files={'files': (f'{count}.pdf', pdf_bytes([f'PAGE_{number}_SENTINEL' for number in range(1, count + 1)]))})
@@ -179,7 +180,7 @@ def image_pdf_bytes(mixed: bool = False) -> bytes:
 
 def test_pdf_scans_gaps_encryption_and_corruption_are_visible(database_url: str, tmp_path: Path) -> None:
     """扫描、空白、加密、损坏均明确失败，混合PDF只声明实际可读的一页。"""
-    with TestClient(create_app(database_url, tmp_path), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path) as client:
         conversation = configure(client)
         samples = [('scan.pdf', image_pdf_bytes(), 'OCR'), ('blank.pdf', pdf_bytes(['']), '没有可提取文字'), ('encrypted.pdf', pdf_bytes(['Secret'], encrypted=True), '已加密'), ('broken.pdf', b'%PDF-1.7\ninvalid', '损坏'), ('fake.pdf', b'plain text', '有效 PDF')]
         for filename, content, expected in samples:
@@ -223,7 +224,7 @@ def test_docx_revisions_missing_parts_and_invalid_packages(database_url: str, tm
     fake = BytesIO()
     with ZipFile(fake, 'w', ZIP_DEFLATED) as archive:
         archive.writestr('note.txt', 'not Word')
-    with TestClient(create_app(database_url, tmp_path), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path) as client:
         conversation = configure(client)
         uploaded = client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('revisions.docx', revised.getvalue())}).json()[0]
         row = next(item for item in client.get(f'/api/conversations/{conversation}/attachments').json() if item['id'] == uploaded['id'])
@@ -246,7 +247,7 @@ def test_docx_entity_declarations_are_rejected_across_xml_encodings(database_url
     """UTF-8和UTF-16编码不能绕过文档XML实体声明限制。"""
     from zipfile import ZIP_DEFLATED, ZipFile
 
-    with TestClient(create_app(database_url, tmp_path), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path) as client:
         conversation = configure(client)
         for encoding in ('UTF-8', 'UTF-16'):
             package = BytesIO()

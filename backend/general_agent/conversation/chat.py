@@ -21,11 +21,11 @@ class ChatService:
         self.attachments = attachments
         self.graph = graph
 
-    def send(self, conversation_id: UUID, content: str, settings: StoredSettings, operation: OperationContext) -> None:
+    def send(self, conversation_id: UUID, account_id: UUID, content: str, settings: StoredSettings, operation: OperationContext) -> None:
         """在有效会话登记消息、标记附件展示位置，并准备完整附件材料保存最终答案。"""
         user_id, answer_id = uuid4(), uuid4()
         with self.database.connect() as connection:
-            if not connection.execute('SELECT id FROM conversations WHERE id=%s AND NOT deleting FOR NO KEY UPDATE', (conversation_id,)).fetchone():
+            if not connection.execute('SELECT id FROM conversations WHERE id=%s AND user_id=%s AND NOT deleting FOR NO KEY UPDATE', (conversation_id, account_id)).fetchone():
                 raise LookupError('会话不存在。')
             if connection.execute("SELECT id FROM messages WHERE conversation_id=%s AND status='generating'", (conversation_id,)).fetchone():
                 raise ValueError('本会话正在生成回答，请先停止或等待完成。')
@@ -37,6 +37,7 @@ class ChatService:
             rows = connection.execute("SELECT role,content FROM messages WHERE conversation_id=%s AND status='complete' ORDER BY position", (conversation_id,)).fetchall()
         result = self.graph.run(ConversationContext(
             conversation_id=conversation_id,
+            account_id=account_id,
             user_message_id=user_id,
             assistant_message_id=answer_id,
             settings=settings,

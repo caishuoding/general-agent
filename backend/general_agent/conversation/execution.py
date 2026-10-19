@@ -75,6 +75,7 @@ class ChatExecution:
     def prepare_response(
         self,
         conversation_id: UUID,
+        account_id: UUID,
         user_id: UUID,
         message_id: UUID,
         settings: StoredSettings,
@@ -91,7 +92,7 @@ class ChatExecution:
         material = (
             routed_material
             if routes_prepared and routed_material is not None
-            else self.search.attachments.prepare(conversation_id)
+            else self.search.attachments.prepare(conversation_id, account_id)
         )
         memory_material = self.prepare_answer(user_id, content, operation, reserved)
         context_fragments = []
@@ -119,6 +120,7 @@ class ChatExecution:
     def prepare(
         self,
         conversation_id: UUID,
+        account_id: UUID,
         user_id: UUID,
         content: str,
         operation: OperationContext,
@@ -136,6 +138,7 @@ class ChatExecution:
         source_attachment_ids = self.material_attachment_ids(material)
         return self.memory_tools.prepare(
             conversation_id,
+            account_id,
             user_id,
             content,
             settings,

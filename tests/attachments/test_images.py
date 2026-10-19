@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from general_agent.app import create_app
+from tests.auth.support import authenticated_client
 from tests.attachments.test_attachments import configure
 from tests.conversation.test_streaming import wait_message
 
@@ -51,7 +52,7 @@ def test_png_jpeg_are_sent_directly_and_survive_restart(database_url: str, tmp_p
         return model_response(payload, '两张图片都是红色。')
 
     transport = httpx.MockTransport(provider)
-    with TestClient(create_app(database_url, tmp_path, transport), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, transport) as client:
         conversation = configure(client)
         uploaded = client.post('/api/conversations/{}/attachments'.format(conversation), files=[('files', ('图表.PNG', png, 'text/plain')), ('files', ('截图.jpeg', jpeg, 'image/jpeg'))])
         assert uploaded.status_code == 201
@@ -63,7 +64,7 @@ def test_png_jpeg_are_sent_directly_and_survive_restart(database_url: str, tmp_p
         response = client.post(f'/api/conversations/{conversation}/messages', json={'content': '比较这两张图的颜色'})
         assert response.status_code == 200
         assert response.json()['messages'][-1]['content'] == '两张图片都是红色。'
-    with TestClient(create_app(database_url, tmp_path, transport), base_url='http://127.0.0.1:8000') as restarted:
+    with authenticated_client(database_url, tmp_path, transport) as restarted:
         assert restarted.post(f'/api/conversations/{conversation}/runs', json={'content': '再看这两张图片是什么颜色？'}).status_code == 202
         answer = wait_message(restarted, conversation, 'complete')
         assert answer['content'] == '两张图片都是红色。'
@@ -82,7 +83,7 @@ def test_corrupt_images_are_rejected_without_model_calls(database_url: str, tmp_
     animated = io.BytesIO()
     Image.new('RGB', (8, 8), 'red').save(animated, format='PNG', save_all=True, append_images=[Image.new('RGB', (8, 8), 'blue')], duration=100)
     cases = [('empty.png', b''), ('text.jpg', b'plain text'), ('gif.png', gif.getvalue()), ('jpeg.png', image_bytes('JPEG')), ('cut.png', png[:-8]), ('cut.jpg', image_bytes('JPEG')[:-2]), ('large.png', oversized), ('animated.png', animated.getvalue())]
-    with TestClient(create_app(database_url, tmp_path), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path) as client:
         conversation = configure(client)
         for filename, raw in cases:
             response = client.post(f'/api/conversations/{conversation}/attachments', files={'files': (filename, raw)})
@@ -109,7 +110,7 @@ def test_images_remain_conversation_owned(database_url: str, tmp_path: Path) -> 
         payloads.append(payload)
         return model_response(payload, '红色图片。' if image_parts(payload) else '没有图片。')
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         first = configure(client)
         second = client.post('/api/conversations', json={}).json()['id']
         image = client.post(f'/api/conversations/{first}/attachments', files={'files': ('private.png', raw)}).json()[0]

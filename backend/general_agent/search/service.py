@@ -76,6 +76,7 @@ class SearchService:
         saved = self.settings.read()
         if saved is None or saved.model != 'zhipu-search-std':
             raise ValueError('尚未配置智谱 Web Search。请在设置中填写独立搜索密钥。')
+        account_id = self.memory.account_id_for_conversation(conversation_id)
         with self.database.connect() as connection:
             self.memory.guard_source(connection, conversation_id, user_id, operation)
             attachment_sources = connection.execute(
@@ -105,9 +106,9 @@ class SearchService:
                 'label': '相关长期记忆',
             } for item in memory_sources)
             connection.execute(
-                "INSERT INTO search_requests(id,operation_id,conversation_id,message_id,query,search_revision,status,sources) "
-                "VALUES(%s,%s,%s,%s,%s,%s,'approved',%s) ON CONFLICT(operation_id) DO NOTHING",
-                (uuid4(), operation.operation_id, conversation_id, user_id, query, saved.revision, Jsonb(sources)),
+                "INSERT INTO search_requests(id,operation_id,conversation_id,user_id,message_id,query,search_revision,status,sources) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,'approved',%s) ON CONFLICT(operation_id) DO NOTHING",
+                (uuid4(), operation.operation_id, conversation_id, account_id, user_id, query, saved.revision, Jsonb(sources)),
             )
             row = connection.execute('SELECT * FROM search_requests WHERE operation_id=%s', (operation.operation_id,)).fetchone()
         assert row is not None

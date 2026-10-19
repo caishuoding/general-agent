@@ -96,10 +96,11 @@ class MemoryTools:
     def search(self, checkpoint: MemoryCheckpoint, query: str) -> dict[str, Any]:
         """通过 Mem0 语义查找或本地列表取得有效记忆，登记可修改的观察版本。"""
         checkpoint.guard()
-        rows = [row for row in self.memory.list() if row['status'] == 'complete']
+        account_id = self.memory.account_id_for_conversation(checkpoint.conversation_id)
+        rows = [row for row in self.memory.list(account_id) if row['status'] == 'complete']
         if query.strip() and rows:
             with self.memory.session() as sdk:
-                hits = sdk._results(sdk.search(query, user_id=self.memory.user_id, limit=50, filters={'user_id': self.memory.user_id}))
+                hits = sdk._results(sdk.search(query, user_id=str(account_id), limit=50, filters={'user_id': str(account_id)}))
             rank = {str(hit['id']): position for position, hit in enumerate(hits)}
             rows = [row for row in rows if str(row['memory_id']) in rank]
             # 按 Mem0 的实际语义相关性排序，不让数据库创建时间覆盖结果。
@@ -151,18 +152,19 @@ class MemoryTools:
         if cached is not None:
             return dict(cached)
         with self.memory.database.connect() as connection:
+            account_id = self.memory.account_id_for_conversation(checkpoint.conversation_id)
             observed = connection.execute('SELECT version FROM memory_tool_observations WHERE message_id=%s AND action_id=%s', (checkpoint.message_id, action_id)).fetchone()
-            entry = connection.execute('SELECT status,version FROM memory_actions WHERE id=%s', (action_id,)).fetchone()
+            entry = connection.execute('SELECT status,version FROM memory_actions WHERE id=%s AND user_id=%s', (action_id, account_id)).fetchone()
         if observed is None or observed['version'] != mutation_input.version or entry is None:
             raise ValueError('请先查找具体记忆并使用返回的版本，不能猜测标识。')
         identifier = uuid5(checkpoint.message_id, key)
         if name == 'update_memory' and isinstance(mutation_input, UpdateMemoryInput):
-            result = MemoryCorrection(self.memory).apply(action_id, mutation_input.fact, mutation_input.version, identifier, checkpoint.operation, checkpoint.message_id, checkpoint.conversation_id)
+            result = MemoryCorrection(self.memory).apply(action_id, mutation_input.fact, mutation_input.version, identifier, checkpoint.operation, checkpoint.message_id, checkpoint.conversation_id, account_id=account_id)
             public = {'status': result['status'], 'memory_id': mutation_input.memory_id, 'action': 'updated'}
         else:
             if entry['status'] not in ('deleting', 'deleted') and entry['version'] != mutation_input.version:
                 raise ValueError('记忆已变化，请重新查找后再删除。')
-            result = MemoryDeletion(self.memory).delete(action_id, checkpoint.operation.operation_id, mutation_input.version)
+            result = MemoryDeletion(self.memory).delete(action_id, checkpoint.operation.operation_id, mutation_input.version, account_id=account_id)
             public = {'status': result['status'], 'memory_id': mutation_input.memory_id, 'action': 'deleted'}
         checkpoint.put(key, public)
         return public
@@ -170,6 +172,7 @@ class MemoryTools:
     def prepare(
         self,
         conversation_id: UUID,
+        account_id: UUID,
         message_id: UUID,
         content: str,
         settings: StoredSettings,
@@ -181,6 +184,8 @@ class MemoryTools:
         source_attachment_ids: list[UUID] | None = None,
     ) -> ToolOutcome:
         """运行单一流式工具循环，边输出文字边执行模型请求的工具。"""
+        if self.memory.account_id_for_conversation(conversation_id) != account_id:
+            raise LookupError("会话不存在。")
         checkpoint = MemoryCheckpoint(self.memory, message_id, conversation_id, operation)
         with self.memory.database.connect() as connection:
             previous = connection.execute('SELECT status,result FROM memory_tool_runs WHERE message_id=%s', (message_id,)).fetchone()

@@ -48,6 +48,7 @@ class ConversationContext:
     """向图节点提供本次执行依赖和不可持久化运行参数。"""
 
     conversation_id: UUID
+    account_id: UUID
     user_message_id: UUID
     assistant_message_id: UUID
     settings: StoredSettings
@@ -178,7 +179,7 @@ class ConversationGraph:
             material = AttachmentContext()
             memory_request = memory_tool_request(content)
             if not memory_request:
-                material = self.attachments.prepare(context.conversation_id)
+                material = self.attachments.prepare(context.conversation_id, context.account_id)
             context.routed_material = material
             LOGGER.info(
                 "event=node route_request message_id=%s material=%s memory_tool=%s",
@@ -232,6 +233,7 @@ class ConversationGraph:
         try:
             outcome = self.execution.prepare(
                 context.conversation_id,
+                context.account_id,
                 context.user_message_id,
                 content,
                 context.operation,
@@ -274,6 +276,7 @@ class ConversationGraph:
         try:
             preparation = self.execution.prepare_response(
                 context.conversation_id,
+                context.account_id,
                 context.user_message_id,
                 context.assistant_message_id,
                 context.settings,

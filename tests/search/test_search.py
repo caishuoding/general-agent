@@ -11,6 +11,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
+from tests.auth.support import authenticated_client
 from tests.attachments.test_attachments import configure
 
 
@@ -129,7 +130,7 @@ def test_search_is_a_model_tool_without_confirmation_and_keeps_sources(database_
             return tool_call("search_web", {"query": "杭州天气"})
         return structured_text("普通回答。")
 
-    with TestClient(create_app(database_url, tmp_path, streaming_transport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure(client)
         assert client.post(f"/api/conversations/{conversation}/messages", json={"content": "你好"}).status_code == 200
         assert searches == []
@@ -162,7 +163,7 @@ def test_unconfigured_search_returns_tool_error_without_leaking_provider_details
             return structured_text("请先在设置中配置智谱搜索密钥。")
         return tool_call("search_web", {"query": "杭州天气"})
 
-    with TestClient(create_app(database_url, tmp_path, streaming_transport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure(client)
         response = client.post(f"/api/conversations/{conversation}/messages", json={"content": "联网查杭州天气"})
 
@@ -201,7 +202,7 @@ def test_attachment_and_memory_pii_are_sent_by_search_tool_without_extra_confirm
             return tool_call("search_memories", {"query": "住址"}, "call-memory-search")
         return tool_call("search_web", {"query": "青松路 88 号附近咖啡店"})
 
-    with TestClient(create_app(database_url, tmp_path, streaming_transport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure(client)
         client.put("/api/settings/search", json={"base_url": "https://search.example", "api_key": "test-key"})
         saved = client.post(f"/api/conversations/{conversation}/messages", json={"content": "请记住：我住在青松路 88 号"})
@@ -243,7 +244,7 @@ def test_failed_search_preserves_actual_usage_and_truthful_terminal_state(databa
             return structured_text("联网搜索未完成，请稍后重试。")
         return tool_call("search_web", {"query": "杭州天气"})
 
-    with TestClient(create_app(database_url, tmp_path, streaming_transport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure(client)
         client.put("/api/settings/search", json={"base_url": "https://search.example", "api_key": "test-key"})
         response = client.post(f"/api/conversations/{conversation}/messages", json={"content": "联网查杭州天气"})
@@ -264,7 +265,7 @@ def test_search_credentials_remain_independent_and_private(database_url: str, tm
         assert request.url.host == "model.example"
         return structured_text("你好。")
 
-    with TestClient(create_app(database_url, tmp_path, streaming_transport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure(client)
         response = client.put("/api/settings/search", json={"base_url": "https://search.example", "api_key": "private-search-key"})
         assert response.status_code == 200 and "private-search-key" not in response.text

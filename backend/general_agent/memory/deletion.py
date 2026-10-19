@@ -23,10 +23,10 @@ class MemoryDeletion:
             raise LookupError('该记忆没有删除记录。')
         return {**row,'detail':'处理完成。' if row['status']=='complete' else '处理尚未完成。'}
 
-    def delete(self, action_id: UUID, active_operation: UUID | None = None, expected_version: int | None = None) -> dict[str, Any]:
+    def delete(self, action_id: UUID, active_operation: UUID | None = None, expected_version: int | None = None, account_id: UUID | None = None) -> dict[str, Any]:
         """停用并清全部副本；原生或工具删除保留当前执行身份，其他旧操作全部失效。"""
         with self.database.connect() as connection:
-            if not self.begin(connection,action_id,active_operation,expected_version):
+            if not self.begin(connection,action_id,active_operation,expected_version,account_id):
                 return self.result(action_id)
         with self.database.connect() as lock:
             lock.autocommit=True
@@ -43,10 +43,12 @@ class MemoryDeletion:
                 raise ValueError('记忆清理未完成，请重试；该条目仍停止召回。') from None
         return self.result(action_id)
 
-    def begin(self, connection: Any, action_id: UUID, active_operation: UUID | None = None, expected_version: int | None = None) -> bool:
+    def begin(self, connection: Any, action_id: UUID, active_operation: UUID | None = None, expected_version: int | None = None, account_id: UUID | None = None) -> bool:
         """事务内停用并清派生正文，允许发起删除的当前工具回合返回真实结果。"""
         entry=connection.execute('SELECT * FROM memory_actions WHERE id=%s FOR UPDATE',(action_id,)).fetchone()
         if entry is None:
+            raise LookupError('记忆条目不存在。')
+        if account_id is not None and entry.get('user_id') != account_id:
             raise LookupError('记忆条目不存在。')
         if entry['status']=='deleted':
             return False
@@ -93,14 +95,21 @@ class MemoryDeletion:
     def purge_sdk(self, action_id: UUID) -> None:
         """通过官方 Mem0 API 删除该业务动作对应的正式记忆。"""
         with self.database.connect() as connection:
-            progress=connection.execute('SELECT memory_ids FROM memory_deletions WHERE action_id=%s',(action_id,)).fetchone()
+            progress=connection.execute(
+                "SELECT d.memory_ids, a.user_id FROM memory_deletions d "
+                "JOIN memory_actions a ON a.id=d.action_id WHERE d.action_id=%s",
+                (action_id,),
+            ).fetchone()
         assert progress is not None
+        account_id = progress['user_id']
+        if account_id is None:
+            raise ValueError('记忆条目缺少账号归属，未执行删除。')
         identifiers=set(progress['memory_ids'])
         with self.memory.session() as sdk:
             for identifier in identifiers:
                 entry=sdk.get(str(identifier))
                 if entry is not None:
-                    if entry.get('user_id')!=self.memory.user_id or (entry.get('metadata') or {}).get('action_id')!=str(action_id):
+                    if entry.get('user_id')!=str(account_id) or (entry.get('metadata') or {}).get('action_id')!=str(action_id):
                         raise ValueError('记忆身份不符，未删除其他条目。')
                     sdk.delete(str(identifier))
                 if sdk.get(str(identifier)) is not None:

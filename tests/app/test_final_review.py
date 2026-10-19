@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
+from tests.auth.support import authenticated_client
 from tests.memory.test_memory import configure_memory
 from tests.memory.test_memory_recall import recall_provider
 from tests.search.test_search import last_user_content, reply, tool_call, tool_messages
@@ -40,7 +41,7 @@ def test_public_memory_topics_do_not_read_private_long_term_memory(database_url:
             return reply(payload, '公开主题回答。')
         return reply(payload, '公开主题回答。')
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         old = configure_memory(client)
         client.put('/api/settings/search', json={'base_url': 'https://search.example', 'api_key': 'test-key'})
         if with_memory:

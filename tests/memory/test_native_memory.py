@@ -12,6 +12,7 @@ import psycopg
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
+from tests.auth.support import authenticated_client
 from tests.memory.test_memory import configure_memory, explicit_memory_request, memory_final_answer, memory_provider
 from tests.conversation.test_streaming import wait_message
 from tests.model_protocol import streaming_transport
@@ -92,7 +93,7 @@ def send(client: TestClient, conversation: str, content: str) -> dict[str, Any]:
 
 def test_native_add_update_without_candidate_confirmation(database_url: str, tmp_path: Path) -> None:
     """普通陈述自动新增，后续陈述由原生 Mem0 更新，管理页始终看到相同正式标识。"""
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(native_provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(native_provider)) as client:
         conversation = configure_memory(client)
         answer = send(client, conversation, '我住在杭州')
         assert answer['automatic_memory']['status'] == 'complete', answer['automatic_memory']
@@ -108,7 +109,7 @@ def test_native_add_update_without_candidate_confirmation(database_url: str, tmp
 
 def test_natural_language_tools_search_update_delete_and_management(database_url: str, tmp_path: Path) -> None:
     """无需固定格式或逐次确认，真实工具循环查找、更新、删除，仍可从管理页编辑。"""
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(native_provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(native_provider)) as client:
         conversation = configure_memory(client)
         original_answer = send(client, conversation, '我住在杭州')
         assert '杭州' in send(client, conversation, '你记得我的住址吗')['content']
@@ -128,7 +129,7 @@ def test_natural_language_tools_search_update_delete_and_management(database_url
 
 def test_native_operation_replay_does_not_reextract(database_url: str, tmp_path: Path) -> None:
     """重复提交同一操作不会再次调用原生提取或新增记忆。"""
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(native_provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(native_provider)) as client:
         conversation = configure_memory(client)
         endpoint = f'/api/conversations/{conversation}/runs'
         headers = {'X-Operation-ID': str(uuid4())}
@@ -156,7 +157,7 @@ def test_tool_cannot_mutate_unobserved_id_or_borrow_quoted_permission(database_u
                 return json_reply('未删除记忆。')
             return tool_reply('delete_memory', {'memory_id': target, 'version': 1})
         return native_provider(request)
-    with TestClient(create_app(database_url, tmp_path, streaming_transport(provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure_memory(client)
         send(client, conversation, '请记住：我住在杭州')
         target = client.get('/api/memories').json()[0]['id']
@@ -167,7 +168,7 @@ def test_tool_cannot_mutate_unobserved_id_or_borrow_quoted_permission(database_u
 
 def test_native_source_deletion_removes_memory_and_resume_material(database_url: str, tmp_path: Path) -> None:
     """原生生成的记忆纳入来源影响预览，删除会话清除相关条目和推理恢复点。"""
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(native_provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(native_provider)) as client:
         conversation = configure_memory(client)
         send(client, conversation, '我住在杭州')
         preview = client.get(f'/api/conversations/{conversation}/deletion-preview').json()

@@ -8,6 +8,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
+from tests.auth.support import authenticated_client
 
 
 def configure(client: TestClient) -> str:
@@ -53,7 +54,7 @@ def test_uploaded_text_is_sent_in_full_and_survives_restart(database_url: str, t
         return httpx.Response(200, json={'choices': [{'message': {'content': '蓝鲸项目星期五交付。'}}]})
 
     transport = httpx.MockTransport(provider)
-    with TestClient(create_app(database_url, tmp_path, transport), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, transport) as client:
         conversation = configure(client)
         uploaded = client.post(
             f'/api/conversations/{conversation}/attachments',
@@ -67,7 +68,7 @@ def test_uploaded_text_is_sent_in_full_and_survives_restart(database_url: str, t
         assert response.status_code == 200, response.text
         assert response.json()['messages'][-1]['content'] == '蓝鲸项目星期五交付。'
 
-    with TestClient(create_app(database_url, tmp_path, transport), base_url='http://127.0.0.1:8000') as restarted:
+    with authenticated_client(database_url, tmp_path, transport) as restarted:
         response = restarted.post(f'/api/conversations/{conversation}/runs', json={'content': '请再告诉我交付时间'})
         assert response.status_code == 202
         from tests.conversation.test_streaming import wait_message
@@ -87,7 +88,7 @@ def test_attachments_are_isolated_by_conversation(database_url: str, tmp_path: P
         payloads.append(payload)
         return httpx.Response(200, json={'choices': [{'message': {'content': '已收到资料。'}}]})
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         first = configure(client)
         second = client.post('/api/conversations', json={}).json()['id']
         uploaded = client.post(f'/api/conversations/{first}/attachments', files={'files': ('private.txt', secret.encode())}).json()[0]
@@ -112,9 +113,8 @@ def test_message_history_shows_attachments_used_by_each_user_message(
         json.loads(request.content)
         return httpx.Response(200, json={'choices': [{'message': {'content': '已阅读资料。'}}]})
 
-    with TestClient(
-        create_app(database_url, tmp_path, httpx.MockTransport(provider)),
-        base_url='http://127.0.0.1:8000',
+    with authenticated_client(
+        database_url, tmp_path, httpx.MockTransport(provider)
     ) as client:
         conversation = configure(client)
         uploaded = client.post(
@@ -150,7 +150,7 @@ def test_upload_limits_and_failed_files_are_truthful(database_url: str, tmp_path
         assert 'empty' not in str(payload['messages'])
         return httpx.Response(200, json={'choices': [{'message': {'content': '没有可读取资料。'}}]})
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation = configure(client)
         assert client.post(f'/api/conversations/{conversation}/attachments', files=[('files', (f'{index}.txt', b'text')) for index in range(6)]).status_code == 422
         assert client.post(f'/api/conversations/{conversation}/attachments', files=[('files', (f'{index}.txt', b'text')) for index in range(5)]).status_code == 201
@@ -173,7 +173,7 @@ def test_long_document_tail_is_included_in_full_context(database_url: str, tmp_p
         assert documents and sentinel in documents[0]['content']
         return httpx.Response(200, json={'choices': [{'message': {'content': '口令是海风。'}}]})
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url='http://127.0.0.1:8000') as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation = configure(client)
         client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('long.txt', text.encode())})
         response = client.post(f'/api/conversations/{conversation}/messages', json={'content': '文末说了什么？'})

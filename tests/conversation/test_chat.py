@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
+from tests.auth.support import authenticated_client
 
 
 def test_reply_and_usage_survive_restart(database_url: str, tmp_path: Path) -> None:
@@ -26,12 +27,12 @@ def test_reply_and_usage_survive_restart(database_url: str, tmp_path: Path) -> N
         })
 
     transport = httpx.MockTransport(provider)
-    with TestClient(create_app(database_url, tmp_path, transport), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, transport) as client:
         client.put("/api/settings", json={"base_url": "https://model.example/v1", "model": "chat-model", "api_key": "fixture-key"})
         conversation_id = client.post("/api/conversations", json={}).json()["id"]
         reply = client.post(f"/api/conversations/{conversation_id}/messages", json={"content": "你好"})
         assert reply.status_code == 200
-    with TestClient(create_app(database_url, tmp_path, transport), base_url="http://127.0.0.1:8000") as restarted:
+    with authenticated_client(database_url, tmp_path, transport) as restarted:
         detail = restarted.get(f"/api/conversations/{conversation_id}").json()
         assert [(message["role"], message["content"], message["status"]) for message in detail["messages"]] == [
             ("user", "你好", "complete"), ("assistant", "你好，今天想聊什么？", "complete"),
@@ -48,7 +49,7 @@ def test_provider_failure_is_persisted_without_secret(database_url: str, tmp_pat
         """模拟会在错误正文中回显凭据的外部服务。"""
         return httpx.Response(401, json={"error": "bad fixture-secret-do-not-expose"})
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000", raise_server_exceptions=False) as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider), raise_server_exceptions=False) as client:
         client.put("/api/settings", json={"base_url": "https://model.example/v1", "model": "chat-model", "api_key": "fixture-secret-do-not-expose"})
         conversation_id = client.post("/api/conversations", json={}).json()["id"]
         response = client.post(f"/api/conversations/{conversation_id}/messages", json={"content": "请帮我写一段开场白"})
@@ -69,7 +70,7 @@ def test_http_failure_preserves_returned_usage(database_url: str, tmp_path: Path
         """模拟已消耗输入 token 后发生的服务错误。"""
         return httpx.Response(500, json={"error": "private-provider-detail", "usage": {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9}})
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         client.put("/api/settings", json={"base_url": "https://model.example/v1", "model": "chat", "api_key": "test-key"})
         conversation_id = client.post("/api/conversations", json={}).json()["id"]
         response = client.post(f"/api/conversations/{conversation_id}/messages", json={"content": "你好"})
@@ -95,7 +96,7 @@ def test_conversations_keep_separate_model_context(database_url: str, tmp_path: 
         assert dialogue == expected.pop(0)
         return httpx.Response(200, json={"choices": [{"message": {"content": "已了解本会话的信息。"}}]})
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         client.put("/api/settings", json={"base_url": "https://model.example/v1", "model": "chat", "api_key": "test-key"})
         first = client.post("/api/conversations", json={}).json()["id"]
         second = client.post("/api/conversations", json={}).json()["id"]
@@ -117,7 +118,7 @@ def test_unusable_response_is_not_a_success(database_url: str, tmp_path: Path, m
             return httpx.Response(200, text="contains-secret")
         return httpx.Response(200, json={"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 0, "total_tokens": 9}})
 
-    with TestClient(create_app(database_url, tmp_path, httpx.MockTransport(provider)), base_url="http://127.0.0.1:8000") as client:
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         client.put("/api/settings", json={"base_url": "https://model.example/v1", "model": "chat", "api_key": "test-key"})
         conversation_id = client.post("/api/conversations", json={}).json()["id"]
         response = client.post(f"/api/conversations/{conversation_id}/messages", json={"content": "你好"})

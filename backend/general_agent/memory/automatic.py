@@ -65,6 +65,7 @@ class AutomaticMemory:
 
     def process_messages(self, conversation_id: UUID, message_id: UUID, messages: list[dict[str, str]], settings: StoredSettings, operation: OperationContext, track_run: bool = True, explicit: bool = False) -> str:
         """调用 Mem0 add(infer=True)，并把新增结果登记到业务账本。"""
+        account_id = self.memory.account_id_for_conversation(conversation_id)
         checkpoint = MemoryCheckpoint(self.memory, message_id, conversation_id, operation)
         explicit_action_id = uuid5(message_id, 'explicit-memory:0')
         if self.memory.source_suppressed(message_id):
@@ -83,7 +84,7 @@ class AutomaticMemory:
             if explicit:
                 metadata["action_id"] = str(explicit_action_id)
             with self.memory.session() as sdk:
-                result = sdk.add(messages, user_id=self.memory.user_id, metadata=metadata, infer=True)
+                result = sdk.add(messages, user_id=str(account_id), metadata=metadata, infer=True)
                 items = sdk._results(result)
             events = [str(item.get("event", "ADD")).upper() for item in items]
             additions = [item for item in items if item.get("id") and item.get("memory") and str(item.get("event", "ADD")).upper() == "ADD"]
@@ -99,7 +100,7 @@ class AutomaticMemory:
                 self.memory.apply_native_update(conversation_id, message_id, operation, str(item["id"]), str(item["memory"]), str(item.get("old_memory") or ""))
             for item in deletions:
                 with self.memory.database.connect() as connection:
-                    target = connection.execute("SELECT id FROM memory_actions WHERE memory_id=%s AND status='complete'", (str(item["id"]),)).fetchone()
+                    target = connection.execute("SELECT id FROM memory_actions WHERE memory_id=%s AND user_id=%s AND status='complete'", (str(item["id"]), account_id)).fetchone()
                 if target is not None:
                     from general_agent.memory.deletion import MemoryDeletion
                     MemoryDeletion(self.memory).delete(target['id'], operation.operation_id)

@@ -8,6 +8,7 @@ from pathlib import Path
 from time import monotonic, sleep
 
 import httpx
+from tests.auth.support import login_admin_http
 
 
 def test_killed_parser_reports_failed_after_restart(database_url: str, tmp_path: Path) -> None:
@@ -37,6 +38,7 @@ def test_killed_parser_reports_failed_after_restart(database_url: str, tmp_path:
     try:
         with httpx.Client(base_url=f'http://127.0.0.1:{port}', trust_env=False, timeout=15) as client:
             ready(client)
+            login_admin_http(client)
             client.put('/api/settings', json={'base_url': 'https://unused.example/v1', 'model': 'unused', 'api_key': 'unused'})
             conversation = client.post('/api/conversations', json={}).json()['id']
             response = client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('long.txt', b'a' * 20_000_000)})

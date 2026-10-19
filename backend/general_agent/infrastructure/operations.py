@@ -27,6 +27,7 @@ class OperationContext:
     operation_id: UUID
     purpose: str
     conversation_id: UUID | None = None
+    account_id: UUID | None = None
 
 
 class OperationService:
@@ -37,16 +38,16 @@ class OperationService:
         self.database = database
 
     @contextmanager
-    def operation(self, purpose: str, scope: object, operation_id: UUID | None = None, conversation_id: UUID | None = None) -> Iterator[tuple[OperationContext, dict[str, Any] | None]]:
+    def operation(self, purpose: str, scope: object, operation_id: UUID | None = None, conversation_id: UUID | None = None, account_id: UUID | None = None) -> Iterator[tuple[OperationContext, dict[str, Any] | None]]:
         """锁定稳定操作身份，校验相同标识没有被挪用于其他请求。"""
         identifier = operation_id or uuid4()
-        digest = hashlib.sha256(json.dumps([purpose, str(conversation_id), scope], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        context = OperationContext(identifier, purpose, conversation_id)
+        digest = hashlib.sha256(json.dumps([purpose, str(conversation_id), str(account_id), scope], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        context = OperationContext(identifier, purpose, conversation_id, account_id)
         with self.database.connect() as connection:
             connection.autocommit = True
             connection.execute("SELECT pg_advisory_lock(%s)", (identifier.int % (2**63 - 1),))
             try:
-                connection.execute("INSERT INTO cloud_operations(id,scope_hash,purpose,conversation_id) VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING", (identifier, digest, purpose, conversation_id))
+                connection.execute("INSERT INTO cloud_operations(id,scope_hash,purpose,conversation_id,user_id) VALUES(%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", (identifier, digest, purpose, conversation_id, account_id))
             except ForeignKeyViolation:
                 raise LookupError("会话不存在。") from None
             row = connection.execute("SELECT * FROM cloud_operations WHERE id=%s", (identifier,)).fetchone()
@@ -71,12 +72,12 @@ class OperationService:
         """为一次外部调用创建稳定记录，供取消、恢复和用量核对使用。"""
         call_id = uuid4()
         with self.database.connect() as connection:
-            operation = connection.execute("SELECT purpose,conversation_id,cancelled FROM cloud_operations WHERE id=%s FOR UPDATE", (context.operation_id,)).fetchone()
+            operation = connection.execute("SELECT purpose,conversation_id,user_id,cancelled FROM cloud_operations WHERE id=%s FOR UPDATE", (context.operation_id,)).fetchone()
             if not operation or operation["cancelled"]:
                 raise ValueError("该操作已取消或上下文无效。")
-            if operation["purpose"] != context.purpose or operation["conversation_id"] != context.conversation_id:
+            if operation["purpose"] != context.purpose or operation["conversation_id"] != context.conversation_id or operation.get("user_id") != context.account_id:
                 raise ValueError("调用上下文与持久化操作不匹配。")
-            connection.execute("INSERT INTO model_calls(id,operation_id,conversation_id,purpose,base_url,model,revision,unit,status) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'reserved')", (call_id, context.operation_id, context.conversation_id, context.purpose, settings.base_url.rstrip('/'), settings.model, settings.revision, unit))
+            connection.execute("INSERT INTO model_calls(id,operation_id,conversation_id,user_id,purpose,base_url,model,revision,unit,status) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,'reserved')", (call_id, context.operation_id, context.conversation_id, context.account_id, context.purpose, settings.base_url.rstrip('/'), settings.model, settings.revision, unit))
         return call_id
 
     def begin(self, context: OperationContext, call_id: UUID, settings: StoredSettings, assistant_message_id: UUID | None = None) -> None:
