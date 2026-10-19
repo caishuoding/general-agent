@@ -7,6 +7,8 @@ from uuid import UUID, uuid4, uuid5
 import psycopg
 from psycopg.rows import dict_row
 
+from general_agent.auth.passwords import hash_password
+
 
 class Database:
     """封装会话数据访问，所有请求使用独立连接与事务。"""
@@ -29,6 +31,20 @@ class Database:
                 if exists is None:
                     connection.execute(path.read_text(encoding="utf-8"))
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (path.name,))
+            self.ensure_bootstrap_admin(connection)
+
+    def ensure_bootstrap_admin(self, connection: psycopg.Connection[dict[str, Any]]) -> None:
+        """幂等预置必须改密的初始管理员，已有账号时保持原密码不变。"""
+        existing = connection.execute(
+            "SELECT id FROM users WHERE username = %s", ("admin",)
+        ).fetchone()
+        if existing is not None:
+            return
+        connection.execute(
+            "INSERT INTO users (id, username, password_hash, role, status, must_change_password) "
+            "VALUES (%s, %s, %s, 'admin', 'active', TRUE)",
+            (uuid4(), "admin", hash_password("123456")),
+        )
 
     def create_conversation(self, title: str) -> dict[str, Any]:
         """创建会话并返回其持久化后的标识与时间。"""
