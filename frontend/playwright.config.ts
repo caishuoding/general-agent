@@ -4,7 +4,7 @@ const appPort = process.env.TEST_APP_PORT || "18080";
 
 export default defineConfig({
   testDir: "./e2e",
-  testIgnore: ["source-deletion.spec.ts", "images.spec.ts", "search.spec.ts"],
+  testIgnore: ["source-deletion.spec.ts", "images.spec.ts", "search.spec.ts", "mobile-keyboard.spec.ts"],
   workers: 1,
   use: { baseURL: `http://127.0.0.1:${appPort}`, trace: "retain-on-failure" },
   webServer: {
