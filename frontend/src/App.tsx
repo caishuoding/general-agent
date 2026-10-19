@@ -25,8 +25,12 @@ import { LoginScreen, PasswordChangeScreen } from "./AuthScreens";
 
 type Screen = "chat" | "password";
 
-// 展示会话、消息内附件与来源删除状态，并隔离过期异步响应。
+// 展示响应式会话工作区、消息内附件与来源删除状态，并隔离过期异步响应。
 export function App() {
+  const [mobile, setMobile] = useState(window.matchMedia("(max-width: 800px)").matches);
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const navigation = useRef<HTMLElement>(null);
+  const navigationTrigger = useRef<HTMLButtonElement>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -53,6 +57,86 @@ export function App() {
   const followLatest = useRef(true);
   const [showLatest, setShowLatest] = useState(false);
   const composer = useRef<HTMLFormElement>(null);
+
+  useEffect(
+    // 使用可视视口高度，让手机软键盘弹出后输入区仍处于可见范围。
+    function watchVisibleHeight() {
+      const viewport = window.visualViewport;
+      // 缩放时保留正常布局，只对未缩放的可视区域更新高度。
+      function updateHeight() {
+        if (!viewport || viewport.scale !== 1) return;
+        document.documentElement.style.setProperty("--workspace-height", `${viewport.height}px`);
+      }
+      updateHeight();
+      viewport?.addEventListener("resize", updateHeight);
+      // 卸载时清除视口监听和工作区专属高度。
+      return () => {
+        viewport?.removeEventListener("resize", updateHeight);
+        document.documentElement.style.removeProperty("--workspace-height");
+      };
+    },
+    [],
+  );
+
+  useEffect(
+    // 同步布局断点，切回桌面时清除手机抽屉状态。
+    function watchLayout() {
+      const query = window.matchMedia("(max-width: 800px)");
+      // 断点变化后恢复默认导航，避免隐藏抽屉保留焦点。
+      function updateLayout() {
+        setMobile(query.matches);
+        setNavigationOpen(false);
+      }
+      query.addEventListener("change", updateLayout);
+      // 卸载时移除媒体查询监听。
+      return () => query.removeEventListener("change", updateLayout);
+    },
+    [],
+  );
+
+  useEffect(
+    // 手机抽屉打开后限制键盘焦点，并支持 Escape 关闭和焦点返回。
+    function manageNavigationFocus() {
+      if (!mobile || !navigationOpen) return;
+      const panel = navigation.current;
+      panel?.querySelector<HTMLButtonElement>("button")?.focus();
+      // 在抽屉内循环 Tab，防止键盘进入被遮挡的会话区。
+      function handleKey(event: globalThis.KeyboardEvent) {
+        if (event.key === "Escape") {
+          setNavigationOpen(false);
+          return;
+        }
+        if (event.key !== "Tab") return;
+        const buttons = panel?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)");
+        if (!buttons?.length) return;
+        const first = buttons[0];
+        const last = buttons[buttons.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+      document.addEventListener("keydown", handleKey);
+      // 关闭或卸载抽屉时释放监听，并把焦点还给入口。
+      return () => {
+        document.removeEventListener("keydown", handleKey);
+        navigationTrigger.current?.focus();
+      };
+    },
+    [mobile, navigationOpen],
+  );
+
+  // 打开手机端会话导航。
+  function openNavigation() { setNavigationOpen(true); }
+  // 关闭手机端会话导航，不改变当前会话。
+  function closeNavigation() { setNavigationOpen(false); }
+  // 从会话导航进入改密页，并关闭手机抽屉。
+  function openPasswordScreen() { setNavigationOpen(false); setScreen("password"); }
+  // 返回聊天工作区。
+  function returnToChat() { setScreen("chat"); }
 
   // 当前会话最多有一条正在生成的回答。
   const generating = conversation?.messages.find(
@@ -97,8 +181,9 @@ export function App() {
     [generatingId, conversationId],
   );
 
-  // 切换时隔离旧响应与附件，避免过期请求覆盖当前会话。
+  // 切换时关闭手机导航并隔离旧响应与附件，避免过期请求覆盖当前会话。
   async function selectConversation(id: string) {
+    setNavigationOpen(false);
     const current = ++selection.current;
     activeId.current = id;
     localStorage.setItem("active-conversation", id);
@@ -152,6 +237,7 @@ export function App() {
     function watchSessionExpiry() {
       // 会话失效时清空账号并回到用户登录页。
       function handleExpired() {
+        setNavigationOpen(false);
         setUser(null);
         setScreen("chat");
       }
@@ -284,6 +370,7 @@ export function App() {
     } catch {
       /* 即使网络失败，也回到未登录界面，由下一次请求确认会话状态。 */
     } finally {
+      setNavigationOpen(false);
       activeId.current = null;
       selection.current += 1;
       localStorage.removeItem("active-conversation");
@@ -318,10 +405,11 @@ export function App() {
     setDraft(event.target.value);
   }
 
-  // Enter 发送、Shift+Enter 换行，中文输入法组合输入期间保持原行为。
+  // 桌面 Enter 发送、Shift+Enter 换行；触屏保留回车换行，组合输入不触发发送。
   function composeKey(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (
       event.key === "Enter" &&
+      !window.matchMedia("(pointer: coarse)").matches &&
       !event.shiftKey &&
       !event.nativeEvent.isComposing
     ) {
@@ -526,13 +614,23 @@ export function App() {
         forced={false}
         onChanged={handlePasswordChanged}
         onLogout={logout}
-        onCancel={() => setScreen("chat")}
+        onCancel={returnToChat}
       />
     );
   }
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      {mobile && navigationOpen && <button className="navigation-backdrop" aria-label="关闭会话列表" tabIndex={-1} onClick={closeNavigation} />}
+      <aside
+        id="conversation-navigation"
+        ref={navigation}
+        className={`sidebar ${navigationOpen ? "is-open" : ""}`}
+        inert={mobile && !navigationOpen}
+        role={mobile ? "dialog" : undefined}
+        aria-modal={mobile && navigationOpen ? true : undefined}
+        aria-label="会话导航"
+      >
+        <button className="navigation-close" type="button" aria-label="收起会话列表" onClick={closeNavigation}>×</button>
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
             ✳
@@ -561,7 +659,7 @@ export function App() {
         <div className="sidebar-bottom">
           <div className="user-menu">
             <span className="user-name">{user.username}</span>
-            <button className="logout-button" onClick={() => setScreen("password")}>
+            <button className="logout-button" onClick={openPasswordScreen}>
               修改密码
             </button>
             <button className="logout-button" onClick={logout}>
@@ -574,9 +672,10 @@ export function App() {
           </div>
         </div>
       </aside>
-      <main className="main-panel">
+      <main className="main-panel" inert={mobile && navigationOpen}>
         <header className="topbar">
           <div>
+            <button ref={navigationTrigger} className="navigation-toggle" type="button" aria-label="打开会话列表" aria-expanded={navigationOpen} aria-controls="conversation-navigation" onClick={openNavigation}>☰</button>
             <h1>个人对话空间</h1>
             <span className="topbar-divider">/</span>
             <span className="topbar-subtitle">日常、灵感与思考</span>
@@ -655,7 +754,8 @@ export function App() {
                 />
                 <div className="composer-bottom">
                   <span>
-                    文字对话 <i>·</i> Shift + Enter 换行
+                    <span className="desktop-composer-hint">文字对话 <i>·</i> Shift + Enter 换行</span>
+                    <span className="mobile-composer-hint">回车换行 · 点击箭头发送</span>
                   </span>
                   {activeRun ? (
                     <button type="button" className="stop-button" data-action="stop" data-message={activeRun.id} onClick={changeRun} disabled={changingRun}>
