@@ -53,29 +53,55 @@ export function App() {
   const [attachmentReset, setAttachmentReset] = useState(0);
   const activeId = useRef<string | null>(null);
   const selection = useRef(0);
-  const bottom = useRef<HTMLDivElement>(null);
+  const chatScroll = useRef<HTMLDivElement>(null);
+  const draftInput = useRef<HTMLTextAreaElement>(null);
   const followLatest = useRef(true);
   const [showLatest, setShowLatest] = useState(false);
   const composer = useRef<HTMLFormElement>(null);
 
   useEffect(
-    // 使用可视视口高度，让手机软键盘弹出后输入区仍处于可见范围。
-    function watchVisibleHeight() {
+    // 手机聊天区跟随可视视口高度和偏移，阻止软键盘把整个文档推离屏幕。
+    function watchVisibleViewport() {
+      if (!mobile || !user || user.must_change_password || screen !== "chat") return;
       const viewport = window.visualViewport;
-      // 缩放时保留正常布局，只对未缩放的可视区域更新高度。
-      function updateHeight() {
-        if (!viewport || viewport.scale !== 1) return;
-        document.documentElement.style.setProperty("--workspace-height", `${viewport.height}px`);
+      const root = document.documentElement;
+      let frame = 0;
+      root.classList.add("chat-workspace-open");
+      // 同步键盘动画和浏览器平移；保持原有跟随状态，不打断历史阅读。
+      function updateViewport() {
+        frame = 0;
+        if (viewport && viewport.scale !== 1) return;
+        const height = viewport?.height ?? window.innerHeight;
+        root.style.setProperty("--workspace-height", `${height}px`);
+        root.style.setProperty("--workspace-top", `${viewport?.offsetTop ?? 0}px`);
+        root.classList.toggle("chat-keyboard-open", window.innerHeight - height > 120);
+        if (followLatest.current) scrollToLatest();
       }
-      updateHeight();
-      viewport?.addEventListener("resize", updateHeight);
-      // 卸载时清除视口监听和工作区专属高度。
+      // 同一帧的 resize、scroll 和输入焦点变化合并处理，避免布局抖动。
+      function scheduleViewportUpdate() {
+        if (!frame) frame = requestAnimationFrame(updateViewport);
+      }
+      updateViewport();
+      viewport?.addEventListener("resize", scheduleViewportUpdate);
+      viewport?.addEventListener("scroll", scheduleViewportUpdate);
+      window.addEventListener("resize", scheduleViewportUpdate);
+      // 输入区换行或附件托盘变化后，仅在原本跟随最新消息时重新贴底。
+      const observer = new ResizeObserver(scheduleViewportUpdate);
+      if (chatScroll.current) observer.observe(chatScroll.current);
+      if (composer.current) observer.observe(composer.current);
+      // 离开聊天页时恢复普通文档滚动，保留登录及改密页的自然滚动行为。
       return () => {
-        viewport?.removeEventListener("resize", updateHeight);
-        document.documentElement.style.removeProperty("--workspace-height");
+        cancelAnimationFrame(frame);
+        observer.disconnect();
+        viewport?.removeEventListener("resize", scheduleViewportUpdate);
+        viewport?.removeEventListener("scroll", scheduleViewportUpdate);
+        window.removeEventListener("resize", scheduleViewportUpdate);
+        root.classList.remove("chat-workspace-open", "chat-keyboard-open");
+        root.style.removeProperty("--workspace-height");
+        root.style.removeProperty("--workspace-top");
       };
     },
-    [],
+    [mobile, user?.id, user?.must_change_password, screen],
   );
 
   useEffect(
@@ -286,7 +312,7 @@ export function App() {
   useEffect(
     /** 仅在用户停留在底部时跟随流式回答，保留上滑后的阅读位置。 */
     function revealLatestMessage() {
-      if (followLatest.current) bottom.current?.scrollIntoView({ block: "end" });
+      if (followLatest.current) scrollToLatest();
     },
     [conversation, pending],
   );
@@ -299,11 +325,17 @@ export function App() {
     setShowLatest(!nearBottom);
   }
 
-  /** 用户明确请求最新内容时恢复跟随并定位底部，无输入或返回值。 */
+  // 仅滚动消息容器，避免 scrollIntoView 连带滚动手机浏览器的文档和视口。
+  function scrollToLatest() {
+    const element = chatScroll.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }
+
+  /** 用户明确请求最新内容时恢复跟随并定位消息容器底部。 */
   function returnToLatest() {
     followLatest.current = true;
     setShowLatest(false);
-    bottom.current?.scrollIntoView({ block: "end" });
+    scrollToLatest();
   }
 
   // 清理后刷新来源；详情只回写发起时仍选中的会话，切换或重新选择后的旧响应失效。
@@ -325,8 +357,12 @@ export function App() {
       if (activeId.current === id && selection.current === selected) setConversation(detail);
     } else { activeId.current = null; selection.current += 1; setConversation(null); localStorage.removeItem("active-conversation"); }
   }
-  // 当前会话删除需先呈现包含更正和附件来源的完整影响。
-  function deleteConversation() { if (activeId.current) setDeleteTarget({ path: `/conversations/${activeId.current}`, label: '会话' }); }
+  // 先关闭手机导航，再展示当前会话的删除确认，避免对话框被抽屉遮挡。
+  function deleteConversation() {
+    if (!activeId.current) return;
+    setNavigationOpen(false);
+    setDeleteTarget({ path: `/conversations/${activeId.current}`, label: '会话' });
+  }
   // 附件按独立上传身份预览，绝不通过名称推断删除范围。
   function deleteAttachment(id: string, name: string) { if (activeId.current) setDeleteTarget({ path: `/conversations/${activeId.current}/attachments/${id}`, label: `附件 ${name}` }); }
   // 关闭预览不执行任何删除或保留授权。
@@ -400,9 +436,30 @@ export function App() {
     setScreen("chat");
   }
 
-  // 更新当前输入草稿。
+  // 更新草稿并让输入框随内容增高；长草稿在输入框内部滚动。
   function editDraft(event: ChangeEvent<HTMLTextAreaElement>) {
     setDraft(event.target.value);
+    resizeDraft(event.currentTarget);
+  }
+
+  // 以实际内容测量输入高度，最多占用 120px，给消息区保留阅读空间。
+  function resizeDraft(element: HTMLTextAreaElement) {
+    element.style.height = "auto";
+    element.style.height = `${Math.min(element.scrollHeight, 120)}px`;
+  }
+
+  useEffect(
+    // 发送清空或失败恢复草稿时同步输入框高度。
+    function syncDraftHeight() {
+      if (draftInput.current) resizeDraft(draftInput.current);
+    },
+    [draft, user?.id, screen, mobile],
+  );
+
+  // 触屏点击发送或停止时保留输入焦点，避免键盘反复收起和弹出。
+  function preserveComposerFocus(event: React.PointerEvent<HTMLDivElement>) {
+    const target = event.target as HTMLElement;
+    if (event.pointerType === "touch" && document.activeElement === draftInput.current && target.closest("button")) event.preventDefault();
   }
 
   // 桌面 Enter 发送、Shift+Enter 换行；触屏保留回车换行，组合输入不触发发送。
@@ -657,6 +714,7 @@ export function App() {
           )}
         </nav>
         <div className="sidebar-bottom">
+          {mobile && conversation && <button className="sidebar-delete-conversation" onClick={deleteConversation}>删除当前会话</button>}
           <div className="user-menu">
             <span className="user-name">{user.username}</span>
             <button className="logout-button" onClick={openPasswordScreen}>
@@ -689,9 +747,9 @@ export function App() {
         )}
         <SourceDeletionPending revision={sourceRevision} onChanged={refreshSources} />
         {deleteTarget && <SourceDeletion key={deleteTarget.path} target={deleteTarget} onClose={closeDeletion} onChanged={refreshSources} />}
-        {screen === 'chat' && conversation && <button className="delete-conversation" onClick={deleteConversation}>删除当前会话</button>}
+        {!mobile && conversation && <button className="delete-conversation" onClick={deleteConversation}>删除当前会话</button>}
         <div className="chat-layout">
-            <div className="chat-scroll" onScroll={trackReadingPosition}>
+            <div className="chat-scroll" ref={chatScroll} onScroll={trackReadingPosition}>
               <div className="chat-content">
                 {loading ? (
                   <div className="empty-state">
@@ -734,7 +792,6 @@ export function App() {
                     )}
                   </div>
                 )}
-                <div ref={bottom} />
               </div>
             </div>
             {showLatest && <button type="button" className="return-to-latest" onClick={returnToLatest}>↓ 回到最新</button>}
@@ -743,6 +800,7 @@ export function App() {
               <form className="composer" ref={composer} onSubmit={send}>
                 <AttachmentPanel revision={sourceRevision} resetToken={attachmentReset} onDelete={deleteAttachment} conversationId={activeId.current} disabled={!!pending || !!generating || changingRun || creating || loading} />
                 <textarea
+                  ref={draftInput}
                   aria-label="消息"
                   placeholder="把你的想法写在这里…"
                   value={draft}
@@ -750,9 +808,9 @@ export function App() {
                   onKeyDown={composeKey}
                   maxLength={32000}
                   disabled={loading || creating}
-                  rows={2}
+                  rows={mobile ? 1 : 2}
                 />
-                <div className="composer-bottom">
+                <div className="composer-bottom" onPointerDown={preserveComposerFocus}>
                   <span>
                     <span className="desktop-composer-hint">文字对话 <i>·</i> Shift + Enter 换行</span>
                     <span className="mobile-composer-hint">回车换行 · 点击箭头发送</span>

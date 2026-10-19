@@ -11,8 +11,9 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test && playwright test --config playwright.images.config.ts && playwright test --config playwright.search.config.ts && playwright test --config playwright.source-deletion.config.ts",
+    "test:e2e": "playwright test && playwright test --config playwright.images.config.ts && playwright test --config playwright.search.config.ts && playwright test --config playwright.source-deletion.config.ts && playwright test --config playwright.mobile.config.ts",
     "test:images": "playwright test --config playwright.images.config.ts",
+    "test:mobile": "playwright test --config playwright.mobile.config.ts",
     "test:search": "playwright test --config playwright.search.config.ts",
     "test:source-deletion": "playwright test --config playwright.source-deletion.config.ts"
   },

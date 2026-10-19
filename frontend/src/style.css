@@ -1204,9 +1204,13 @@ td {
 
 /* 手机和平板采用全宽聊天区；抽屉保留会话标题和账号操作。 */
 @media (max-width: 800px) {
+  html.chat-workspace-open,
+  .chat-workspace-open body { overflow: hidden; overscroll-behavior: none; }
+  .chat-workspace-open body { position: fixed; inset: 0; width: 100%; }
+  .app-shell { position: fixed; top: var(--workspace-top, 0px); left: 0; right: 0; }
   .sidebar {
     position: fixed;
-    inset: 0 auto 0 0;
+    inset: var(--workspace-top, 0px) auto auto 0;
     z-index: 20;
     width: min(320px, calc(100% - 48px));
     height: var(--workspace-height, 100dvh);
@@ -1216,7 +1220,7 @@ td {
     box-shadow: 12px 0 40px #30383120;
   }
   .sidebar.is-open { visibility: visible; transform: translateX(0); }
-  .navigation-backdrop { display: block; position: fixed; inset: 0; z-index: 19; background: #27312c66; }
+  .navigation-backdrop { display: block; position: fixed; top: var(--workspace-top, 0px); left: 0; right: 0; height: var(--workspace-height, 100dvh); z-index: 19; background: #27312c66; }
   .navigation-toggle,
   .navigation-close { display: grid; place-items: center; width: 44px; height: 44px; flex: none; border-radius: 10px; font-size: 22px; }
   .navigation-close { position: absolute; top: max(12px, env(safe-area-inset-top)); right: 8px; }
@@ -1226,14 +1230,15 @@ td {
   .topbar h1 { font-size: 14px; }
   .user-pill { max-width: 32%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .main-panel { width: 100%; min-height: 0; }
-  .chat-scroll { overscroll-behavior-y: contain; }
+  .chat-scroll { overscroll-behavior-y: contain; overflow-anchor: none; -webkit-overflow-scrolling: touch; }
   .chat-content { padding: 16px max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left)); }
   .composer-wrap { flex: none; padding: 8px max(12px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
-  .composer { padding: 12px; }
-  .composer textarea { font-size: 16px; line-height: 1.6; }
+  .composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 0 8px; padding: 10px 12px; }
+  .composer .attachment-composer { grid-column: 1 / -1; margin-bottom: 6px; }
+  .composer textarea { min-height: 44px; max-height: 120px; padding: 9px 0; font-size: 16px; line-height: 1.6; overflow-y: auto; }
   .composer-note { font-size: 10px; margin-top: 6px; }
-  .composer-bottom { gap: 8px; margin-top: 6px; }
-  .composer-bottom > span { font-size: 10px; }
+  .composer-bottom { gap: 0; margin-top: 0; }
+  .composer-bottom > span { display: none; }
   .desktop-composer-hint { display: none; }
   .mobile-composer-hint { display: inline; }
   .send-button { width: 44px; height: 44px; flex: none; }
@@ -1254,6 +1259,7 @@ td {
   .message.user .message-content { padding: 10px 14px; }
   .message-attachment { flex-wrap: wrap; }
   .delete-conversation { min-height: 36px; margin: 0 16px; font-size: 12px; }
+  .sidebar-delete-conversation { width: 100%; min-height: 44px; margin-bottom: 8px; border-radius: 8px; text-align: left; padding: 8px 10px; color: #8b5b50; font-size: 12px; }
   .global-error, .source-delete-pending { overflow-wrap: anywhere; }
   .source-delete-dialog { flex: 0 1 auto; min-height: 0; max-height: 50dvh; margin: 8px 12px; padding: 16px; overflow-wrap: anywhere; }
   .source-delete-dialog button, .source-delete-pending button { min-height: 44px; }
@@ -1276,6 +1282,13 @@ td {
   .admin-user > div { min-width: 0; }
   .admin-message { overflow-wrap: anywhere; }
   .settings-page { width: 100%; min-width: 0; }
+  .chat-keyboard-open .composer-wrap { padding-bottom: 8px; }
+  .chat-keyboard-open .composer-note,
+  .chat-keyboard-open .attachment-hint { display: none; }
+  .chat-keyboard-open .topbar { min-height: 52px; padding-top: 0; }
+  .chat-keyboard-open .attachment-tray { max-height: 72px; }
+  .chat-keyboard-open .composer textarea { max-height: 96px; }
+  .return-to-latest { position: static; align-self: center; margin: 0 0 8px; flex: none; }
 }
 
 @media (max-width: 540px) {
