@@ -10,7 +10,7 @@
 
 | 检查 | 结果 |
 | --- | --- |
-| Python 完整测试 `uv run pytest -q` | 100 passed |
+| Python 完整测试 `uv run pytest -q` | 101 passed |
 | Python 类型检查 `uv run mypy` | 通过，98 个源文件 |
 | 前端类型检查 `pnpm typecheck` | 通过 |
 | 前端构建 `pnpm build` | 通过 |

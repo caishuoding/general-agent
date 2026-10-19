@@ -198,4 +198,4 @@ Completion: implementation complete (2026-10-19); real cloud HTTPS deployment pe
 
 2026-10-19：用户确认多账号、管理员预创建、只读跨账号查看、全局配置、数据备份后清空和 7 天登录会话等决策。规格完成后进入实现；公网初始管理员为 `admin / 123456`，首次改密前只允许本机或 SSH 隧道登录。
 
-2026-10-19：规格已实现并通过 100 项 Python 测试、mypy、前端类型检查和 14 项浏览器测试。真实云服务器的 Caddy 证书申请、HTTPS 检查和旧数据卷恢复演练仍待部署时验收；验收记录见 [登录验收](../docs/verification-login.md)。
+2026-10-19：规格已实现并通过 101 项 Python 测试、mypy、前端类型检查和 14 项浏览器测试。真实云服务器的 Caddy 证书申请、HTTPS 检查和旧数据卷恢复演练仍待部署时验收；验收记录见 [登录验收](../docs/verification-login.md)。
