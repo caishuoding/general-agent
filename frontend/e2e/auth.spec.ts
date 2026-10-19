@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { loginAdmin } from "./auth";
 
+// 验证未登录访问和统一登录错误提示。
 test("未登录时只显示登录页，错误密码显示统一提示", async ({ page, context }) => {
   await context.clearCookies();
   await page.goto("/");
@@ -12,6 +13,7 @@ test("未登录时只显示登录页，错误密码显示统一提示", async ({
   await expect(page.getByText("用户名或密码错误。")).toBeVisible();
 });
 
+// 验证管理员登录、聊天界面和主动退出。
 test("管理员可以登录并退出", async ({ page }) => {
   await loginAdmin(page);
   await page.goto("/");
@@ -20,6 +22,7 @@ test("管理员可以登录并退出", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "登录" })).toBeVisible();
 });
 
+// 验证新建账号首次登录必须先完成改密。
 test("新账号首次登录显示强制改密页", async ({ page }) => {
   await loginAdmin(page);
   const created = await page.request.post("/api/admin/users", {
@@ -43,4 +46,11 @@ test("新账号首次登录显示强制改密页", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "个人对话空间" })).toBeVisible();
   await expect(page.getByRole("button", { name: "设置", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "管理员后台", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "修改密码" }).click();
+  await expect(page.getByRole("heading", { name: "修改密码" })).toBeVisible();
+  await page.getByLabel("当前密码").fill("browser-user-password");
+  await page.getByLabel("新密码", { exact: true }).fill("browser-user-password-2");
+  await page.getByLabel("再次输入新密码").fill("browser-user-password-2");
+  await page.getByRole("button", { name: "保存新密码" }).click();
+  await expect(page.getByRole("heading", { name: "个人对话空间" })).toBeVisible();
 });

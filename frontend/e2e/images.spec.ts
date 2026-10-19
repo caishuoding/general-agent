@@ -1,6 +1,7 @@
 import { loginAdmin } from "./auth";
 import { test, expect } from '@playwright/test';
 
+// 每个用例先通过 API 登录管理员。
 test.beforeEach(async ({ page }) => {
   await loginAdmin(page);
 });

@@ -1,10 +1,12 @@
 import { loginAdmin } from "./auth";
 import { expect, test } from "@playwright/test";
 
+// 每个用例先通过 API 登录管理员。
 test.beforeEach(async ({ page }) => {
   await loginAdmin(page);
 });
 
+// 验证管理员后台的账号创建、停用和临时密码重置。
 test("管理员可以在后台创建、停用和重置账号", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "个人对话空间" })).toBeVisible();

@@ -26,7 +26,7 @@ import { AdminPanel } from "./AdminPanel";
 import { LoginScreen, PasswordChangeScreen } from "./AuthScreens";
 import { SettingsPanel } from "./SettingsPanel";
 
-type Screen = "chat" | "settings" | "admin";
+type Screen = "chat" | "settings" | "admin" | "password";
 
 // 展示会话、消息内附件与来源删除状态，并隔离过期异步响应。
 export function App() {
@@ -306,6 +306,24 @@ export function App() {
     }
   }
 
+  // 登录成功后保存当前账号并触发工作区加载。
+  function handleAuthenticated(next: AuthUser) {
+    setError("");
+    setUser(next);
+  }
+
+  // 强制改密成功后更新当前账号状态。
+  function handlePasswordChanged(next: AuthUser) {
+    setError("");
+    setUser(next);
+    setScreen("chat");
+  }
+
+  // 打开管理员后台页面。
+  function openAdmin() {
+    setScreen("admin");
+  }
+
   // 更新当前输入草稿。
   function editDraft(event: ChangeEvent<HTMLTextAreaElement>) {
     setDraft(event.target.value);
@@ -499,10 +517,7 @@ export function App() {
   if (!user) {
     return (
       <LoginScreen
-        onAuthenticated={(next) => {
-          setError("");
-          setUser(next);
-        }}
+        onAuthenticated={handleAuthenticated}
       />
     );
   }
@@ -510,11 +525,19 @@ export function App() {
     return (
       <PasswordChangeScreen
         user={user}
-        onChanged={(next) => {
-          setError("");
-          setUser(next);
-        }}
-        onLogout={() => void logout()}
+        onChanged={handlePasswordChanged}
+        onLogout={logout}
+      />
+    );
+  }
+  if (screen === "password") {
+    return (
+      <PasswordChangeScreen
+        user={user}
+        forced={false}
+        onChanged={handlePasswordChanged}
+        onLogout={logout}
+        onCancel={() => setScreen("chat")}
       />
     );
   }
@@ -552,7 +575,7 @@ export function App() {
               <button
                 className={`nav-button ${screen === "admin" ? "selected" : ""}`}
                 aria-label="管理员后台"
-                onClick={() => setScreen("admin")}
+                onClick={openAdmin}
               >
                 <span aria-hidden="true">▦</span>管理员后台
               </button>
@@ -567,7 +590,10 @@ export function App() {
           )}
           <div className="user-menu">
             <span className="user-name">{user.username}</span>
-            <button className="logout-button" onClick={() => void logout()}>
+            <button className="logout-button" onClick={() => setScreen("password")}>
+              修改密码
+            </button>
+            <button className="logout-button" onClick={logout}>
               退出
             </button>
           </div>

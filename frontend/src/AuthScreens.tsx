@@ -10,6 +10,8 @@ type ChangePasswordProps = {
   user: AuthUser;
   onChanged: (user: AuthUser) => void;
   onLogout: () => void;
+  forced?: boolean;
+  onCancel?: () => void;
 };
 
 // 渲染用户名密码登录页，并处理统一登录错误。
@@ -80,6 +82,8 @@ export function PasswordChangeScreen({
   user,
   onChanged,
   onLogout,
+  forced = true,
+  onCancel,
 }: ChangePasswordProps) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -116,10 +120,12 @@ export function PasswordChangeScreen({
     <main className="auth-shell">
       <section className="auth-card" aria-labelledby="change-password-title">
         <div className="auth-brand" aria-hidden="true">✳</div>
-        <p className="auth-kicker">首次登录</p>
-        <h1 id="change-password-title">设置新密码</h1>
+        <p className="auth-kicker">{forced ? "首次登录" : "账号安全"}</p>
+        <h1 id="change-password-title">{forced ? "设置新密码" : "修改密码"}</h1>
         <p className="auth-description">
-          {user.username}，请先把临时密码替换为至少 10 个字符的新密码。
+          {forced
+            ? `${user.username}，请先把临时密码替换为至少 10 个字符的新密码。`
+            : `${user.username}，请输入当前密码并设置至少 10 个字符的新密码。`}
         </p>
         <form className="auth-form" onSubmit={submit}>
           <label className="auth-field">
@@ -156,9 +162,15 @@ export function PasswordChangeScreen({
           <button className="auth-submit" type="submit" disabled={submitting}>
             {submitting ? "正在保存…" : "保存新密码"}
           </button>
-          <button className="auth-link" type="button" onClick={onLogout}>
-            退出登录
-          </button>
+          {forced ? (
+            <button className="auth-link" type="button" onClick={onLogout}>
+              退出登录
+            </button>
+          ) : (
+            <button className="auth-link" type="button" onClick={onCancel}>
+              返回
+            </button>
+          )}
         </form>
       </section>
     </main>

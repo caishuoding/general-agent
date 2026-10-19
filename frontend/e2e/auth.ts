@@ -24,4 +24,3 @@ export async function loginAdmin(page: Page) {
     if (!changed.ok()) throw new Error("浏览器测试管理员首次改密失败");
   }
 }
-
