@@ -27,8 +27,8 @@ def test_public_memory_topics_do_not_read_private_long_term_memory(database_url:
             embeddings.append(payload)
             return recall_provider(request)
         if request.url.host == 'search.example':
-            queries.append(payload['search_query'])
-            return httpx.Response(200, json={'search_result': []})
+            queries.append(payload['query'])
+            return httpx.Response(200, json={'results': []})
         messages = tool_messages(payload)
         if messages:
             return reply(payload, '公开主题回答。')

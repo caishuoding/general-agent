@@ -18,14 +18,18 @@ from general_agent.prompts import tool_result_fragment, tool_turn_fragment
 
 ToolExecutor = Callable[[MemoryCheckpoint, str, dict[str, Any], StoredSettings], dict[str, Any]]
 LOGGER = logging.getLogger(__name__)
+DOCUMENT_TOOLS = {'search_documents', 'read_document'}
 
 
 class AgentToolGraph:
     """构建并运行 LangGraph 工具循环，同时复用现有业务工具和幂等检查点。"""
 
-    def __init__(self, maximum_rounds: int = 12) -> None:
-        """设置单次执行允许的最大模型决策轮数，防止工具循环失控。"""
+    def __init__(self, maximum_rounds: int = 12, maximum_tool_retries: int = 5) -> None:
+        """设置回答轮数和每个工具的重试上限；重试次数不包含首次失败调用。"""
+        if maximum_rounds < 1 or maximum_tool_retries < 0:
+            raise ValueError("模型轮数必须为正数，工具重试次数不能为负数。")
         self.maximum_rounds = maximum_rounds
+        self.maximum_tool_retries = maximum_tool_retries
 
     def run(
         self,
@@ -40,11 +44,12 @@ class AgentToolGraph:
         context_fragments: list[str] | None = None,
         assistant_message_id: UUID | None = None,
         on_content: Callable[[str], None] | None = None,
+        on_tool_context: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None] | None = None,
     ) -> AgentState:
-        """运行统一流式工具循环，边接收文字边输出，工具调用分片累积后执行。"""
+        """运行工具循环；文档工具每轮最多执行五次，其他工具保持失败重试合同。"""
 
         def call_model(state: AgentState) -> dict[str, Any]:
-            """组装当前原始消息并调用模型生成工具请求或最终回答。"""
+            """组装当前消息并隐藏耗尽额度的工具，所有工具选择均由模型决定。"""
             index = state["round_index"]
             if index >= self.maximum_rounds:
                 raise ValueError("工具调用达到本次执行上限；已完成的操作保留，请缩小范围后继续。")
@@ -65,7 +70,10 @@ class AgentToolGraph:
                     settings,
                     cast(list[ModelMessage], model_messages),
                     assistant_message_id=assistant_message_id,
-                    tools=tools,
+                    tools=[tool for tool in tools
+                           if (state['document_calls'].get(tool['function']['name'], 0) < 5
+                               if tool['function']['name'] in DOCUMENT_TOOLS else
+                               state['tool_failures'].get(tool['function']['name'], 0) <= self.maximum_tool_retries)] or None,
                 ):
                     if chunk.content:
                         content.append(chunk.content)
@@ -88,7 +96,7 @@ class AgentToolGraph:
                 for call in tool_calls:
                     if not call["id"] or not call["function"]["name"]:
                         raise ValueError("模型返回了不完整的工具调用。")
-                    if not isinstance(json.loads(call["function"]["arguments"]), dict):
+                    if call['function']['name'] not in DOCUMENT_TOOLS and not isinstance(json.loads(call["function"]["arguments"]), dict):
                         raise ValueError("模型返回了无效的工具参数。")
                 reply = {
                     "role": "assistant",
@@ -113,20 +121,79 @@ class AgentToolGraph:
             return "execute_tools" if state["tool_calls"] else "finish"
 
         def execute_tools(state: AgentState) -> dict[str, Any]:
-            """顺序执行模型请求的白名单工具，并把结构化结果回传给下一模型节点。"""
+            """逐个检查文档调用限额及其他工具重试额；读取预算包含同批已产生的工具结果。"""
             tool_messages: list[dict[str, Any]] = []
+            failures = dict(state["tool_failures"])
+            document_calls = dict(state['document_calls'])
+            known_tools = {tool["function"]["name"] for tool in tools}
             for call in state["tool_calls"]:
+                result: dict[str, Any] | None = None
                 function = call["function"]
-                arguments = json.loads(function["arguments"])
+                name = function["name"]
+                try:
+                    arguments = json.loads(function['arguments'])
+                except ValueError:
+                    if name not in DOCUMENT_TOOLS:
+                        raise
+                    arguments = None
+                if name in DOCUMENT_TOOLS:
+                    if name not in known_tools:
+                        result = {'error': '未知工具，不允许执行。'}
+                    elif document_calls.get(name, 0) >= 5:
+                        result = {'error': '该工具本轮最多调用五次，已达到调用上限。', 'call_limit': 5, 'call_exhausted': True}
+                    else:
+                        document_calls[name] = document_calls.get(name, 0) + 1
+                        try:
+                            if not isinstance(arguments, dict):
+                                raise ValueError('工具参数必须是有效的 JSON 对象。')
+                            if name == 'read_document' and on_tool_context is not None:
+                                on_tool_context([*state['messages'], *tool_messages], tools)
+                            result = execute_tool(checkpoint, name, arguments, settings)
+                        except (ValueError, LookupError, ModelFailure) as error:
+                            result = {'error': str(error)}
+                        # 文档读取不复用历史工具缓存，避免到期或删除后重放旧正文。
+                        result = {**result, 'call_count': document_calls[name], 'call_limit': 5,
+                                  'call_exhausted': document_calls[name] >= 5}
+                    tool_messages.append({'role': 'tool', 'tool_call_id': call['id'],
+                                          'content': json.dumps(result, ensure_ascii=False)})
+                    continue
                 tool_key = checkpoint.key("tools:result", [settings.revision, state["round_index"] - 1, call])
-                result = checkpoint.get(tool_key)
+                attempt_key = checkpoint.key("tools:attempt", [str(assistant_message_id), tool_key])
+                result = checkpoint.get(attempt_key)
                 if result is None:
-                    try:
-                        result = execute_tool(checkpoint, function["name"], arguments, settings)
-                    except (ValueError, LookupError, ModelFailure) as error:
-                        # 业务拒绝也作为工具观察返回，让模型有机会修正参数或停止操作。
-                        result = {"error": str(error)}
-                    checkpoint.put(tool_key, result)
+                    cached = checkpoint.get(tool_key)
+                    if cached is not None and "error" not in cached and cached.get("status") != "failed":
+                        result = cached
+                exhausted = failures.get(name, 0) > self.maximum_tool_retries
+                if exhausted:
+                    # 即使模型忽略可用工具列表，后端也不得继续执行已禁用工具。
+                    result = {"error": "该工具已达到最大重试次数，本次回答中已禁用。"}
+                elif result is None:
+                    if name not in known_tools:
+                        result = {"error": "未知工具，不允许执行。"}
+                    else:
+                        try:
+                            result = execute_tool(checkpoint, name, arguments, settings)
+                        except (ValueError, LookupError, ModelFailure) as error:
+                            result = {"error": str(error)}
+                if name in known_tools and ("error" in result or result.get("status") == "failed"):
+                    if not exhausted:
+                        failures[name] = failures.get(name, 0) + 1
+                    exhausted = failures.get(name, 0) > self.maximum_tool_retries
+                    result = {
+                        **result,
+                        "retry_count": max(0, failures[name] - 1),
+                        "retry_limit": self.maximum_tool_retries,
+                        "retry_exhausted": exhausted,
+                    }
+                    if exhausted:
+                        result["message"] = (
+                            "该工具已达到最大重试次数，本次回答中已禁用。"
+                            "请使用已有结果回答，或选择其他可用工具。"
+                        )
+                # 失败只属于当前回答，成功步骤跨回答重试复用，避免丢失已观察的记忆目标。
+                failed = "error" in result or result.get("status") == "failed"
+                checkpoint.put(attempt_key if failed else tool_key, result)
                 tool_messages.append({
                     "role": "tool",
                     "tool_call_id": call["id"],
@@ -137,6 +204,8 @@ class AgentToolGraph:
                 "messages": [*state["messages"], *tool_messages],
                 "tool_calls": [],
                 "used_tools": True,
+                "tool_failures": failures,
+                "document_calls": document_calls,
             }
 
         def finish(state: AgentState) -> dict[str, Any]:
@@ -166,6 +235,8 @@ class AgentToolGraph:
             "tool_calls": [],
             "round_index": 0,
             "used_tools": False,
+            "tool_failures": {},
+            "document_calls": {},
             "answer": None,
             "handled": False,
         }

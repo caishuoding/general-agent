@@ -1,6 +1,7 @@
 """为对话智能体注册真实记忆工具，执行前核对观察结果、版本和当前来源。"""
 
 from dataclasses import dataclass
+import json
 from collections.abc import Callable
 from typing import Any, cast
 from uuid import UUID, uuid5
@@ -16,8 +17,11 @@ from general_agent.memory.automatic import AutomaticMemory, MemoryCheckpoint
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.infrastructure.provider import ModelMessage
 from general_agent.prompts import TOOL_DESCRIPTIONS
-from general_agent.search.service import SearchService, SearchWebInput, search_web_tool
+from general_agent.search.service import FetchWebInput, SearchService, SearchWebInput, search_web_tool
 from general_agent.agent.graph import AgentToolGraph
+from general_agent.attachments.service import AttachmentService
+from general_agent.attachments.tools import document_tools
+from general_agent.infrastructure.tokens import TokenCounter
 
 
 class SearchMemoryInput(BaseModel):
@@ -63,17 +67,18 @@ def memory_tools() -> list[dict[str, Any]]:
 
 
 def agent_tools() -> list[dict[str, Any]]:
-    """返回同一工具循环中可用的记忆与联网搜索工具。"""
-    return [*memory_tools(), search_web_tool()]
+    """返回统一循环的记忆、网页和会话文档工具，不规定调用顺序。"""
+    return [*memory_tools(), search_web_tool(), search_web_tool("fetch_web"), *document_tools()]
 
 
 class MemoryTools:
     """隐藏记忆与搜索工具协议、版本检查及可恢复执行。"""
 
-    def __init__(self, memory: MemoryService, automatic: AutomaticMemory, search: SearchService | None = None) -> None:
-        """绑定记忆模块与搜索服务，工具只能通过各自业务边界访问真实数据。"""
+    def __init__(self, memory: MemoryService, automatic: AutomaticMemory, search: SearchService | None = None, attachments: AttachmentService | None = None) -> None:
+        """绑定记忆、搜索和附件业务边界，兼容没有附件依赖的独立工具测试。"""
         self.memory, self.automatic, self.web_search = memory, automatic, search
         self.graph = AgentToolGraph()
+        self.attachments = attachments
 
     def add(self, checkpoint: MemoryCheckpoint, arguments: dict[str, Any], settings: StoredSettings) -> dict[str, Any]:
         """从已持久化的少量会话构造 Mem0 输入；工具参数不能伪造记忆正文，返回实际处理状态。"""
@@ -125,23 +130,35 @@ class MemoryTools:
         arguments: dict[str, Any],
         settings: StoredSettings,
         source_attachment_ids: list[UUID] | None = None,
+        document_budget: int = 0,
+        token_counter: TokenCounter | None = None,
     ) -> dict[str, Any]:
-        """执行白名单工具；搜索直接运行，记忆变更仍核对观察标识与版本。"""
+        """执行白名单工具；文档按服务端会话身份读取，记忆变更核对观察版本。"""
         checkpoint.guard()
+        if name in ('search_documents', 'read_document'):
+            if self.attachments is None:
+                raise ValueError('会话文档工具未配置。')
+            account_id = self.memory.account_id_for_conversation(checkpoint.conversation_id)
+            if name == 'search_documents':
+                return self.attachments.documents.search(checkpoint.conversation_id, account_id, arguments)
+            return self.attachments.documents.read(checkpoint.conversation_id, account_id, arguments,
+                                                   token_counter or TokenCounter(settings.model), document_budget)
         if name == 'add_memory':
             return self.add(checkpoint, arguments, settings)
         if name == 'search_memories':
             return self.search(checkpoint, SearchMemoryInput.model_validate(arguments).query)
-        if name == 'search_web':
+        if name in ('search_web', 'fetch_web'):
             if self.web_search is None:
                 raise ValueError('联网搜索工具未配置。')
-            query = SearchWebInput.model_validate(arguments).query
+            query = (SearchWebInput.model_validate(arguments).query if name == "search_web"
+                     else FetchWebInput.model_validate(arguments).url)
             return self.web_search.tool(
                 checkpoint.conversation_id,
                 checkpoint.message_id,
                 query,
                 checkpoint.operation,
                 source_attachment_ids,
+                kind="search" if name == "search_web" else "fetch",
             )
         if name not in ('update_memory', 'delete_memory'):
             raise ValueError('未知的工具。')
@@ -186,6 +203,33 @@ class MemoryTools:
         """运行单一流式工具循环，边输出文字边执行模型请求的工具。"""
         if self.memory.account_id_for_conversation(conversation_id) != account_id:
             raise LookupError("会话不存在。")
+        counter = TokenCounter(settings.model)
+        document_budget = 0
+
+        def update_document_budget(current_messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> None:
+            """读取前用实际模型用量和当前消息核对预算，包含图片开销及同批已返回内容。"""
+            nonlocal document_budget
+            document_budget = max(0, counter.available(settings, current_messages, tools) - 256)
+            with self.memory.database.connect() as connection:
+                usage = connection.execute(
+                    "SELECT prompt_tokens,completion_tokens FROM model_calls WHERE assistant_message_id=%s "
+                    "AND unit='chat_tokens' ORDER BY created_at DESC,id DESC LIMIT 1",
+                    (assistant_message_id,),
+                ).fetchone()
+            if usage is not None and usage['prompt_tokens'] is not None:
+                last_assistant = max((index for index, message in enumerate(current_messages)
+                                      if message['role'] == 'assistant'), default=len(current_messages))
+                appended = counter.count(json.dumps(current_messages[last_assistant:], ensure_ascii=False))
+                observed = settings.context_window_tokens - settings.output_reserve_tokens - usage['prompt_tokens'] - (usage['completion_tokens'] or 0) - appended - 768
+                document_budget = max(0, min(document_budget, observed))
+            elif any(isinstance(message.get('content'), list) and any(part.get('type') == 'file' for part in message['content'])
+                     for message in current_messages):
+                # 文件身份不能代表图片实际 Token；缺少真实用量时不能假定剩余空间。
+                document_budget = 0
+
+        def execute(current: MemoryCheckpoint, name: str, arguments: dict[str, Any], current_settings: StoredSettings) -> dict[str, Any]:
+            """把模型请求交给业务执行器，预算仅应用于原文读取，不裁剪检索切片。"""
+            return self.execute(current, name, arguments, current_settings, source_attachment_ids, document_budget, counter)
         checkpoint = MemoryCheckpoint(self.memory, message_id, conversation_id, operation)
         with self.memory.database.connect() as connection:
             previous = connection.execute('SELECT status,result FROM memory_tool_runs WHERE message_id=%s', (message_id,)).fetchone()
@@ -205,13 +249,8 @@ class MemoryTools:
             tools=agent_tools(),
             assistant_message_id=assistant_message_id,
             on_content=on_content,
-            execute_tool=lambda current, name, arguments, current_settings: self.execute(
-                current,
-                name,
-                arguments,
-                current_settings,
-                source_attachment_ids,
-            ),
+            execute_tool=execute,
+            on_tool_context=update_document_budget,
         )
         outcome = ToolOutcome(result['answer'], bool(result['used_tools']))
         with self.memory.database.connect() as connection:

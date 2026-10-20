@@ -15,6 +15,9 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-writer fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements-server.txt ./
 RUN pip install --no-cache-dir -r requirements-server.txt
 COPY backend ./backend

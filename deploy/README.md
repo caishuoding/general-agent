@@ -108,3 +108,13 @@ uv run python scripts/restore_auth_backup.py \
 - 初始管理员密码是已知引导凭据，必须在首次登录时修改；改密前应用拒绝公网登录。
 - 本期没有登录失败次数限制或账号锁定。公网暴露后应监控登录日志，必要时在 Nginx 或云防火墙增加限流。
 - `COOKIE_SECURE=true` 时，登录 Cookie 使用 `Secure`；Nginx 终止 HTTPS 后会把请求转发给应用。
+
+## 文档工具与附件有效期
+
+应用镜像通过 Dockerfile 安装 LibreOffice Writer 和 Noto CJK，Word 上传自动生成固定分页 PDF。原件和分页副本均保存在 APP_DATA_DIR/attachments，现有附件备份归档会一并覆盖。应用执行迁移 041 后在启动恢复中重建旧文字附件的原文及切片，不延长上传时计算的 30 天有效期。
+
+模型管理配置增加 context_window_tokens（默认 32768）与 output_reserve_tokens（默认 4096），应填写实际模型窗口及回答预留。原文工具按剩余预算返回，单次不超过 10000 Token；本次不引入摘要压缩或滑动窗口。
+
+可配置 DOCUMENT_CHUNK_CHARACTERS=1500、DOCUMENT_SEARCH_RESULTS=5。需要精确分词时，挂载对应模型官方 tokenizer.json，并向应用容器传入 MODEL_TOKENIZERS 的模型名到绝对路径 JSON 映射；没有对应文件时使用标记为估算的保守字符计数。分词运行库已锁定在应用 Python 依赖中。
+
+到期访问在每个读取入口被拒绝；清理每分钟重试一次，远端图片清理失败也不会恢复文件访问。已完成聊天正文继续保留。没有使用私人文件调用外部模型验证文档理解质量。

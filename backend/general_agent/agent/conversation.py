@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 import logging
-import re
 from typing import Any, Literal, TypedDict, cast
 from uuid import UUID
 
@@ -14,9 +13,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from psycopg.types.json import Jsonb
 
-from general_agent.attachments.service import AttachmentContext, AttachmentService
 from general_agent.conversation.execution import AnswerPreparation, ChatExecution
-from general_agent.infrastructure.calls import CallGateway
 from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.operations import OperationContext
 from general_agent.infrastructure.provider import ModelFailure
@@ -38,11 +35,6 @@ class ConversationResult(TypedDict):
     failure: str | None
 
 
-def memory_tool_request(content: str) -> bool:
-    """识别只应交给记忆工具判断的明确记忆操作，避免随消息附件被误当作回答资料读取。"""
-    return bool(re.search(r'(?:请)?(?:记住|忘记)|(?:更新|修改|更正|删除|查找|搜索|查询).{0,8}(?:长期)?记忆', content))
-
-
 @dataclass
 class ConversationContext:
     """向图节点提供本次执行依赖和不可持久化运行参数。"""
@@ -57,36 +49,22 @@ class ConversationContext:
     rows: list[dict[str, Any]]
     delivery: Literal["sync", "stream"]
     preparation: AnswerPreparation | None = None
-    routed_material: AttachmentContext | None = None
-    routes_prepared: bool = False
     answer: str = ""
 
 
 class ConversationGraph:
     """以一个小接口隐藏完整对话编排、输出解析和消息终态持久化。"""
 
-    def __init__(self, database: Database, calls: CallGateway, execution: ChatExecution, attachments: AttachmentService) -> None:
-        """绑定领域模块并只编译一次状态图，后续每次回答复用同一图定义。"""
+    def __init__(self, database: Database, execution: ChatExecution) -> None:
+        """编译准备上下文、模型工具循环和收尾三步流程，不预先判断用户意图。"""
         self.database = database
-        self.calls = calls
         self.execution = execution
-        self.attachments = attachments
         builder = StateGraph(ConversationState, context_schema=ConversationContext)
-        builder.add_node("route_request", self.route_request)
         builder.add_node("prepare_context", self.prepare_context)
         builder.add_node("agent", self.agent)
         builder.add_node("finalize", self.finalize)
-        builder.add_edge(START, "route_request")
-        builder.add_conditional_edges(
-            "route_request",
-            self.route_after_request,
-            {"prepare_context": "prepare_context", "finalize": "finalize"},
-        )
-        builder.add_conditional_edges(
-            "prepare_context",
-            self.route_after_prepare,
-            {"agent": "agent", "finalize": "finalize"},
-        )
+        builder.add_edge(START, "prepare_context")
+        builder.add_edge("prepare_context", "agent")
         builder.add_edge("agent", "finalize")
         builder.add_edge("finalize", END)
         self.builder = builder
@@ -150,12 +128,17 @@ class ConversationGraph:
         return self.invoke(initial, context)
 
     def invoke(self, graph_input: ConversationState, context: ConversationContext) -> ConversationResult:
-        """统一调用图并兜住检查点或节点边界外异常，保证消息不会永久停在生成中。"""
+        """以会话和回答标识关联追踪，并兜住图边界外异常，保证消息不会永久停在生成中。"""
         LOGGER.info("event=graph_start conversation_id=%s message_id=%s delivery=%s", context.conversation_id, context.assistant_message_id, context.delivery)
         try:
             raw = cast(dict[str, Any], self.compiled.invoke(
                 graph_input,
-                {"configurable": {"thread_id": str(context.assistant_message_id)}},
+                {
+                    "configurable": {"thread_id": str(context.assistant_message_id)},
+                    "metadata": {"conversation_id": str(context.conversation_id),
+                                 "assistant_message_id": str(context.assistant_message_id),
+                                 "session_id": str(context.conversation_id)},
+                },
                 context=context,
             ))
             LOGGER.info("event=graph_end message_id=%s failure=%s", context.assistant_message_id, bool(raw.get("failure")))
@@ -170,48 +153,10 @@ class ConversationGraph:
             self.fail_terminal(context, detail)
             return {"answer": context.answer, "failure": detail}
 
-    def route_request(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
-        """预先读取当前会话全部可用附件，联网则由后续模型工具自主决定。"""
-        context = runtime.context
-        content = str(context.rows[-1]["content"])
-        try:
-            context.routes_prepared = True
-            material = AttachmentContext()
-            memory_request = memory_tool_request(content)
-            if not memory_request:
-                material = self.attachments.prepare(context.conversation_id, context.account_id)
-            context.routed_material = material
-            LOGGER.info(
-                "event=node route_request message_id=%s material=%s memory_tool=%s",
-                context.assistant_message_id,
-                bool(material.messages),
-                memory_request,
-            )
-            return {}
-        except (ValueError, ModelFailure) as error:
-            detail = str(error)
-            if context.delivery == "sync":
-                context.answer = detail
-            return {"failure": detail}
-        except Exception:
-            LOGGER.exception(
-                "LangGraph 请求路由失败 conversation_id=%s message_id=%s",
-                context.conversation_id,
-                context.assistant_message_id,
-            )
-            detail = self.unexpected_failure(context.delivery)
-            if context.delivery == "sync":
-                context.answer = detail
-            return {"failure": detail}
-
-    def route_after_request(self, state: ConversationState) -> Literal["prepare_context", "finalize"]:
-        """路由失败直接收尾，其余请求先准备完整上下文。"""
-        if state["failure"]:
-            return "finalize"
-        return "prepare_context"
-
     def agent(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
-        """运行统一流式工具循环，文字增量直接写入当前回答。"""
+        """准备成功后由模型自主决定工具调用；准备失败时不发请求，留给收尾保存错误。"""
+        if state["failure"]:
+            return {}
         context = runtime.context
         preparation = context.preparation
         if preparation is None:
@@ -271,7 +216,7 @@ class ConversationGraph:
             return {"failure": detail}
 
     def prepare_context(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
-        """准备长期记忆、完整附件资料和会话历史。"""
+        """统一准备长期记忆、全部有效附件和历史，不根据消息关键词筛选材料。"""
         context = runtime.context
         try:
             preparation = self.execution.prepare_response(
@@ -283,8 +228,6 @@ class ConversationGraph:
                 context.operation,
                 context.reserved_call_id,
                 context.rows,
-                routed_material=context.routed_material,
-                routes_prepared=context.routes_prepared,
             )
             context.preparation = preparation
             LOGGER.info("event=node prepare_context message_id=%s", context.assistant_message_id)
@@ -304,10 +247,6 @@ class ConversationGraph:
             if context.delivery == "sync":
                 context.answer = detail
             return {"failure": detail}
-
-    def route_after_prepare(self, state: ConversationState) -> Literal["agent", "finalize"]:
-        """失败直接收尾，其余状态进入统一流式工具循环。"""
-        return "finalize" if state["failure"] else "agent"
 
     def finalize(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
         """统一核验网页来源并保存终态，使同步与流式入口使用相同收尾规则。"""

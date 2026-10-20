@@ -11,7 +11,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from general_agent.app import create_app
 from tests.auth.support import authenticated_client
-from tests.attachments.test_attachments import attachment_documents, configure, configure_settings
+from tests.attachments.test_attachments import attachment_documents, configure, configure_settings, document_tool_reply, document_tool_result
 from tests.conversation.test_streaming import wait_message
 
 
@@ -35,11 +35,16 @@ def pdf_bytes(texts: list[str], encrypted: bool = False) -> bytes:
 def test_pdf_question_cites_actual_page_and_survives_restart(database_url: str, tmp_path: Path) -> None:
     """文本PDF经真实流式入口回答，引用到实际物理页，重启仍保留范围说明。"""
     def provider(request: httpx.Request) -> httpx.Response:
-        """只用实际发给模型的页内原文生成确定性引用。"""
+        """通过原文工具读取第二页，核对实际页码和文字后返回答案。"""
         payload = json.loads(request.content)
         document = attachment_documents(payload)[0]
-        assert '[第 2 页]\nORBIT deadline is Friday.' in document['content']
-        assert document['parse_info']['total_units'] == 2
+        assert document['pages'] == 2
+        tool_reply = document_tool_reply(payload, start_page=2, end_page=2)
+        if tool_reply is not None:
+            return tool_reply
+        result = document_tool_result(payload)
+        assert result['content'][0]['page'] == 2
+        assert result['content'][0]['content'] == 'ORBIT deadline is Friday.'
         event = {'choices': [{'delta': {'content': 'Friday.'}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 30, 'completion_tokens': 5, 'total_tokens': 35}}
         return httpx.Response(200, text='data: ' + json.dumps(event) + '\n\ndata: [DONE]\n\n')
 
@@ -82,13 +87,19 @@ def docx_bytes() -> bytes:
 
 
 def test_docx_body_and_table_have_real_structural_locations(database_url: str, tmp_path: Path) -> None:
-    """DOCX正文与表格均可问答，空段落不会造成位置错号，也不虚构Word页码。"""
+    """Word 自动固定分页，正文和表格在同一页原文中可读。"""
     def provider(request: httpx.Request) -> httpx.Response:
-        """核对独立样本中的正文和表格事实确实进入外部材料及可信结构位置。"""
+        """读取固定分页后的真实文字，核对正文和表格均未丢失。"""
         payload = json.loads(request.content)
-        document = attachment_documents(payload)[0]
-        assert '[正文段落 2]\n项目ORBIT由林女士负责。' in document['content']
-        assert 'CEDAR星期五交付。' in document['content']
+        tool_reply = document_tool_reply(payload, start_page=1, end_page=1)
+        if tool_reply is not None:
+            return tool_reply
+        result = document_tool_result(payload)
+        text = ''.join(block['content'] for block in result['content'])
+        normalized = ''.join(text.split())
+        assert '项目ORBIT由林女士负责。' in normalized
+        assert 'CEDAR星期五交付。' in normalized
+        assert all(block['page'] == 1 for block in result['content'])
         return httpx.Response(200, json={'choices': [{'message': {'content': '林女士负责，周五交付。'}}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 8, 'total_tokens': 28}})
 
     configure_settings(database_url, tmp_path)
@@ -100,6 +111,7 @@ def test_docx_body_and_table_have_real_structural_locations(database_url: str, t
         attachment = client.get(f'/api/conversations/{conversation}/attachments').json()[0]
         assert attachment['status'] == 'ready'
         assert attachment['parse_info']['format'] == 'docx'
+        assert (tmp_path / 'attachments' / f'{attachment["id"]}.pdf').is_file()
         reply = client.post(f'/api/conversations/{conversation}/messages', json={'content': 'ORBIT负责人和CEDAR交付时间？'})
         assert reply.status_code == 200
         assert reply.json()['messages'][-1]['content'] == '林女士负责，周五交付。'
@@ -133,13 +145,17 @@ def test_pdf_199_200_and_201_page_boundaries(database_url: str, tmp_path: Path) 
     requests = 0
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """从实际提供材料中返回本轮请求页的标记，检查页码不是模型自报。"""
+        """每次回答读取最后上传文档的末页，核对工具实际返回的物理位置。"""
         nonlocal requests
         payload = json.loads(request.content)
         requests += 1
-        expected = 199 if requests == 1 else 200
         documents = attachment_documents(payload)
-        assert any(f'PAGE_{expected}_SENTINEL' in item['content'] for item in documents)
+        expected = documents[-1]['pages']
+        tool_reply = document_tool_reply(payload, start_page=expected, end_page=expected)
+        if tool_reply is not None:
+            return tool_reply
+        result = document_tool_result(payload)
+        assert any(f'PAGE_{expected}_SENTINEL' in item['content'] for item in result['content'])
         return httpx.Response(200, json={'choices': [{'message': {'content': '找到了末页。'}}], 'usage': {'prompt_tokens': 10, 'completion_tokens': 4, 'total_tokens': 14}})
 
     configure_settings(database_url, tmp_path)
@@ -160,8 +176,8 @@ def test_pdf_199_200_and_201_page_boundaries(database_url: str, tmp_path: Path) 
                 reply = client.post(f'/api/conversations/{conversation}/messages', json={'content': f'PAGE_{count}_SENTINEL?'})
                 assert reply.status_code == 200
                 assert reply.json()['messages'][-1]['content'] == '找到了末页。'
-        assert requests == 2
-        assert len(client.get('/api/usage').json()) == 2
+        assert requests == 4
+        assert len(client.get('/api/usage').json()) == 4
 
 
 def image_pdf_bytes(mixed: bool = False) -> bytes:
@@ -208,7 +224,7 @@ def test_pdf_scans_gaps_encryption_and_corruption_are_visible(database_url: str,
 
 
 def test_docx_revisions_missing_parts_and_invalid_packages(database_url: str, tmp_path: Path) -> None:
-    """Word修订和页眉等缺口可见，伪造ZIP、损坏和空Word不能成为可读资料。"""
+    """Word 可读范围以分页副本为准，伪造 ZIP、损坏和空文件不能成为可读资料。"""
     from docx import Document
     from docx.oxml import OxmlElement
     from zipfile import ZIP_DEFLATED, ZipFile
@@ -238,9 +254,8 @@ def test_docx_revisions_missing_parts_and_invalid_packages(database_url: str, tm
         uploaded = client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('revisions.docx', revised.getvalue())}).json()[0]
         row = next(item for item in client.get(f'/api/conversations/{conversation}/attachments').json() if item['id'] == uploaded['id'])
         assert row['status'] == 'ready'
-        assert row['parse_info']['coverage'] == 'partial'
-        assert '修订标记' in str(row['parse_info']['missing_units'])
-        assert '页眉' in str(row['parse_info']['missing_units'])
+        assert row['parse_info']['total_units'] >= 1
+        assert '固定分页副本' in str(row['parse_info']['limitations'])
         for filename, body, error in [('fake.docx', fake.getvalue(), '有效 Word'), ('truncated.docx', docx_bytes()[:100], '损坏'), ('empty.docx', empty.getvalue(), '没有可提取')]:
             result = client.post(f'/api/conversations/{conversation}/attachments', files={'files': (filename, body)})
             assert result.status_code == 201

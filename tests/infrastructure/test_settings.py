@@ -10,7 +10,7 @@ from tests.auth.support import admin_client
 
 
 def test_settings_survive_restart_without_exposing_secret(database_url: str, tmp_path: Path) -> None:
-    """保存配置后可跨重启读取公开字段，空密钥可保留同一服务的已有凭据。"""
+    """跨重启保留连接与读取预算，公开字段不泄露密钥，空密钥可保留原凭据。"""
     with admin_client(database_url, tmp_path) as client:
         response = client.put("/api/settings", json={
             "base_url": "https://model.example/v1", "model": "chat-model", "api_key": "test-secret-123",
@@ -19,7 +19,8 @@ def test_settings_survive_restart_without_exposing_secret(database_url: str, tmp
         assert "test-secret-123" not in response.text
     with admin_client(database_url, tmp_path) as restarted:
         settings = restarted.get("/api/settings").json()
-        assert settings == {"base_url": "https://model.example/v1", "model": "chat-model", "api_key_configured": True}
+        assert settings == {"base_url": "https://model.example/v1", "model": "chat-model", "api_key_configured": True,
+                            "context_window_tokens": 32768, "output_reserve_tokens": 4096}
         changed = restarted.put("/api/settings", json={"base_url": settings["base_url"], "model": "new-model", "api_key": ""})
         assert changed.status_code == 200
         assert changed.json()["api_key_configured"] is True

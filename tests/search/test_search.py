@@ -131,11 +131,12 @@ def test_search_is_a_model_tool_without_confirmation_and_keeps_sources(database_
         payload = json.loads(request.content)
         if request.url.host == "search.example":
             searches.append(payload)
-            assert payload["search_query"] == "杭州天气"
-            assert payload["search_engine"] == "search_std"
-            return httpx.Response(200, json={"search_result": [
-                {"title": "官方天气", "link": "https://weather.example/hangzhou", "content": "晴，18 度。"},
-                {"title": "不安全", "link": "javascript:alert(1)", "content": "恶意"},
+            assert payload["query"] == "杭州天气"
+            assert request.url.path == "/v1/tools/search"
+            assert payload == {"query": "杭州天气", "count": 5, "need_content": False}
+            return httpx.Response(200, json={"results": [
+                {"title": "官方天气", "url": "https://weather.example/hangzhou", "summary": "晴，18 度。"},
+                {"title": "不安全", "url": "javascript:alert(1)", "summary": "恶意"},
             ]})
         messages = tool_messages(payload)
         if messages:
@@ -180,8 +181,8 @@ def test_unconfigured_search_returns_tool_error_without_leaking_provider_details
         payload = json.loads(request.content)
         assert request.url.host == "model.example"
         if tool_messages(payload):
-            assert "尚未配置智谱 Web Search" in str(payload["messages"])
-            return structured_text("请先在设置中配置智谱搜索密钥。")
+            assert "尚未配置 DeepSeek Search / Fetch" in str(payload["messages"])
+            return structured_text("请先在设置中配置DeepSeek 搜索密钥。")
         return tool_call("search_web", {"query": "杭州天气"})
 
     configure_search_settings(database_url, tmp_path)
@@ -206,8 +207,8 @@ def test_attachment_and_memory_pii_are_sent_by_search_tool_without_extra_confirm
         """先读取真实附件/记忆，再按其内容提交搜索词并返回来源。"""
         payload = json.loads(request.content)
         if request.url.host == "search.example":
-            searches.append(payload["search_query"])
-            return httpx.Response(200, json={"search_result": [{"title": "附近咖啡店", "link": "https://cafe.example", "content": "营业时间 9–18。"}]})
+            searches.append(payload["query"])
+            return httpx.Response(200, json={"results": [{"title": "附近咖啡店", "url": "https://cafe.example", "summary": "营业时间 9–18。"}]})
         raw_messages = [message for message in payload["messages"] if message.get("role") == "tool"]
         if raw_messages and json.loads(str(raw_messages[-1]["content"])).get("results"):
             key = json.loads(str(raw_messages[-1]["content"]))["results"][0]["key"]
@@ -256,9 +257,9 @@ def test_attachment_and_memory_pii_are_sent_by_search_tool_without_extra_confirm
 
 
 def test_failed_search_preserves_actual_usage_and_truthful_terminal_state(database_url: str, tmp_path: Path) -> None:
-    """搜索 HTTP 失败保留一次真实请求计量，并把失败结果交给模型而非伪称已查证。"""
+    """搜索 HTTP 失败记录零计费次数，并把失败结果交给模型而非伪称已查证。"""
     def provider(request: httpx.Request) -> httpx.Response:
-        """智谱返回敏感正文时只保留应用定义错误，不把供应商正文暴露给用户。"""
+        """DeepSeek 返回敏感正文时只保留应用定义错误，不把供应商正文暴露给用户。"""
         payload = json.loads(request.content)
         if request.url.host == "search.example":
             return httpx.Response(429, json={"error": "secret-private-provider-detail"})
@@ -280,7 +281,7 @@ def test_failed_search_preserves_actual_usage_and_truthful_terminal_state(databa
         assert message["web_sources"] == []
         assert "secret-private-provider-detail" not in json.dumps(message)
         failed = next(call for call in client.get("/api/usage").json() if call["unit"] == "credits")
-        assert Decimal(failed["credits"]) == 1 and failed["status"] == "failed"
+        assert Decimal(failed["credits"]) == 0 and failed["status"] == "failed"
 
 
 def test_search_credentials_remain_independent_and_private(database_url: str, tmp_path: Path) -> None:
@@ -303,3 +304,210 @@ def test_search_credentials_remain_independent_and_private(database_url: str, tm
     with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure(client)
         assert client.post(f"/api/conversations/{conversation}/messages", json={"content": "你好"}).status_code == 200
+
+
+def test_search_then_fetch_keeps_markdown_sources_and_reuses_page(database_url: str, tmp_path: Path) -> None:
+    """搜索后抓取网页正文，重复抓取复用结果，两次真实成功请求各计一次。"""
+    outbound: list[str] = []
+    markdown = '# 正式公告\n\n正文中的完整说明。'
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """让模型搜索、抓取并再次读取同一网页，验证正文只通过工具消息返回。"""
+        payload = json.loads(request.content)
+        if request.url.host == 'search.example':
+            outbound.append(request.url.path)
+            assert request.headers['Authorization'] == 'Bearer test-key'
+            if request.url.path == '/v1/tools/search':
+                return httpx.Response(200, json={'results': [
+                    {'url': 'https://news.example/article', 'title': '公告', 'summary': '公告摘要', 'content': ''},
+                ]})
+            assert request.url.path == '/v1/tools/fetch'
+            assert payload == {'url': 'https://news.example/article'}
+            return httpx.Response(200, json={'title': '正式公告', 'content': markdown})
+        messages = tool_messages(payload)
+        if not messages:
+            return tool_call('search_web', {'query': '公告 site:news.example'})
+        if len(messages) < 3:
+            return tool_call('fetch_web', {'url': 'https://news.example/article'}, f'fetch-{len(messages)}')
+        page = json.loads(messages[-1]['content'])['results'][0]
+        previous = json.loads(messages[-2]['content'])['results'][0]
+        assert page['content'] == markdown and page['key'] == previous['key']
+        assert markdown not in payload['messages'][0]['content']
+        return structured_text(f'公告正文说明。[{page["key"]}]')
+
+    configure_search_settings(database_url, tmp_path, 'https://search.example/v1')
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
+        conversation = configure(client)
+        message = client.post(f'/api/conversations/{conversation}/messages', json={'content': '查找公告并阅读全文'}).json()['messages'][-1]
+        assert message['status'] == 'complete'
+        assert message['web_sources'][0]['excerpt'] == markdown
+        assert outbound == ['/v1/tools/search', '/v1/tools/fetch']
+        usage = [call for call in client.get('/api/usage').json() if call['unit'] == 'credits']
+        assert len(usage) == 2 and all(Decimal(call['credits']) == 1 for call in usage)
+
+
+def test_fetch_direct_url_without_search(database_url: str, tmp_path: Path) -> None:
+    """用户提供 URL 时可直接抓取，不要求先执行搜索。"""
+    def provider(request: httpx.Request) -> httpx.Response:
+        """直接返回网页 Markdown，再让模型引用实际抓取来源。"""
+        payload = json.loads(request.content)
+        if request.url.host == 'search.example':
+            assert request.url.path == '/v1/tools/fetch'
+            return httpx.Response(200, json={'title': '指定网页', 'content': '# 直接读取的网页'})
+        messages = tool_messages(payload)
+        if messages:
+            page = json.loads(messages[-1]['content'])['results'][0]
+            return structured_text(f'网页已读取。[{page["key"]}]')
+        return tool_call('fetch_web', {'url': 'https://article.example/page'})
+
+    configure_search_settings(database_url, tmp_path, 'https://search.example')
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
+        conversation = configure(client)
+        message = client.post(f'/api/conversations/{conversation}/messages', json={'content': '阅读 https://article.example/page'}).json()['messages'][-1]
+        assert message['status'] == 'complete' and message['search_action']['status'] == 'complete'
+        assert message['web_sources'][0]['url'] == 'https://article.example/page'
+
+
+def test_empty_search_is_not_billable(database_url: str, tmp_path: Path) -> None:
+    """成功但没有结果的 DeepSeek 搜索记录零 credits，不伪称已查证。"""
+    def provider(request: httpx.Request) -> httpx.Response:
+        """返回官方空结果协议，验证最终回答的真实状态。"""
+        payload = json.loads(request.content)
+        if request.url.host == 'search.example':
+            return httpx.Response(200, json={'results': []})
+        if tool_messages(payload):
+            return structured_text('未找到结果。')
+        return tool_call('search_web', {'query': '罕见主题'})
+
+    configure_search_settings(database_url, tmp_path, 'https://search.example')
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
+        conversation = configure(client)
+        message = client.post(f'/api/conversations/{conversation}/messages', json={'content': '联网查询罕见主题'}).json()['messages'][-1]
+        assert message['web_sources'] == [] and '未找到' in message['content']
+        usage = next(call for call in client.get('/api/usage').json() if call['unit'] == 'credits')
+        assert Decimal(usage['credits']) == 0 and usage['status'] == 'complete'
+
+
+def test_legacy_search_key_is_not_reused(database_url: str, tmp_path: Path) -> None:
+    """旧供应商配置显示为未配置，切换时必须显式提交 DeepSeek 密钥。"""
+    from general_agent.infrastructure.settings import SettingsStore, StoredSettings
+
+    with admin_client(database_url, tmp_path) as admin:
+        SettingsStore(tmp_path, 'search.json').write(StoredSettings(
+            base_url='https://api.deepseek.com', model='zhipu-search-std', api_key='legacy-private-key',
+        ))
+        public = admin.get('/api/settings/search').json()
+        assert public['model'] == 'deepseek-search' and not public['api_key_configured']
+        response = admin.put('/api/settings/search', json={'base_url': 'https://api.deepseek.com'})
+        assert response.status_code == 422 and 'legacy-private-key' not in response.text
+
+
+def test_failed_fetch_preserves_search_sources(database_url: str, tmp_path: Path) -> None:
+    """搜索成功后抓取失败，保留已搜索来源并明确展示抓取失败，不泄露错误正文。"""
+    def provider(request: httpx.Request) -> httpx.Response:
+        """模拟 DeepSeek 的抓取安全策略拒绝，再检查工具错误及既有来源。"""
+        payload = json.loads(request.content)
+        if request.url.host == 'search.example':
+            if request.url.path.endswith('/search'):
+                return httpx.Response(200, json={'results': [{'url': 'https://news.example', 'title': '新闻', 'summary': '摘要'}]})
+            return httpx.Response(403, json={'error': {'message': 'private-provider-detail'}})
+        messages = tool_messages(payload)
+        if not messages:
+            return tool_call('search_web', {'query': '新闻'})
+        if len(messages) == 1:
+            return tool_call('fetch_web', {'url': 'https://news.example'}, 'fetch-news')
+        assert 'HTTP 403' in messages[-1]['content'] and 'private-provider-detail' not in messages[-1]['content']
+        key = json.loads(messages[0]['content'])['results'][0]['key']
+        return structured_text(f'正文抓取失败，仅有搜索摘要。[{key}]')
+
+    configure_search_settings(database_url, tmp_path, 'https://search.example')
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
+        conversation = configure(client)
+        message = client.post(f'/api/conversations/{conversation}/messages', json={'content': '搜索新闻并读取正文'}).json()['messages'][-1]
+        assert message['search_action']['status'] == 'failed'
+        assert message['web_sources'][0]['url'] == 'https://news.example'
+        usage = [call for call in client.get('/api/usage').json() if call['unit'] == 'credits']
+        assert sorted(Decimal(call['credits']) for call in usage) == [0, 1]
+
+
+def test_web_tool_argument_boundaries() -> None:
+    """对齐官方查询字符上限与抓取 URL 规则，拒绝多余参数及带凭据地址。"""
+    import pytest
+    from pydantic import ValidationError
+    from general_agent.search.service import FetchWebInput, SearchWebInput
+
+    assert len(SearchWebInput(query='字' * 128).query) == 128
+    for arguments in ({'query': '字' * 129}, {'query': '   '}, {'query': '主题', 'extra': True}):
+        with pytest.raises(ValidationError):
+            SearchWebInput.model_validate(arguments)
+    assert FetchWebInput(url='https://example.com/article?q=1').url.endswith('?q=1')
+    for url in ('javascript:alert(1)', 'https://user:password@example.com', 'https://@example.com',
+                'https://example.com/\nsecret', 'https://example.com/' + 'a' * 8192):
+        with pytest.raises(ValidationError):
+            FetchWebInput(url=url)
+
+
+def test_fetch_success_does_not_cache_a_failed_search(database_url: str, tmp_path: Path) -> None:
+    """抓取成功不代表之前搜索成功，同一查询重试必须真实请求搜索接口。"""
+    search_count = 0
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """按搜索失败、抓取成功、搜索重试的顺序检查两个工具的独立缓存状态。"""
+        nonlocal search_count
+        payload = json.loads(request.content)
+        if request.url.host == 'search.example':
+            if request.url.path.endswith('/fetch'):
+                return httpx.Response(200, json={'title': '已知页面', 'content': '# 页面正文'})
+            search_count += 1
+            if search_count == 1:
+                return httpx.Response(500, json={'error': {'message': 'temporary'}})
+            return httpx.Response(200, json={'results': [{'url': 'https://result.example', 'title': '搜索结果', 'summary': '有效摘要'}]})
+        messages = tool_messages(payload)
+        if not messages:
+            return tool_call('search_web', {'query': '测试主题'})
+        if len(messages) == 1:
+            return tool_call('fetch_web', {'url': 'https://known.example'}, 'known-page')
+        if len(messages) == 2:
+            return tool_call('search_web', {'query': '测试主题'}, 'retry-search')
+        result = json.loads(messages[-1]['content'])['results'][0]
+        assert result['url'] == 'https://result.example'
+        return structured_text(f'取得有效结果。[{result["key"]}]')
+
+    configure_search_settings(database_url, tmp_path, 'https://search.example')
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
+        conversation = configure(client)
+        message = client.post(f'/api/conversations/{conversation}/messages', json={'content': '查询主题并读取已知页面'}).json()['messages'][-1]
+        assert message['status'] == 'complete' and search_count == 2
+
+
+def test_failed_search_is_disabled_after_five_retries_and_answer_continues(database_url: str, tmp_path: Path) -> None:
+    """通过公开聊天接口验证六次失败后禁用搜索，其他工具保留且回答正常完成。"""
+    attempts = 0
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """持续返回搜索失败，模型收到禁用说明后基于已有信息回答。"""
+        nonlocal attempts
+        payload = json.loads(request.content)
+        if request.url.host == 'search.example':
+            attempts += 1
+            return httpx.Response(429, json={'error': {'message': 'rate limited'}})
+        messages = tool_messages(payload)
+        if len(messages) < 6:
+            assert 'search_web' in {tool['function']['name'] for tool in payload['tools']}
+            return tool_call('search_web', {'query': '杭州天气'}, f'search-{len(messages)}')
+        result = json.loads(messages[-1]['content'])
+        assert result['retry_exhausted'] is True and result['retry_count'] == 5
+        assert '本次回答中已禁用' in result['message']
+        names = {tool['function']['name'] for tool in payload['tools']}
+        assert 'search_web' not in names and 'fetch_web' in names
+        assert any('retry_exhausted' in message['content'] for message in payload['messages'] if message['role'] == 'system')
+        return structured_text('暂时无法取得最新天气，请稍后再查。')
+
+    configure_search_settings(database_url, tmp_path, 'https://search.example')
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
+        conversation = configure(client)
+        message = client.post(f'/api/conversations/{conversation}/messages', json={'content': '查询杭州天气'}).json()['messages'][-1]
+        assert message['status'] == 'complete' and message['error'] is None
+        assert message['content'] == '暂时无法取得最新天气，请稍后再查。'
+        assert attempts == 6
+        assert message['search_action']['status'] == 'failed'

@@ -13,13 +13,14 @@ from general_agent.memory.service import MemoryService
 class SourceDeletion:
     """来源删除先撤回使用许可，再复用正式记忆删除与本机物理清理。"""
 
-    def __init__(self, memory: MemoryDeletion, memories: MemoryService, delete_graph_threads: Callable[[list[UUID]], None] | None = None) -> None:
-        """显式绑定删除与正式记忆核验接口，不依赖删除服务内部的 SDK 或空间配置路径。"""
+    def __init__(self, memory: MemoryDeletion, memories: MemoryService, delete_graph_threads: Callable[[list[UUID]], None] | None = None, delete_attachment_file: Callable[[UUID], None] | None = None) -> None:
+        """绑定记忆、图与附件清理接口，图片远端删除由附件模块负责。"""
         self.memory=memory
         self.memories=memories
         self.database=memories.database
         self.directory=memories.directory/'attachments'
         self.delete_graph_threads = delete_graph_threads
+        self.delete_attachment_file = delete_attachment_file
 
     def impact(self, connection: Any, kind: str, conversation_id: UUID, source_id: UUID, account_id: UUID) -> dict[str,Any]:
         """按真实来源关系收集关联动作，经正式记忆接口核验可保留项，不按正文扩大影响。"""
@@ -107,7 +108,7 @@ class SourceDeletion:
             connection.execute('INSERT INTO memory_source_suppressions(message_id) VALUES(%s) ON CONFLICT DO NOTHING',(message_id,))
 
     def resume(self, identifier: UUID, account_id: UUID) -> dict[str,Any]:
-        """同一删除身份串行逐步清理，失败保留真实阶段，已完成步骤重试不会扩展批准范围。"""
+        """按同一删除身份清理记忆及远端、本机文件；上传未结束时等待附件锁，失败允许重试。"""
         with self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(identifier.int % (2**63-1),))
@@ -123,7 +124,10 @@ class SourceDeletion:
                         self.memory.delete(action_id)
                 lock.execute("UPDATE source_deletions SET phase='files' WHERE id=%s",(identifier,))
                 for attachment_id in row['attachment_ids']:
-                    (self.directory/str(attachment_id)).unlink(missing_ok=True)
+                    if self.delete_attachment_file is not None:
+                        self.delete_attachment_file(attachment_id)
+                    else:
+                        (self.directory/str(attachment_id)).unlink(missing_ok=True)
                 lock.execute("UPDATE source_deletions SET phase='relations' WHERE id=%s",(identifier,))
                 with lock.transaction():
                     self.invalidate(lock,identifier)

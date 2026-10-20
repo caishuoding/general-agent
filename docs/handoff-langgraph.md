@@ -129,7 +129,7 @@ bash scripts/start.sh
 - 后端启动与请求输出：`.local/backend.stderr.log`
 - 后端标准输出：`.local/backend.stdout.log`
 
-`agent.log` 记录图开始、路由结果、工具轮次、上下文准备、回答生成、收尾状态和异常堆栈。日志不记录模型密钥或完整回答正文。
+`agent.log` 记录图开始、工具轮次、上下文准备、回答生成、收尾状态和异常堆栈。外层流程为 `prepare_context -> agent -> finalize`，不再包含关键词请求路由或图片筛选节点。日志不记录模型密钥或完整回答正文。
 
 日志使用滚动文件，单文件上限 5 MB，保留 5 个历史文件。
 

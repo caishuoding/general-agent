@@ -24,7 +24,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
     if (usage !== undefined) setRecentUsage(await api<Usage[]>("/usage"));
   }
 
-  // 从表单读取连接信息，成功后清空密钥输入并更新公开配置状态。
+  // 读取连接与文档读取预算，将数字字段转为整数后保存并清空密钥。
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -35,7 +35,10 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
     try {
       const next = await api<Settings>("/settings", {
         method: "PUT",
-        body: JSON.stringify(Object.fromEntries(data)),
+        body: JSON.stringify({ ...Object.fromEntries(data),
+          context_window_tokens: Number(data.get("context_window_tokens")),
+          output_reserve_tokens: Number(data.get("output_reserve_tokens")),
+        }),
       });
       onSaved(next);
       const keyInput = form.elements.namedItem("api_key") as HTMLInputElement;
@@ -122,6 +125,11 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
           <p className="field-help">
             密钥仅由本机后端保存。更换 API 地址时，请重新填写密钥。
           </p>
+          <label htmlFor="context-window">模型上下文窗口（Token）</label>
+          <input id="context-window" name="context_window_tokens" type="number" min={1024} max={10000000} required defaultValue={settings.context_window_tokens ?? 32768} />
+          <label htmlFor="output-reserve">回答预留（Token）</label>
+          <input id="output-reserve" name="output_reserve_tokens" type="number" min={1} max={1000000} required defaultValue={settings.output_reserve_tokens ?? 4096} />
+          <p className="field-help">按模型实际能力填写，用于限制文档原文读取量。</p>
           {error && (
             <p className="notice error" role="alert">
               {error}
