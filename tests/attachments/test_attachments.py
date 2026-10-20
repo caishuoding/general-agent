@@ -1,4 +1,4 @@
-"""验证附件上传后以完整文字进入当前会话上下文。"""
+"""验证附件仅自动提供清单，模型通过工具获取当前会话原文。"""
 
 import json
 from pathlib import Path
@@ -26,18 +26,41 @@ def configure_settings(database_url: str, tmp_path: Path) -> None:
 
 
 def attachment_documents(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """从实际模型请求中读取附件全文，避免依赖旧的引用白名单。"""
+    """从实际模型请求读取附件清单，并确保没有自动注入正文和解析说明。"""
     for message in payload['messages']:
         content = message.get('content')
-        if not isinstance(content, str) or '"attachment_id"' not in content:
+        if not isinstance(content, str) or '"document_id"' not in content:
             continue
         try:
             data = json.loads(content)
         except ValueError:
             continue
         if isinstance(data, list):
+            assert all('content' not in item and 'parse_info' not in item for item in data)
             return data
     return []
+
+
+def document_tool_reply(payload: dict[str, Any], name: str = 'read_document', **arguments: Any) -> httpx.Response | None:
+    """在最新用户消息之后模拟自主调用文档工具，工具已返回时交由测试核验正文。"""
+    last_user = max(index for index, message in enumerate(payload['messages']) if message['role'] == 'user')
+    if any(message['role'] == 'tool' for message in payload['messages'][last_user + 1:]):
+        return None
+    documents = attachment_documents(payload)
+    if not documents:
+        return None
+    if name == 'read_document':
+        arguments.setdefault('document_id', documents[-1]['document_id'])
+    return httpx.Response(200, json={'choices': [{'message': {'content': None, 'tool_calls': [
+        {'id': 'document-call', 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(arguments)}}
+    ]}}]})
+
+
+def document_tool_result(payload: dict[str, Any]) -> dict[str, Any]:
+    """读取最近一次真实工具返回，测试只能依据实际返回正文断言资料可用。"""
+    result = json.loads(next(message['content'] for message in reversed(payload['messages']) if message['role'] == 'tool'))
+    assert isinstance(result, dict)
+    return result
 
 
 def stream_answer(content: str) -> httpx.Response:
@@ -46,17 +69,22 @@ def stream_answer(content: str) -> httpx.Response:
     return httpx.Response(200, text='data: ' + json.dumps(event) + '\n\ndata: [DONE]\n\n', headers={'Content-Type': 'text/event-stream'})
 
 
-def test_uploaded_text_is_sent_in_full_and_survives_restart(database_url: str, tmp_path: Path) -> None:
-    """未绑定消息的附件也会进入当前会话，升级后的全文在重启后仍可用于追问。"""
+def test_uploaded_text_is_read_on_demand_and_survives_restart(database_url: str, tmp_path: Path) -> None:
+    """首轮和重启后均只自动提供清单，模型调用后取得持久化原文。"""
     requests: list[dict[str, Any]] = []
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """核对模型实际收到完整原文，而不是预先筛选的片段。"""
+        """先确认清单不含正文，再请求原文并根据实际结果回答。"""
         payload = json.loads(request.content)
         requests.append(payload)
         documents = attachment_documents(payload)
         assert len(documents) == 1
-        assert '蓝鲸项目于星期五交付。\n负责人是林女士。' in documents[0]['content']
+        tool_reply = document_tool_reply(payload)
+        if tool_reply is not None:
+            assert '蓝鲸项目于星期五交付。' not in str(payload['messages'])
+            return tool_reply
+        result = document_tool_result(payload)
+        assert ''.join(block['content'] for block in result['content']) == '蓝鲸项目于星期五交付。\n负责人是林女士。'
         if payload.get('stream'):
             return stream_answer('蓝鲸项目星期五交付。')
         return httpx.Response(200, json={'choices': [{'message': {'content': '蓝鲸项目星期五交付。'}}]})
@@ -83,18 +111,21 @@ def test_uploaded_text_is_sent_in_full_and_survives_restart(database_url: str, t
         from tests.conversation.test_streaming import wait_message
         message = wait_message(restarted, conversation, 'complete')
         assert message['content'] == '蓝鲸项目星期五交付。'
-        assert len(requests) == 2
+        assert len(requests) == 4
 
 
 def test_attachments_are_isolated_by_conversation(database_url: str, tmp_path: Path) -> None:
-    """未选择消息也能使用本会话附件，但其他会话不能读取或接收这份原文。"""
+    """文档只通过工具进入所属会话，其他会话没有清单或原文。"""
     payloads: list[dict[str, Any]] = []
     secret = 'PRIVATE-CONVERSATION-SECRET'
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """记录每个会话实际收到的附件全文，返回普通回答。"""
+        """自主请求有清单会话的原文，记录真实模型消息以核对隔离。"""
         payload = json.loads(request.content)
         payloads.append(payload)
+        tool_reply = document_tool_reply(payload)
+        if tool_reply is not None:
+            return tool_reply
         return httpx.Response(200, json={'choices': [{'message': {'content': '已收到资料。'}}]})
 
     configure_settings(database_url, tmp_path)
@@ -173,16 +204,20 @@ def test_upload_limits_and_failed_files_are_truthful(database_url: str, tmp_path
         assert calls == 1
 
 
-def test_long_document_tail_is_included_in_full_context(database_url: str, tmp_path: Path) -> None:
-    """长文本末尾的事实也进入上下文，不依赖关键词片段筛选。"""
+def test_long_document_tail_is_retrieved_on_demand(database_url: str, tmp_path: Path) -> None:
+    """长文本末尾事实通过检索切片返回，首轮不能自动携带全文。"""
     sentinel = '玄武口令为海风。'
     text = '普通背景。' * 5000 + sentinel
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """从实际请求中核对文末事实存在。"""
+        """首轮自主检索文末事实，后续只根据实际返回切片回答。"""
         payload = json.loads(request.content)
-        documents = attachment_documents(payload)
-        assert documents and sentinel in documents[0]['content']
+        tool_reply = document_tool_reply(payload, 'search_documents', query='玄武口令')
+        if tool_reply is not None:
+            assert sentinel not in str(payload['messages'])
+            return tool_reply
+        result = document_tool_result(payload)
+        assert any(sentinel in item['content'] for item in result['results'])
         return httpx.Response(200, json={'choices': [{'message': {'content': '口令是海风。'}}]})
 
     configure_settings(database_url, tmp_path)

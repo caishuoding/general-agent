@@ -3,6 +3,9 @@
 import json
 import os
 import sys
+import time
+from email.parser import BytesParser
+from email.policy import default
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -22,13 +25,33 @@ from general_agent.app import create_app
 
 
 class ImageModel(ControlledModel):
-    """仅对真实多模态载荷返回图片依据，不依赖预先能力探针。"""
+    """提供受控 Files API 和 file_id 视觉回答，不调用真实 DeepSeek。"""
 
     def do_POST(self) -> None:
-        """识别测试图片请求形状并返回带真实来源标识的可计量流式回答。"""
-        payload = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
+        """验证 multipart 的 30 天 TTL，上传后只接受 file_id 图片输入。"""
+        raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        if self.path == '/files':
+            form = BytesParser(policy=default).parsebytes(
+                b'Content-Type: ' + self.headers['Content-Type'].encode() + b'\r\n\r\n' + raw,
+            )
+            fields = {part.get_param('name', header='content-disposition'): part for part in form.iter_parts()}
+            assert fields['purpose'].get_payload(decode=True) == b'user_data'
+            assert fields['expires_after[anchor]'].get_payload(decode=True) == b'created_at'
+            assert fields['expires_after[seconds]'].get_payload(decode=True) == b'2592000'
+            image = fields['file'].get_payload(decode=True)
+            assert isinstance(image, bytes) and image.startswith(b'\x89PNG')
+            body = json.dumps({'id': 'file-api-browser-image', 'object': 'file', 'created_at': int(time.time()),
+                               'expires_at': int(time.time()) + 2592000}).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        payload = json.loads(raw)
         parts = [part for message in payload['messages'] if isinstance(message['content'], list) for part in message['content']]
-        assert any(part['type'] == 'image_url' and part['image_url']['url'].startswith('data:image/png;base64,') for part in parts)
+        assert {'type': 'file', 'file_id': 'file-api-browser-image'} in parts
+        assert not any(part['type'] == 'image_url' for part in parts)
         if not payload.get('stream'):
             body = json.dumps({'choices': [{'message': {'content': 'red'}}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 1, 'total_tokens': 21}}).encode()
             self.send_response(200)

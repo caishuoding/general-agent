@@ -1,6 +1,7 @@
 """应用对外接口。"""
 
 import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -39,6 +40,7 @@ from general_agent.memory.correction_api import correction_router
 from general_agent.memory.deletion_api import deletion_router
 from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.logging import configure_agent_logging
+from general_agent.infrastructure.tracing import configure_tracing
 from general_agent.memory.embedding import EmbeddingConfiguration
 from general_agent.infrastructure.provider import ModelClient, ModelFailure
 from general_agent.conversation.streaming import StreamingChat
@@ -100,7 +102,7 @@ class UsageRecord(BaseModel):
 
 
 def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None, mem0_transport: httpx.BaseTransport | None = None, secure_cookies: bool | None = None) -> FastAPI:
-    """创建聊天、自动记忆和资料应用，测试可指定隔离数据库、目录及模型 HTTP 替身。"""
+    """加载本机追踪配置并创建应用，测试可指定隔离数据库、目录及模型 HTTP 替身。"""
     database = Database(database_url or os.environ.get(
         "DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/general_agent"
     ))
@@ -112,31 +114,51 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     auth = AuthService(database)
     settings = SettingsStore(data_dir or Path(os.environ.get("APP_DATA_DIR", ".local")))
     configure_agent_logging(settings.directory)
+    configure_tracing(settings.directory)
     embedding_settings = EmbeddingSettingsStore(settings.directory)
     embedding_configuration = EmbeddingConfiguration(database, embedding_settings)
     operations = OperationService(database)
     model = CallGateway(operations, ModelClient(model_transport))
     memory = MemoryService(database, embedding_configuration, model, settings.directory, mem0_transport)
-    attachments = AttachmentService(database, settings.directory)
+    attachments = AttachmentService(database, settings.directory, model_transport)
     search_settings = SettingsStore(settings.directory, 'search.json')
     search = SearchService(database, model, search_settings, memory, attachments, model_transport)
     execution = ChatExecution(model, memory, search)
-    conversation_graph = ConversationGraph(database, model, execution, attachments)
-    source_deletion = SourceDeletion(execution.deletion, memory, conversation_graph.delete_threads)
+    conversation_graph = ConversationGraph(database, execution)
+    source_deletion = SourceDeletion(execution.deletion, memory, conversation_graph.delete_threads, attachments.delete_file)
     chat = ChatService(database, model, execution, attachments, conversation_graph)
     streaming = StreamingChat(database, model, execution, attachments, conversation_graph)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """迁移数据库并恢复生成、附件与来源删除，停机时等待工作线程。"""
+        """恢复业务并定期重试到期附件清理，停机时停止清理任务并等待工作线程。"""
         database.migrate()
         conversation_graph.start()
         streaming.recover()
         attachments.recover()
         source_deletion.recover()
-        yield
-        await asyncio.to_thread(streaming.close)
-        conversation_graph.close()
+        stopped = asyncio.Event()
+
+        async def expire_attachments() -> None:
+            """每分钟清理到期附件；访问路径独立检查 TTL，清理延迟不延长可用期。"""
+            while not stopped.is_set():
+                try:
+                    await asyncio.wait_for(stopped.wait(), timeout=60)
+                except TimeoutError:
+                    try:
+                        await asyncio.to_thread(attachments.expire)
+                    except Exception:
+                        # 暂时不可用的数据库留待下一轮，不终止后续清理。
+                        logging.getLogger(__name__).exception('附件到期清理暂未完成')
+
+        expiration = asyncio.create_task(expire_attachments())
+        try:
+            yield
+        finally:
+            stopped.set()
+            await expiration
+            await asyncio.to_thread(streaming.close)
+            conversation_graph.close()
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
     app.include_router(auth_router(auth, cookie_secure))
@@ -219,16 +241,19 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.get('/api/settings/search', response_model=PublicSettings)
     def get_search_settings(request: Request) -> PublicSettings:
-        """展示独立智谱搜索配置状态，旧供应商凭据不会被误当作可用。"""
+        """展示独立 DeepSeek 搜索与抓取配置状态，旧供应商凭据不会被误当作可用。"""
         require_admin(request)
         saved = search_settings.read()
-        return saved.public() if saved and saved.model == 'zhipu-search-std' else PublicSettings(base_url='https://open.bigmodel.cn/api/paas/v4',model='zhipu-search-std')
+        return saved.public() if saved and saved.model == 'deepseek-search' else PublicSettings(base_url='https://api.deepseek.com',model='deepseek-search')
 
     @app.put('/api/settings/search', response_model=PublicSettings)
     def save_search_settings(body: SearchSettingsInput, request: Request) -> PublicSettings:
-        """仅保存搜索连接，空密钥只在同地址保留，保存本身不联网。"""
+        """保存 DeepSeek 连接，仅同供应商同地址允许留空保留密钥，保存不联网。"""
         require_admin(request)
         try:
+            previous = search_settings.read()
+            if previous and previous.model != body.model and not body.api_key.get_secret_value().strip():
+                raise ValueError('切换供应商需要填写新的密钥。')
             return search_settings.save(body)
         except ValueError:
             raise HTTPException(422,'请填写此搜索服务的密钥；配置未保存。') from None

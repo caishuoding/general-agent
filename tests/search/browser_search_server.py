@@ -27,13 +27,13 @@ class SearchModel(ControlledModel):
     """提供 search_web 工具调用和带实际网页出处的回答，不接真实网络搜索。"""
 
     def do_POST(self) -> None:
-        """按工具协议返回查询、智谱结果或最终回答，仅供受控浏览器验证。"""
+        """按工具协议返回查询、DeepSeek 结果或最终回答，仅供受控浏览器验证。"""
         payload=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
         body: dict[str, Any]
-        if self.path=='/web_search':
-            assert payload['search_query']=='上海市青松路 88 号附近咖啡店'
-            assert payload['search_engine']=='search_std'
-            body={'search_result':[{'link':'https://cafe.example/nearby','title':'咖啡店信息','content':'营业时间 9–18。'}]}
+        if self.path=='/v1/tools/search':
+            assert payload['query']=='上海市青松路 88 号附近咖啡店'
+            assert payload['count']==5 and payload['need_content'] is False
+            body={'results':[{'url':'https://cafe.example/nearby','title':'咖啡店信息','summary':'营业时间 9–18。'}]}
         elif any(message.get('role')=='tool' for message in payload['messages']):
             source=json.loads(payload['messages'][-1]['content'])['results'][0]
             answer=f'咖啡店营业时间 9–18。[{source["key"]}]'

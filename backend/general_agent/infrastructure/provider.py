@@ -5,9 +5,11 @@ from collections.abc import Iterator
 from typing import Annotated, Any, Literal, TypedDict
 
 import httpx
+from langsmith import traceable
 from pydantic import BaseModel, Field, StrictInt, FiniteFloat
 
 from general_agent.infrastructure.settings import StoredSettings, StoredEmbeddingSettings
+from general_agent.infrastructure.tracing import model_inputs, model_outputs, stream_outputs
 
 
 class TextPart(TypedDict):
@@ -16,21 +18,16 @@ class TextPart(TypedDict):
     text: str
 
 
-class ImageURL(TypedDict):
-    """指定模型实际接收的图片数据地址。"""
-    url: str
-
-
-class ImagePart(TypedDict):
-    """通过兼容协议传递经校验的图片原字节。"""
-    type: Literal['image_url']
-    image_url: ImageURL
+class FilePart(TypedDict):
+    """通过 DeepSeek Files API 返回的身份引用图片，不重复发送原始字节。"""
+    type: Literal['file']
+    file_id: str
 
 
 class ModelMessage(TypedDict):
     """使用明确的文字或多模态内容类型描述模型消息。"""
     role: str
-    content: str | list[TextPart | ImagePart]
+    content: str | list[TextPart | FilePart]
 
 
 class TokenUsage(BaseModel):
@@ -104,8 +101,9 @@ class ModelClient:
         """允许测试只替换外部网络响应，不替换应用内部协作对象。"""
         self.transport = transport
 
+    @traceable(name="chat.complete", run_type="llm", process_inputs=model_inputs, process_outputs=model_outputs)
     def complete(self, settings: StoredSettings, messages: list[ModelMessage]) -> Completion:
-        """请求文字或视觉回答，隔离服务错误正文并保留成功或失败响应的已知用量。"""
+        """追踪文字或视觉回答，排除连接密钥并保留安全错误与真实用量。"""
         try:
             with httpx.Client(transport=self.transport, timeout=60, follow_redirects=False, trust_env=False) as client:
                 response = client.post(
@@ -136,8 +134,9 @@ class ModelClient:
             raise ModelFailure("模型未返回有效文字回答，请检查模型是否支持此接口。", usage) from None
 
 
+    @traceable(name="chat.stream", run_type="llm", process_inputs=model_inputs, reduce_fn=stream_outputs)
     def stream(self, settings: StoredSettings, messages: list[ModelMessage], tools: list[dict[str, Any]] | None = None) -> Iterator[StreamChunk]:
-        """逐段解析文字、推理和工具调用 SSE；工具参数分片由调用方累积。"""
+        """逐段解析并追踪文字、推理和工具调用 SSE，密钥排除且用量按真实尾帧汇总。"""
         usage = TokenUsage()
         has_content = False
         has_tool_calls = False
@@ -265,8 +264,9 @@ class ModelClient:
             raise ModelFailure("服务未返回有效 JSON 对象，请检查接口兼容性。", usage)
         return payload, usage
 
+    @traceable(name="chat.structured", run_type="llm", process_inputs=model_inputs, process_outputs=model_outputs)
     def structured(self, settings: StoredSettings, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, json_mode: bool = False) -> ToolReply:
-        """发送 JSON 或真实函数调用回合，验证协议并保留 DeepSeek 所需的推理续传字段。"""
+        """追踪 JSON 或函数调用回合，排除密钥、验证协议并保留推理续传字段。"""
         body: dict[str, object] = {"messages": messages, "stream": False}
         if tools is not None:
             body.update(tools=tools, tool_choice="auto", parallel_tool_calls=False)
@@ -297,8 +297,9 @@ class ModelClient:
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             raise ModelFailure("模型未返回有效的记忆或工具响应，请检查模型能力后重试。", usage) from None
 
+    @traceable(name="model.embed", run_type="embedding", process_inputs=model_inputs, process_outputs=model_outputs)
     def embed(self, settings: StoredEmbeddingSettings, texts: list[str]) -> Embedding:
-        """调用独立嵌入接口并严格校验模型标识、条数、有限数值及预期维度。"""
+        """追踪独立嵌入并排除密钥，严格校验模型标识、条数、有限数值及预期维度。"""
         payload, usage = self.request(settings, "/embeddings", {"input": texts, "encoding_format": "float"})
         try:
             result = Embedding.model_validate({"model": payload.get("model"), "data": payload.get("data"), "usage": usage})

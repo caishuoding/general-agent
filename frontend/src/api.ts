@@ -2,6 +2,8 @@ export type Settings = {
   base_url: string;
   model: string;
   api_key_configured: boolean;
+  context_window_tokens?: number;
+  output_reserve_tokens?: number;
 };
 export type AuthUser = {
   id: string;

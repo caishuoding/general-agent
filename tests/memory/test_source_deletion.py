@@ -54,7 +54,7 @@ def test_attachment_delete_clears_search_links_and_original_file(database_url: s
         """模型先调用搜索工具，再根据真实结果回答。"""
         payload = json.loads(request.content)
         if request.url.host == 'search.example':
-            return httpx.Response(200, json={'search_result': [{'link': 'https://service.example', 'title': '附近服务', 'content': '公开结果'}]})
+            return httpx.Response(200, json={'results': [{'url': 'https://service.example', 'title': '附近服务', 'summary': '公开结果'}]})
         messages = tool_messages(payload)
         if messages:
             source = json.loads(messages[-1]['content'])['results'][0]

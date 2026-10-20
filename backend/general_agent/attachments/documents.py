@@ -26,6 +26,7 @@ from general_agent.attachments.limits import (
     MAX_DOCUMENT_OUTPUT_BYTES,
     MAX_DOCUMENT_RSS_BYTES,
 )
+from general_agent.attachments.knowledge import DocumentUnit, text_units, MAX_DOCUMENT_UNITS
 
 MAX_TEXT_CHARACTERS = 2_000_000
 
@@ -111,6 +112,7 @@ class ParsedDocument(BaseModel):
     chunks: list[tuple[str, str]] = Field(default_factory=list)
     info: DocumentInfo
     error: str | None = None
+    units: list[DocumentUnit] = Field(default_factory=list)
 
 
 def split_unit(location: str, text: str) -> list[tuple[str, str]]:
@@ -121,7 +123,7 @@ def split_unit(location: str, text: str) -> list[tuple[str, str]]:
 
 
 def parse_pdf(path: Path) -> ParsedDocument:
-    """按物理页序限额读取文字，空页或错误页作为缺口保留，不做OCR。"""
+    """按固定物理页提取段落原文，保留空页和解析缺口，不做 OCR。"""
     info = DocumentInfo(format='pdf', limitations=['仅提取文字；复杂图表、内嵌图片和特殊排版未被理解，需要将相关图像单独上传。'])
     try:
         filters.ZLIB_MAX_OUTPUT_LENGTH = 10_000_000
@@ -132,13 +134,21 @@ def parse_pdf(path: Path) -> ParsedDocument:
         if info.total_units > 200:
             return ParsedDocument(info=info, error='单份 PDF 最多 200 页，请拆分后上传。')
         chunks: list[tuple[str, str]] = []
+        units: list[DocumentUnit] = []
         text_size = 0
         for number, page in enumerate(reader.pages, 1):
             try:
                 text = page.extract_text()
             except Exception:
                 info.missing_units.append(f'第 {number} 页提取失败')
+                units.extend(text_units('', number))
                 continue
+            try:
+                units.extend(text_units(text, number))
+            except ValueError as error:
+                return ParsedDocument(info=info, error=str(error))
+            if len(units) > MAX_DOCUMENT_UNITS:
+                return ParsedDocument(info=info, error='文档段落数量超过 20,000 个资源限制，请拆分后上传。')
             text_size += len(text)
             if text_size > MAX_TEXT_CHARACTERS:
                 return ParsedDocument(info=info, error="文档提取文字超过 2,000,000 字符资源限制，请拆分后上传。")
@@ -150,7 +160,7 @@ def parse_pdf(path: Path) -> ParsedDocument:
         info.coverage = 'partial' if info.missing_units else 'complete'
         if not chunks:
             return ParsedDocument(info=info, error='PDF 没有可提取文字；可能是扫描版或空白文档，本版本不提供 OCR。')
-        return ParsedDocument(chunks=chunks, info=info)
+        return ParsedDocument(chunks=chunks, info=info, units=units)
     except Exception:
         return ParsedDocument(info=info, error='PDF 损坏或不是有效 PDF，无法读取文字。')
 

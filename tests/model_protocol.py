@@ -48,7 +48,8 @@ class StreamingMockTransport(httpx.MockTransport):
         self.provider = provider
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        """执行受控提供器，并在聊天流请求需要时转换 JSON 响应。"""
+        """完整收取 multipart 等请求体，执行替身，并按需将聊天回复转换为 SSE。"""
+        request.read()
         response = self.provider(request)
         try:
             payload = json.loads(request.content)

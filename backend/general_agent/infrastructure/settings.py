@@ -15,6 +15,8 @@ class SettingsInput(BaseModel):
     base_url: str = Field(min_length=1, max_length=2048)
     model: str = Field(min_length=1, max_length=200)
     api_key: SecretStr = SecretStr("")
+    context_window_tokens: StrictInt = Field(default=32768, ge=1024, le=10_000_000)
+    output_reserve_tokens: StrictInt = Field(default=4096, ge=1, le=1_000_000)
 
     @field_validator("base_url")
     @classmethod
@@ -34,6 +36,8 @@ class PublicSettings(BaseModel):
     base_url: str = ""
     model: str = ""
     api_key_configured: bool = False
+    context_window_tokens: int = 32768
+    output_reserve_tokens: int = 4096
 
 
 class StoredSettings(BaseModel):
@@ -41,10 +45,13 @@ class StoredSettings(BaseModel):
     model: str
     api_key: str = Field(repr=False)
     revision: str = "legacy"
+    context_window_tokens: int = Field(default=32768, ge=1024)
+    output_reserve_tokens: int = Field(default=4096, ge=1)
 
     def public(self) -> PublicSettings:
-        """仅返回连接信息与凭据是否配置，不泄露凭据正文。"""
-        return PublicSettings(base_url=self.base_url, model=self.model, api_key_configured=bool(self.api_key))
+        """返回连接、读取预算及凭据是否配置，不泄露凭据正文。"""
+        return PublicSettings(base_url=self.base_url, model=self.model, api_key_configured=bool(self.api_key),
+                              context_window_tokens=self.context_window_tokens, output_reserve_tokens=self.output_reserve_tokens)
 
 
 class SettingsStore:
@@ -64,7 +71,7 @@ class SettingsStore:
             return StoredSettings.model_validate_json(self.path.read_text())
 
     def save(self, body: SettingsInput) -> PublicSettings:
-        """原子保存配置及变更版本，同一地址下空密钥保留原凭据。"""
+        """原子保存连接和上下文预算，实际变更生成版本，同地址空密钥保留原凭据。"""
         with self.lock:
             previous = self.read()
             key = body.api_key.get_secret_value().strip()
@@ -72,8 +79,11 @@ class SettingsStore:
                 key = previous.api_key
             if not key:
                 raise ValueError("请填写此服务的 API 密钥。")
-            settings = StoredSettings(base_url=body.base_url, model=body.model, api_key=key)
-            if previous and (previous.base_url, previous.model, previous.api_key) == (settings.base_url, settings.model, settings.api_key):
+            if body.output_reserve_tokens >= body.context_window_tokens:
+                raise ValueError('回答预留必须小于模型上下文窗口。')
+            settings = StoredSettings(base_url=body.base_url, model=body.model, api_key=key,
+                                      context_window_tokens=body.context_window_tokens, output_reserve_tokens=body.output_reserve_tokens)
+            if previous and previous.model_dump(exclude={'revision'}) == settings.model_dump(exclude={'revision'}):
                 settings.revision = previous.revision
             else:
                 settings.revision = str(uuid4())

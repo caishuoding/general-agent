@@ -129,7 +129,7 @@ export function AttachmentPanel({ conversationId, disabled, revision, resetToken
     return <p key={notice}>{notice}</p>;
   }
 
-  // 展示本次上传文件的真实状态；删除中的文件不能读取。
+  // 展示上传状态和固定分页范围，PDF 与 Word 使用相同页单位。
   function renderFile(file: Attachment) {
     const info = file.parse_info;
     // 以当前文件的独立身份打开删除预览。
@@ -142,7 +142,7 @@ export function AttachmentPanel({ conversationId, disabled, revision, resetToken
       </span>
       {file.image_metadata && <small className="attachment-image-info">{file.image_metadata.format} · {file.image_metadata.width} × {file.image_metadata.height} 像素</small>}
       {file.error && <small role="alert">{file.error}</small>}
-      {info?.format && <small>文字提取：{info.readable_units || 0} / {info.total_units || 0} {info.format === 'pdf' ? '页' : '段落'}</small>}
+      {info?.format && <small>文字提取：{info.readable_units || 0} / {info.total_units || 0} {['pdf', 'docx'].includes(info.format) ? '页' : '段落'}</small>}
       {info?.missing_units?.map(renderNotice)}
       {info?.limitations?.map(renderNotice)}
     </li>;
@@ -151,7 +151,7 @@ export function AttachmentPanel({ conversationId, disabled, revision, resetToken
   return <section className="attachment-composer" aria-label="添加资料">
     <div className="attachment-tools">
       <label className={`upload-label ${disabled || !conversationId ? 'disabled' : ''}`} title="TXT / Markdown / PDF / DOCX / PNG / JPEG；每次最多 5 个，每个 20 MB，PDF 最多 200 页">＋ 添加资料<input aria-label="上传会话附件" type="file" accept=".txt,.md,.markdown,.pdf,.docx,.png,.jpg,.jpeg" multiple onChange={upload} disabled={disabled || !conversationId || uploading} /></label>
-      <span className="attachment-hint">{conversationId ? '资料自动用于本会话问答 · 每次最多 5 个' : '新建会话后可上传资料'}</span>
+      <span className="attachment-hint">{conversationId ? '本会话按需读取 · 保留 30 天 · 每次最多 5 个' : '新建会话后可上传资料'}</span>
     </div>
     {uploading && <p role="status">正在上传文件…</p>}
     {error && <p role="alert">{error}</p>}

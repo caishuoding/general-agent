@@ -30,8 +30,8 @@ def test_prompt_composer_has_one_static_base_and_appends_dynamic_fragments() -> 
 
 
 def test_prompt_catalog_registers_memory_and_web_tools_without_separate_catalogs() -> None:
-    """工具说明与统一系统提示共处一个来源，搜索是普通模型工具。"""
-    assert {"add_memory", "search_memories", "update_memory", "delete_memory", "search_web"} == set(TOOL_DESCRIPTIONS)
+    """工具说明与统一系统提示共处一个来源，搜索与抓取均为普通模型工具。"""
+    assert {"add_memory", "search_memories", "update_memory", "delete_memory", "search_web", "fetch_web"} == set(TOOL_DESCRIPTIONS)
     assert "直接执行" in TOOL_DESCRIPTIONS["search_web"]
 
 

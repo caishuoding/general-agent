@@ -9,12 +9,12 @@ from general_agent.memory.tools import MemoryTools, agent_tools, memory_tools
 
 
 def test_agent_tools_register_web_search_as_a_normal_model_tool() -> None:
-    """验证联网搜索与记忆工具注册在同一个模型工具循环中。"""
+    """验证网页、文档和记忆工具注册在同一个模型自主调用循环中。"""
     memory_names = {item['function']['name'] for item in memory_tools()}
     names = {item['function']['name'] for item in agent_tools()}
 
     assert {'add_memory', 'search_memories', 'update_memory', 'delete_memory'} == memory_names
-    assert names == memory_names | {'search_web'}
+    assert names == memory_names | {'search_web', 'fetch_web', 'search_documents', 'read_document'}
 
 
 def test_update_tool_does_not_reparse_user_intent(monkeypatch: Any) -> None:

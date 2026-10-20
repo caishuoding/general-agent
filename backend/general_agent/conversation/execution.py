@@ -44,7 +44,7 @@ class ChatExecution:
         self.correction = MemoryCorrection(memory)
         self.deletion = MemoryDeletion(memory)
         self.automatic = AutomaticMemory(memory)
-        self.memory_tools = MemoryTools(memory, self.automatic, search)
+        self.memory_tools = MemoryTools(memory, self.automatic, search, search.attachments)
 
     def embedding_revision(self, content: str) -> str | None:
         """返回当前嵌入配置版本；Agent 每轮都可能选择记忆工具，因此每轮都绑定版本。"""
@@ -82,18 +82,11 @@ class ChatExecution:
         operation: OperationContext,
         reserved: UUID | None,
         rows: list[dict[str, Any]],
-        *,
-        routed_material: AttachmentContext | None = None,
-        routes_prepared: bool = False,
     ) -> AnswerPreparation:
-        """统一当前会话附件、长期记忆和历史消息，直接发送完整资料。"""
+        """统一组合有效文档清单、全部图片、长期记忆和历史，文档正文由模型按需调用工具读取。"""
         content = str(rows[-1]['content'])
         chat_reserved = self.chat_reservation(content, reserved)
-        material = (
-            routed_material
-            if routes_prepared and routed_material is not None
-            else self.search.attachments.prepare(conversation_id, account_id)
-        )
+        material = self.search.attachments.prepare(conversation_id, account_id)
         memory_material = self.prepare_answer(user_id, content, operation, reserved)
         context_fragments = []
         if memory_material:
@@ -151,11 +144,11 @@ class ChatExecution:
 
     @staticmethod
     def material_attachment_ids(material: AttachmentContext | None) -> list[UUID]:
-        """从原始附件 user 数据中提取稳定附件标识，供搜索操作记录关联来源。"""
+        """从文档清单中提取稳定附件标识，供搜索操作记录关联来源。"""
         identifiers: list[UUID] = []
         for message in material.messages if material is not None else []:
             content = message.get("content")
-            if not isinstance(content, str) or '"attachment_id"' not in content:
+            if not isinstance(content, str) or '"document_id"' not in content:
                 continue
             try:
                 rows = json.loads(content)
@@ -164,8 +157,8 @@ class ChatExecution:
             if not isinstance(rows, list):
                 continue
             identifiers.extend(
-                UUID(str(item["attachment_id"]))
+                UUID(str(item["document_id"]))
                 for item in rows
-                if isinstance(item, dict) and item.get("attachment_id")
+                if isinstance(item, dict) and item.get("document_id")
             )
         return list(dict.fromkeys(identifiers))

@@ -4,6 +4,8 @@ Status: ready-for-agent
 
 Completion: complete（2026-10-15）。实现与受控验收完成；用户同意的真实服务待验项见最终记录。
 
+附件范围已由 [会话文档工具规格](../conversation-document-tools/spec.md) 与 [ADR 0011](../../docs/adr/0011-conversation-document-tools.md) 更新：文字正文只经模型自主调用工具获取，Word 固定分页，所有附件保留 30 天。旧附件总结流程不再作为实现要求。
+
 ## Problem Statement
 
 用户需要一个日常可持续使用的个人对话智能体，能够完成问答和写作、理解聊天中上传的文件，并在新会话中继续运用稳定的个人偏好和背景。用户不希望每次都重复交代自己，也不希望助手把临时表达、他人的资料或附件正文误认定为个人事实。

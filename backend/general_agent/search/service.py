@@ -1,4 +1,4 @@
-"""智谱 Web Search 的模型工具、操作记录与来源核验。"""
+"""DeepSeek Search / Fetch 的模型工具、操作记录与来源核验。"""
 
 import re
 from decimal import Decimal
@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from general_agent.attachments.service import AttachmentService
 from general_agent.infrastructure.calls import CallGateway
@@ -21,27 +21,45 @@ from general_agent.prompts import TOOL_DESCRIPTIONS
 
 
 class SearchSettingsInput(SettingsInput):
-    """固定智谱基础搜索身份，独立凭据与可配置端点沿用安全 URL 校验。"""
+    """固定 DeepSeek 搜索与抓取身份，独立凭据与可配置端点沿用安全 URL 校验。"""
 
-    base_url: str = 'https://open.bigmodel.cn/api/paas/v4'
-    model: Literal['zhipu-search-std'] = 'zhipu-search-std'
+    base_url: str = 'https://api.deepseek.com'
+    model: Literal['deepseek-search'] = 'deepseek-search'
 
 
 class SearchWebInput(BaseModel):
     """限制模型生成的公开网页查询长度，避免无效或超限请求。"""
 
     model_config = ConfigDict(str_strip_whitespace=True, extra='forbid', strict=True)
-    query: str = Field(min_length=1, max_length=70)
+    query: str = Field(min_length=1, max_length=128)
 
 
-def search_web_tool() -> dict[str, Any]:
-    """返回搜索工具的 OpenAI 兼容函数定义。"""
+class FetchWebInput(BaseModel):
+    """校验交给 DeepSeek 抓取的网页地址，不在本机访问目标网站。"""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra='forbid', strict=True)
+    url: str = Field(min_length=1, max_length=8192)
+
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        """只允许带主机且不含凭据或控制字符的 HTTP(S) 地址。"""
+        parts = urlsplit(value)
+        if (parts.scheme not in ('http', 'https') or not parts.hostname
+                or parts.username is not None or parts.password is not None
+                or any(ord(char) < 33 for char in value)):
+            raise ValueError('请提供不含凭据的 HTTP 或 HTTPS 网页地址。')
+        return value
+
+
+def search_web_tool(name: str = "search_web") -> dict[str, Any]:
+    """返回搜索或网页抓取工具的 OpenAI 兼容函数定义。"""
     return {
         "type": "function",
         "function": {
-            "name": "search_web",
-            "description": TOOL_DESCRIPTIONS["search_web"],
-            "parameters": SearchWebInput.model_json_schema(),
+            "name": name,
+            "description": TOOL_DESCRIPTIONS[name],
+            "parameters": (FetchWebInput if name == "fetch_web" else SearchWebInput).model_json_schema(),
         },
     }
 
@@ -69,13 +87,15 @@ class SearchService:
         query: str,
         operation: OperationContext,
         source_attachment_ids: list[UUID] | None = None,
+        *,
+        kind: Literal["search", "fetch"] = "search",
     ) -> dict[str, Any]:
-        """直接执行模型选择的公开网页查询，并保存可核验的操作记录。"""
-        validated = SearchWebInput.model_validate({"query": query})
-        query = validated.query
+        """执行搜索或抓取，复用本轮已完成结果并保存来源及停止状态。"""
+        query = (SearchWebInput(query=query).query if kind == "search"
+                 else FetchWebInput(url=query).url)
         saved = self.settings.read()
-        if saved is None or saved.model != 'zhipu-search-std':
-            raise ValueError('尚未配置智谱 Web Search。请在设置中填写独立搜索密钥。')
+        if saved is None or saved.model != 'deepseek-search':
+            raise ValueError('尚未配置 DeepSeek Search / Fetch。请在管理端填写 DeepSeek 搜索密钥。')
         account_id = self.memory.account_id_for_conversation(conversation_id)
         with self.database.connect() as connection:
             self.memory.guard_source(connection, conversation_id, user_id, operation)
@@ -108,25 +128,29 @@ class SearchService:
             connection.execute(
                 "INSERT INTO search_requests(id,operation_id,conversation_id,user_id,message_id,query,search_revision,status,sources) "
                 "VALUES(%s,%s,%s,%s,%s,%s,%s,'approved',%s) ON CONFLICT(operation_id) DO NOTHING",
-                (uuid4(), operation.operation_id, conversation_id, account_id, user_id, query, saved.revision, Jsonb(sources)),
+                (uuid4(), operation.operation_id, conversation_id, account_id, user_id, query if kind == "search" else "", saved.revision, Jsonb(sources)),
             )
             row = connection.execute('SELECT * FROM search_requests WHERE operation_id=%s', (operation.operation_id,)).fetchone()
         assert row is not None
         if row['search_revision'] != saved.revision:
             raise ValueError('搜索配置已经变化，请停止当前回答后重新发送。')
-        if row['query'] != query:
+        if kind == 'search' and row['query'] and row['query'] != query:
             raise ValueError('本轮已经使用了其他联网查询，不能在同一次回答中改写。')
-        if row['status'] == 'complete':
-            return {'query': query, 'results': row['results']}
+        cached = [item for item in row['results']
+                  if (kind == 'search' and item.get('kind', 'search') == 'search')
+                  or (kind == 'fetch' and item.get('kind') == 'fetch' and item['url'] == query)]
+        if row['status'] in ('complete', 'failed') and (cached or (kind == 'search' and row['search_completed'])):
+            return {'query': query, 'results': cached}
         if row['status'] in ('cancelled', 'rejected', 'expired'):
             raise ValueError('该搜索已经结束或失效，请重新发送问题。')
         with self.database.connect() as connection:
             connection.execute(
-                "UPDATE search_requests SET status='approved',error=NULL WHERE id=%s AND status IN ('approved','failed')",
-                (row['id'],),
+                "UPDATE search_requests SET status='approved',error=NULL,query=CASE WHEN %s THEN %s ELSE query END "
+                "WHERE id=%s AND status IN ('approved','failed','complete')",
+                (kind == "search", query, row['id']),
             )
         try:
-            results = self.fetch(saved, query, operation)
+            results = self.fetch(saved, query, operation, kind)
         except Exception as error:
             detail = str(error) if isinstance(error, ModelFailure) else '联网搜索未完成，可以重试。'
             self.fail_request(operation, detail)
@@ -136,13 +160,15 @@ class SearchService:
             if active is None or active['cancelled']:
                 raise ValueError('原操作已停止，迟到的搜索结果不会继续使用。')
             for item in results:
+                item['kind'] = kind
                 key = connection.execute("SELECT nextval('web_source_keys') AS value").fetchone()
                 assert key is not None
                 item['key'] = 'W' + str(key['value'])
             updated = connection.execute(
-                "UPDATE search_requests SET status='complete',results=%s,error=NULL "
+                "UPDATE search_requests SET status='complete',results=results || %s,error=NULL, "
+                "search_completed=search_completed OR %s "
                 "WHERE id=%s AND status='approved' RETURNING id",
-                (Jsonb(results), row['id']),
+                (Jsonb(results), kind == 'search', row['id']),
             ).fetchone()
             if updated is None:
                 raise ValueError('搜索操作已经停止或失效，结果不会继续使用。')
@@ -170,75 +196,71 @@ class SearchService:
                 (operation_id,),
             )
 
-    def fetch(self, settings: StoredSettings, query: str, operation: OperationContext) -> list[dict[str, Any]]:
-        """以智谱基础引擎发送精确查询，关联回答停止状态并记录实际请求次数。"""
+    def fetch(
+        self, settings: StoredSettings, query: str, operation: OperationContext,
+        kind: Literal["search", "fetch"] = "search",
+    ) -> list[dict[str, Any]]:
+        """调用 DeepSeek Search/Fetch，按成功且非空的官方规则记录 credits。"""
         with self.database.connect() as connection:
             answer = connection.execute(
                 "SELECT id FROM messages WHERE operation_id=%s AND role='assistant'",
                 (operation.operation_id,),
             ).fetchone()
+        base = settings.base_url.rstrip('/')
+        # 同时兼容官方根地址和常用的 /v1 地址，避免重复版本前缀。
+        endpoint = base + ('/tools/' if base.endswith('/v1') else '/v1/tools/') + kind
+        body = {'query': query, 'count': 5, 'need_content': False} if kind == 'search' else {'url': query}
         with self.calls.bind(operation).call(settings, 'credits', assistant_message_id=answer['id'] if answer else None) as call_id:
             try:
                 with httpx.Client(transport=self.transport, timeout=30, follow_redirects=False, trust_env=False) as client:
-                    response = client.post(
-                        settings.base_url.rstrip('/') + '/web_search',
-                        headers={'Authorization': 'Bearer ' + settings.api_key},
-                        json={
-                            'search_query': query,
-                            'search_engine': 'search_std',
-                            'search_intent': False,
-                            'count': 5,
-                            'search_recency_filter': 'noLimit',
-                            'content_size': 'medium',
-                            'request_id': str(operation.operation_id),
-                        },
-                    )
+                    response = client.post(endpoint, headers={'Authorization': 'Bearer ' + settings.api_key}, json=body)
             except httpx.TimeoutException:
-                raise ModelFailure('智谱搜索超时，本次未取得可核验结果。') from None
+                raise ModelFailure('DeepSeek 联网请求超时，本次未取得可核验结果。') from None
             except httpx.RequestError:
-                raise ModelFailure('无法连接智谱搜索服务，本次未取得可核验结果。') from None
+                raise ModelFailure('无法连接 DeepSeek 联网服务，本次未取得可核验结果。') from None
+            if response.status_code != 200:
+                self.calls.operations.record(call_id, TokenUsage(), credits=Decimal(0))
+                raise ModelFailure(f'DeepSeek 联网请求失败（HTTP {response.status_code}），请检查配置或稍后重试。')
             try:
                 payload = response.json()
             except ValueError:
-                payload = {}
-            # 搜索响应不返回 token，用 credits 只记录实际发出的请求次数。
-            self.calls.operations.record(call_id, TokenUsage(), credits=Decimal(1))
-            if not response.is_success:
-                raise ModelFailure(f'智谱搜索失败（HTTP {response.status_code}），本次未取得可核验结果；请检查搜索设置或稍后重试。')
-            if not isinstance(payload, dict) or not isinstance(payload.get('search_result'), list):
-                raise ModelFailure('智谱未返回有效结果列表，本次未完成搜索。')
+                raise ModelFailure('DeepSeek 返回了无效 JSON，本次未完成请求。') from None
+            if not isinstance(payload, dict):
+                raise ModelFailure('DeepSeek 返回了无效结果，本次未完成请求。')
+            if kind == 'fetch':
+                if not isinstance(payload.get('content'), str) or not isinstance(payload.get('title'), str):
+                    raise ModelFailure('DeepSeek 未返回有效网页正文，本次未完成抓取。')
+                content = payload['content']
+                self.calls.operations.record(call_id, TokenUsage(), credits=Decimal(int(bool(content.strip()))))
+                if not content.strip():
+                    raise ModelFailure('DeepSeek 未返回可读取的网页正文。')
+                return [{'url': query, 'title': payload['title'], 'excerpt': content[:8000], 'content': content}]
+            if not isinstance(payload.get('results'), list):
+                raise ModelFailure('DeepSeek 未返回有效结果列表，本次未完成搜索。')
+            self.calls.operations.record(call_id, TokenUsage(), credits=Decimal(int(bool(payload['results']))))
             results = []
-            for item in payload['search_result'][:5]:
-                if not isinstance(item, dict) or not isinstance(item.get('link'), str):
+            for item in payload['results'][:5]:
+                if not isinstance(item, dict) or not isinstance(item.get('url'), str):
                     continue
-                url = item['link']
                 try:
-                    parts = urlsplit(url)
-                    valid = (
-                        parts.scheme in ('http', 'https')
-                        and parts.hostname
-                        and not parts.username
-                        and not parts.password
-                        and not any(ord(char) < 33 for char in url)
-                    )
+                    url = FetchWebInput(url=item['url']).url
                 except ValueError:
-                    valid = False
-                if valid:
-                    results.append({
-                        'url': url,
-                        'title': str(item.get('title', ''))[:500],
-                        'excerpt': str(item.get('content', ''))[:8000],
-                    })
+                    continue
+                results.append({
+                    'url': url,
+                    'title': str(item.get('title', ''))[:500],
+                    'excerpt': str(item.get('summary') or item.get('snippet') or '')[:8000],
+                })
             return results
 
     def resolve(self, operation: OperationContext, answer: str) -> tuple[str, list[dict[str, Any]]]:
-        """只显示本次实际安全来源；漏引时仍提供核对链接，空结果不得伪称已经查证。"""
+        """核对搜索和抓取来源编号；保留失败前取得的来源，空搜索不得伪称已查证。"""
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT results FROM search_requests WHERE operation_id=%s AND status='complete'",
+                "SELECT results,status FROM search_requests WHERE operation_id=%s AND status IN ('complete','failed')",
                 (operation.operation_id,),
             ).fetchone()
-        if row is None:
+        if row is None or (row['status'] == 'failed' and not row['results']):
             return answer, []
         if not row['results']:
             return ('本次搜索未找到可核验的网页结果，无法基于网络来源回答。请调整关键词后重试。' if answer else answer), []
