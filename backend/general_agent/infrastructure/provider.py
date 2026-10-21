@@ -299,8 +299,8 @@ class ModelClient:
 
     @traceable(name="model.embed", run_type="embedding", process_inputs=model_inputs, process_outputs=model_outputs)
     def embed(self, settings: StoredEmbeddingSettings, texts: list[str]) -> Embedding:
-        """追踪独立嵌入并排除密钥，严格校验模型标识、条数、有限数值及预期维度。"""
-        payload, usage = self.request(settings, "/embeddings", {"input": texts, "encoding_format": "float"})
+        """按配置请求嵌入维度并排除密钥，严格校验模型标识、条数和有限向量。"""
+        payload, usage = self.request(settings, "/embeddings", {"input": texts, "encoding_format": "float", "dimensions": settings.dimensions})
         try:
             result = Embedding.model_validate({"model": payload.get("model"), "data": payload.get("data"), "usage": usage})
             if result.model != settings.model:

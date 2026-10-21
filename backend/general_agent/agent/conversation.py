@@ -1,4 +1,4 @@
-"""用 LangGraph 统一编排同步与流式对话的完整执行链。"""
+"""用 LangGraph State 统一传递同步与流式回答的执行数据。"""
 
 from dataclasses import dataclass
 import logging
@@ -6,38 +6,41 @@ from typing import Any, Literal, TypedDict, cast
 from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.runtime import Runtime
-import psycopg
-from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+from psycopg import sql
 from psycopg.types.json import Jsonb
 
-from general_agent.conversation.execution import AnswerPreparation, ChatExecution
+from general_agent.conversation.execution import ChatExecution
 from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.operations import OperationContext
-from general_agent.infrastructure.provider import ModelFailure
+from general_agent.infrastructure.provider import ModelFailure, ModelMessage
 from general_agent.infrastructure.settings import StoredSettings
 
 LOGGER = logging.getLogger(__name__)
 
 
 class ConversationState(TypedDict):
-    """保存一次回答尝试的图状态；外部依赖和密钥不进入状态。"""
+    """共享本次回答的完整消息快照、材料来源、回答和错误，不携带凭据或连接。"""
 
+    messages: list[dict[str, Any]]
+    source_attachment_ids: list[str]
+    reserved_call_id: UUID | None
+    answer: str
     failure: str | None
+    used_tools: bool
+    web_sources: list[dict[str, object]]
 
 
 class ConversationResult(TypedDict):
-    """向聊天入口返回最终结果，不把回答正文复制进 LangGraph 检查点。"""
+    """向聊天入口返回 State 中的最终回答和失败说明。"""
 
     answer: str
     failure: str | None
 
 
-@dataclass
+@dataclass(frozen=True)
 class ConversationContext:
-    """向图节点提供本次执行依赖和不可持久化运行参数。"""
+    """提供本次运行固定身份、私密模型配置及传输方式，不保存节点计算结果。"""
 
     conversation_id: UUID
     account_id: UUID
@@ -45,130 +48,114 @@ class ConversationContext:
     assistant_message_id: UUID
     settings: StoredSettings
     operation: OperationContext
-    reserved_call_id: UUID | None
-    rows: list[dict[str, Any]]
-    delivery: Literal["sync", "stream"]
-    preparation: AnswerPreparation | None = None
-    answer: str = ""
+    delivery: Literal['sync', 'stream']
 
 
 class ConversationGraph:
-    """以一个小接口隐藏完整对话编排、输出解析和消息终态持久化。"""
+    """通过节点返回的 State 更新编排回答，业务持久化独立于运行中数据传递。"""
 
     def __init__(self, database: Database, execution: ChatExecution) -> None:
-        """编译准备上下文、模型工具循环和收尾三步流程，不预先判断用户意图。"""
+        """编译无持久化检查点的三步图，消息使用完整快照覆盖以免重复追加历史。"""
         self.database = database
         self.execution = execution
         builder = StateGraph(ConversationState, context_schema=ConversationContext)
-        builder.add_node("prepare_context", self.prepare_context)
-        builder.add_node("agent", self.agent)
-        builder.add_node("finalize", self.finalize)
-        builder.add_edge(START, "prepare_context")
-        builder.add_edge("prepare_context", "agent")
-        builder.add_edge("agent", "finalize")
-        builder.add_edge("finalize", END)
-        self.builder = builder
-        self.checkpoint_pool: ConnectionPool[psycopg.Connection[dict[str, Any]]] | None = None
-        self.checkpointer: PostgresSaver | None = None
-        self.compiled = builder.compile(name="conversation")
-
-    def start(self) -> None:
-        """初始化官方 PostgreSQL 检查点并让完整回答图具备持久化执行状态。"""
-        if self.checkpoint_pool is not None:
-            return
-        with self.database.connect() as business_connection:
-            # 框架检查点与业务表分 schema，避免 LangGraph 内部表混入 public 业务模型。
-            business_connection.execute("CREATE SCHEMA IF NOT EXISTS langgraph")
-        pool = cast(
-            ConnectionPool[psycopg.Connection[dict[str, Any]]],
-            ConnectionPool(
-                conninfo=self.database.url,
-                min_size=1,
-                max_size=4,
-                open=False,
-                kwargs={
-                    "autocommit": True,
-                    "prepare_threshold": 0,
-                    "row_factory": dict_row,
-                    "connect_timeout": 5,
-                    "options": "-c search_path=langgraph",
-                },
-            ),
-        )
-        try:
-            pool.open(wait=True)
-            saver = PostgresSaver(pool)
-            saver.setup()
-            self.checkpoint_pool = pool
-            self.checkpointer = saver
-            self.compiled = self.builder.compile(checkpointer=saver, name="conversation")
-        except BaseException:
-            pool.close()
-            raise
-
-    def close(self) -> None:
-        """关闭图检查点专用连接，不影响业务连接和独立 Mem0 服务。"""
-        if self.checkpoint_pool is not None:
-            self.checkpoint_pool.close()
-            self.checkpoint_pool = None
-            self.checkpointer = None
+        builder.add_node('prepare_context', self.prepare_context)
+        builder.add_node('agent', self.agent)
+        builder.add_node('finalize', self.finalize)
+        builder.add_edge(START, 'prepare_context')
+        builder.add_edge('prepare_context', 'agent')
+        builder.add_edge('agent', 'finalize')
+        builder.add_edge('finalize', END)
+        self.compiled = builder.compile(name='conversation')
 
     def delete_threads(self, thread_ids: list[UUID]) -> None:
-        """删除已清除消息对应的图检查点，避免业务来源删除后遗留无用执行元数据。"""
-        if self.checkpointer is None:
+        """删除旧版本遗留的会话检查点；当前图不创建检查点表或写入正文快照。"""
+        if not thread_ids:
             return
-        for thread_id in thread_ids:
-            self.checkpointer.delete_thread(str(thread_id))
+        with self.database.connect() as connection:
+            for table in ('checkpoints', 'checkpoint_blobs', 'checkpoint_writes'):
+                exists = connection.execute('SELECT to_regclass(%s) AS relation', (f'langgraph.{table}',)).fetchone()
+                if exists is not None and exists['relation'] is not None:
+                    connection.execute(
+                        sql.SQL('DELETE FROM langgraph.{} WHERE thread_id=ANY(%s)').format(sql.Identifier(table)),
+                        ([str(identifier) for identifier in thread_ids],),
+                    )
 
-    def run(self, context: ConversationContext) -> ConversationResult:
-        """运行一次完整回答图；调用方只需登记消息并选择同步或流式传输。"""
+    def run(self, context: ConversationContext, rows: list[dict[str, Any]], reserved_call_id: UUID | None = None) -> ConversationResult:
+        """把历史及当前用户消息作为初始 State，固定配置通过 context 注入。"""
         initial: ConversationState = {
-            "failure": None,
+            'messages': [{'role': str(row['role']), 'content': str(row['content'])} for row in rows],
+            'source_attachment_ids': [],
+            'reserved_call_id': reserved_call_id,
+            'answer': '',
+            'failure': None,
+            'used_tools': False,
+            'web_sources': [],
         }
         return self.invoke(initial, context)
 
     def invoke(self, graph_input: ConversationState, context: ConversationContext) -> ConversationResult:
-        """以会话和回答标识关联追踪，并兜住图边界外异常，保证消息不会永久停在生成中。"""
-        LOGGER.info("event=graph_start conversation_id=%s message_id=%s delivery=%s", context.conversation_id, context.assistant_message_id, context.delivery)
+        """观察框架生成的最新 State，图边界失败时据此收尾，不借用可变运行上下文。"""
+        LOGGER.info('event=graph_start conversation_id=%s message_id=%s delivery=%s', context.conversation_id, context.assistant_message_id, context.delivery)
+        state = graph_input
         try:
-            raw = cast(dict[str, Any], self.compiled.invoke(
+            for snapshot in self.compiled.stream(
                 graph_input,
                 {
-                    "configurable": {"thread_id": str(context.assistant_message_id)},
-                    "metadata": {"conversation_id": str(context.conversation_id),
-                                 "assistant_message_id": str(context.assistant_message_id),
-                                 "session_id": str(context.conversation_id)},
+                    'configurable': {'thread_id': str(context.assistant_message_id)},
+                    'metadata': {'conversation_id': str(context.conversation_id),
+                                 'assistant_message_id': str(context.assistant_message_id),
+                                 'session_id': str(context.conversation_id)},
                 },
                 context=context,
-            ))
-            LOGGER.info("event=graph_end message_id=%s failure=%s", context.assistant_message_id, bool(raw.get("failure")))
-            return {"answer": context.answer, "failure": raw.get("failure")}
+                stream_mode='values',
+            ):
+                state = cast(ConversationState, snapshot)
+            LOGGER.info('event=graph_end message_id=%s failure=%s', context.assistant_message_id, bool(state['failure']))
+            return {'answer': state['answer'], 'failure': state['failure']}
         except Exception:
-            LOGGER.exception(
-                "LangGraph 对话执行失败 conversation_id=%s message_id=%s",
+            LOGGER.exception('LangGraph 对话执行失败 conversation_id=%s message_id=%s', context.conversation_id, context.assistant_message_id)
+            return self.fail_terminal(context, state, self.unexpected_failure(context.delivery))
+
+    def prepare_context(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
+        """返回准备好的模型消息、来源标识和调用预留，不修改固定运行上下文。"""
+        context = runtime.context
+        try:
+            preparation = self.execution.prepare_response(
                 context.conversation_id,
+                context.account_id,
+                context.user_message_id,
                 context.assistant_message_id,
+                context.settings,
+                context.operation,
+                state['reserved_call_id'],
+                state['messages'],
             )
-            detail = self.unexpected_failure(context.delivery)
-            self.fail_terminal(context, detail)
-            return {"answer": context.answer, "failure": detail}
+            LOGGER.info('event=node prepare_context message_id=%s', context.assistant_message_id)
+            return {
+                'messages': preparation.messages,
+                'source_attachment_ids': [str(identifier) for identifier in self.execution.material_attachment_ids(preparation.material)],
+                'reserved_call_id': preparation.reserved,
+            }
+        except (ValueError, ModelFailure) as error:
+            return self.failure_update(context, str(error))
+        except Exception:
+            LOGGER.exception('LangGraph 上下文准备失败 conversation_id=%s message_id=%s', context.conversation_id, context.assistant_message_id)
+            return self.failure_update(context, self.unexpected_failure(context.delivery))
 
     def agent(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
-        """准备成功后由模型自主决定工具调用；准备失败时不发请求，留给收尾保存错误。"""
-        if state["failure"]:
+        """从 State 读取准备结果，返回工具循环消息和回答；失败时返回已产生的部分正文。"""
+        if state['failure']:
             return {}
         context = runtime.context
-        preparation = context.preparation
-        if preparation is None:
-            return {"failure": self.unexpected_failure(context.delivery)}
-        content = str(context.rows[-1]["content"])
+        chunks: list[str] = []
 
         def on_content(text: str) -> None:
-            """把模型文字增量加入当前回答，供同步聚合或流式持久化。"""
+            """缓冲本节点文字并更新流式 UI，节点完成后再把回答作为 State 更新返回。"""
             if not text:
                 return
-            context.answer += text
-            if context.delivery == "stream":
+            chunks.append(text)
+            if context.delivery == 'stream':
                 with self.database.connect() as connection:
                     connection.execute(
                         "UPDATE messages SET content=content || %s WHERE id=%s AND status='generating'",
@@ -180,114 +167,77 @@ class ConversationGraph:
                 context.conversation_id,
                 context.account_id,
                 context.user_message_id,
-                content,
+                str(state['messages'][-1]['content']),
                 context.operation,
-                context.reserved_call_id,
+                state['reserved_call_id'],
                 context.settings,
-                messages=preparation.messages,
+                messages=cast(list[ModelMessage], state['messages']),
                 assistant_message_id=context.assistant_message_id,
                 on_content=on_content,
-                material=preparation.material,
+                source_attachment_ids=[UUID(identifier) for identifier in state['source_attachment_ids']],
             )
-            if not outcome.answer and not context.answer:
-                raise ValueError("模型没有返回最终回答。")
-            context.answer = outcome.answer or context.answer
-            LOGGER.info(
-                "event=node agent message_id=%s used_tools=%s characters=%s",
-                context.assistant_message_id,
-                outcome.used_tools,
-                len(context.answer),
-            )
-            return {}
+            answer = outcome.answer or ''.join(chunks)
+            if not answer:
+                raise ValueError('模型没有返回最终回答。')
+            LOGGER.info('event=node agent message_id=%s used_tools=%s characters=%s', context.assistant_message_id, outcome.used_tools, len(answer))
+            return {'answer': answer, 'used_tools': outcome.used_tools,
+                    'messages': outcome.messages if outcome.messages is not None else self.answered_messages(state['messages'], answer)}
         except (ValueError, ModelFailure) as error:
-            detail = str(error)
-            if context.delivery == "sync":
-                context.answer = detail
-            return {"failure": detail}
+            return self.failure_update(context, str(error), ''.join(chunks))
         except Exception:
-            LOGGER.exception(
-                "LangGraph 工具节点失败 conversation_id=%s message_id=%s",
-                context.conversation_id,
-                context.assistant_message_id,
-            )
-            detail = self.unexpected_failure(context.delivery)
-            if context.delivery == "sync":
-                context.answer = detail
-            return {"failure": detail}
-
-    def prepare_context(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
-        """统一准备长期记忆、全部有效附件和历史，不根据消息关键词筛选材料。"""
-        context = runtime.context
-        try:
-            preparation = self.execution.prepare_response(
-                context.conversation_id,
-                context.account_id,
-                context.user_message_id,
-                context.assistant_message_id,
-                context.settings,
-                context.operation,
-                context.reserved_call_id,
-                context.rows,
-            )
-            context.preparation = preparation
-            LOGGER.info("event=node prepare_context message_id=%s", context.assistant_message_id)
-            return {}
-        except (ValueError, ModelFailure) as error:
-            detail = str(error)
-            if context.delivery == "sync":
-                context.answer = detail
-            return {"failure": detail}
-        except Exception:
-            LOGGER.exception(
-                "LangGraph 上下文准备失败 conversation_id=%s message_id=%s",
-                context.conversation_id,
-                context.assistant_message_id,
-            )
-            detail = self.unexpected_failure(context.delivery)
-            if context.delivery == "sync":
-                context.answer = detail
-            return {"failure": detail}
+            LOGGER.exception('LangGraph 工具节点失败 conversation_id=%s message_id=%s', context.conversation_id, context.assistant_message_id)
+            return self.failure_update(context, self.unexpected_failure(context.delivery), ''.join(chunks))
 
     def finalize(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
-        """统一核验网页来源并保存终态，使同步与流式入口使用相同收尾规则。"""
+        """读取 State 核验网页来源及保存终态，把核验后的正文和来源显式返回 State。"""
         context = runtime.context
-        failure = state["failure"]
+        failure = state['failure']
         if failure:
             self.execution.search.fail(context.operation, failure)
-        answer = context.answer
-        answer, web_sources = self.execution.search.resolve(context.operation, answer)
-        context.answer = answer
+        answer, web_sources = self.execution.search.resolve(context.operation, state['answer'])
         with self.database.connect() as connection:
             connection.execute(
                 "UPDATE messages SET content=%s,status=%s,error=%s,web_sources=%s WHERE id=%s AND status='generating'",
-                (answer, "failed" if failure else "complete", failure, Jsonb(web_sources), context.assistant_message_id),
+                (answer, 'failed' if failure else 'complete', failure, Jsonb(web_sources), context.assistant_message_id),
             )
             connection.execute(
                 "UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE id=%s AND status='reserved'",
-                (context.reserved_call_id,),
+                (state['reserved_call_id'],),
             )
-        LOGGER.info("event=node finalize message_id=%s status=%s characters=%s", context.assistant_message_id, "failed" if failure else "complete", len(answer))
-        return {}
+        LOGGER.info('event=node finalize message_id=%s status=%s characters=%s', context.assistant_message_id, 'failed' if failure else 'complete', len(answer))
+        return {'answer': answer, 'web_sources': web_sources, 'messages': self.answered_messages(state['messages'], answer)}
 
-    def unexpected_failure(self, delivery: Literal["sync", "stream"]) -> str:
+    @staticmethod
+    def answered_messages(messages: list[dict[str, Any]], answer: str) -> list[dict[str, Any]]:
+        """更新最后一条最终助手消息，或追加回答，保持完整快照而不原地修改已有 State。"""
+        if messages and messages[-1]['role'] == 'assistant' and not messages[-1].get('tool_calls'):
+            return [*messages[:-1], {**messages[-1], 'content': answer}]
+        return [*messages, {'role': 'assistant', 'content': answer}]
+
+    @staticmethod
+    def failure_update(context: ConversationContext, detail: str, partial: str = '') -> dict[str, Any]:
+        """同步失败返回错误说明，流式失败保留已输出正文，均通过 State 更新传递。"""
+        return {'failure': detail, 'answer': detail if context.delivery == 'sync' else partial}
+
+    def unexpected_failure(self, delivery: Literal['sync', 'stream']) -> str:
         """按传输方式返回不泄露内部异常的稳定失败说明。"""
-        return "回答执行中断，已保留部分内容，可以重试。" if delivery == "stream" else "记忆操作未完成，可以重试核对。"
+        return '回答执行中断，已保留部分内容，可以重试。' if delivery == 'stream' else '记忆操作未完成，可以重试核对。'
 
-    def fail_terminal(self, context: ConversationContext, detail: str) -> None:
-        """在图或检查点意外失败时保存可见正文和失败终态，并撤销未启动的预留调用。"""
-        if context.delivery == "sync" and not context.answer:
-            context.answer = detail
+    def fail_terminal(self, context: ConversationContext, state: ConversationState, detail: str) -> ConversationResult:
+        """图边界异常时使用最新 State 保存失败终态，保留部分回答并撤销预留调用。"""
+        answer = state['answer'] or (detail if context.delivery == 'sync' else '')
         try:
             self.execution.search.fail(context.operation, detail)
             with self.database.connect() as connection:
                 connection.execute(
                     "UPDATE messages SET content=%s,status='failed',error=%s WHERE id=%s AND status='generating'",
-                    (context.answer, detail, context.assistant_message_id),
+                    (answer, detail, context.assistant_message_id),
                 )
                 connection.execute(
                     "UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE id=%s AND status='reserved'",
-                    (context.reserved_call_id,),
+                    (state['reserved_call_id'],),
                 )
         except Exception:
-            # 原始图异常优先返回；数据库自身不可用时由启动恢复流程处理残留状态。
-            return
+            # 数据库暂时不可用时，由既有启动恢复流程处理未结束消息。
+            LOGGER.exception('回答失败终态暂未保存 message_id=%s', context.assistant_message_id)
+        return {'answer': answer, 'failure': detail}

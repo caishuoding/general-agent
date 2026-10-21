@@ -49,10 +49,11 @@ class UpdateMemoryInput(DeleteMemoryInput):
 
 @dataclass(frozen=True)
 class ToolOutcome:
-    """记录单次流式工具循环的最终文字及是否执行过工具。"""
+    """返回工具循环的最终文字、工具使用标志及完整模型消息快照。"""
 
     answer: str | None
     used_tools: bool
+    messages: list[dict[str, Any]] | None = None
 
 
 def memory_tools() -> list[dict[str, Any]]:
@@ -200,7 +201,7 @@ class MemoryTools:
         on_content: Callable[[str], None] | None = None,
         source_attachment_ids: list[UUID] | None = None,
     ) -> ToolOutcome:
-        """运行单一流式工具循环，边输出文字边执行模型请求的工具。"""
+        """运行流式工具循环并返回其消息 State，持久缓存仍只保存业务结果。"""
         if self.memory.account_id_for_conversation(conversation_id) != account_id:
             raise LookupError("会话不存在。")
         counter = TokenCounter(settings.model)
@@ -235,7 +236,11 @@ class MemoryTools:
             previous = connection.execute('SELECT status,result FROM memory_tool_runs WHERE message_id=%s', (message_id,)).fetchone()
         if previous and previous['status'] == 'complete':
             saved = previous['result']
-            return ToolOutcome(saved.get('answer'), bool(saved.get('used_tools')))
+            answer = saved.get('answer')
+            restored: list[dict[str, Any]] = [dict(message) for message in messages]
+            if answer:
+                restored.append({'role': 'assistant', 'content': answer})
+            return ToolOutcome(answer, bool(saved.get('used_tools')), restored)
         if self.memory.source_suppressed(message_id):
             return ToolOutcome(None, False)
         with self.memory.database.connect() as connection:
@@ -252,7 +257,7 @@ class MemoryTools:
             execute_tool=execute,
             on_tool_context=update_document_budget,
         )
-        outcome = ToolOutcome(result['answer'], bool(result['used_tools']))
+        outcome = ToolOutcome(result['answer'], bool(result['used_tools']), result['messages'])
         with self.memory.database.connect() as connection:
             self.memory.guard_source(connection, conversation_id, message_id, operation)
             connection.execute(

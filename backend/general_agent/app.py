@@ -133,7 +133,6 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """恢复业务并定期重试到期附件清理，停机时停止清理任务并等待工作线程。"""
         database.migrate()
-        conversation_graph.start()
         streaming.recover()
         attachments.recover()
         source_deletion.recover()
@@ -158,7 +157,6 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
             stopped.set()
             await expiration
             await asyncio.to_thread(streaming.close)
-            conversation_graph.close()
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
     app.include_router(auth_router(auth, cookie_secure))

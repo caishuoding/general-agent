@@ -21,6 +21,7 @@ from general_agent.attachments.documents import parse_document
 from general_agent.attachments.knowledge import ChunkPolicy, store_units, text_units
 from general_agent.attachments.pagination import paginate_word
 from general_agent.attachments.tools import DocumentTools
+from general_agent.attachments.retrieval import DocumentRetrieval
 from general_agent.infrastructure.provider import FilePart, ModelMessage, TextPart
 from general_agent.infrastructure.settings import SettingsStore
 from general_agent.attachments.upload import UploadedFile
@@ -40,16 +41,17 @@ class AttachmentService:
     """隐藏会话知识库、文件生命周期、固定分页和图片读取。"""
 
     def __init__(self, database: Database, directory: Path, transport: httpx.BaseTransport | None = None) -> None:
-        """绑定文件服务、会话知识库及可配置的字符分片和召回数量。"""
+        """绑定文件服务、递归切片策略和复用嵌入配置的混合检索服务。"""
         self.database = database
         self.directory = directory / 'attachments'
         self.files = DeepSeekFiles(SettingsStore(directory), transport)
         self.policy = ChunkPolicy(int(os.environ.get('DOCUMENT_CHUNK_CHARACTERS', '1500')),
-                                  int(os.environ.get('DOCUMENT_SEARCH_RESULTS', '5')))
-        self.documents = DocumentTools(database, self.policy)
+                                  int(os.environ.get('DOCUMENT_SEARCH_RESULTS', '5')),
+                                  int(os.environ.get('DOCUMENT_CHUNK_OVERLAP', '200')))
+        self.documents = DocumentTools(database, self.policy, DocumentRetrieval(database, directory, transport))
 
     def recover(self) -> None:
-        """恢复中断处理并从原文件升级旧知识库；不更改原有到期时间。"""
+        """恢复中断处理并从原文件升级为递归重叠索引；不更改原有到期时间。"""
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self.database.connect() as connection:
             connection.execute("UPDATE attachments SET status='failed', error='应用重启中断了文件处理，请重新上传。' WHERE status='processing'")
@@ -62,7 +64,7 @@ class AttachmentService:
         with self.database.connect() as connection:
             legacy = connection.execute(
                 "UPDATE attachments SET status='processing' WHERE status='ready' AND image_metadata IS NULL "
-                "AND knowledge_version=0 AND expires_at>CURRENT_TIMESTAMP RETURNING id",
+                "AND knowledge_version<2 AND expires_at>CURRENT_TIMESTAMP RETURNING id",
             ).fetchall()
         for row in legacy:
             self.process(row['id'])
@@ -115,7 +117,7 @@ class AttachmentService:
             self.process_file(attachment_id)
 
     def process_file(self, attachment_id: UUID) -> None:
-        """解析发布原文及索引或上传图片；重核来源和 TTL，晚到结果不能恢复附件。"""
+        """发布原文及第二版重叠索引或上传图片；重核来源和 TTL，阻止迟到发布。"""
         info: dict[str, Any] = {}
         content: str | None = None
         try:
@@ -169,7 +171,7 @@ class AttachmentService:
                     store_units(connection, attachment_id, units, self.policy)
                     if paginated.exists():
                         paginated.replace(self.directory / f'{attachment_id}.pdf')
-                    connection.execute("UPDATE attachments SET status='ready',error=NULL,parse_info=%s,content=%s,knowledge_version=1 WHERE id=%s", (Jsonb(info), content, attachment_id))
+                    connection.execute("UPDATE attachments SET status='ready',error=NULL,parse_info=%s,content=%s,knowledge_version=2 WHERE id=%s", (Jsonb(info), content, attachment_id))
         except (UnicodeDecodeError, ValueError, OSError) as error:
             message = str(error) if isinstance(error, ValueError) and not isinstance(error, UnicodeDecodeError) else '无法读取文字；请上传 UTF-8 编码的 TXT 或 Markdown 文件。'
             with self.database.connect() as connection:
@@ -201,7 +203,7 @@ class AttachmentService:
         return path, str(row['filename'])
 
     def prepare(self, conversation_id: UUID, account_id: UUID) -> AttachmentContext:
-        """每轮提供全部有效文档清单和图片身份，不按消息意图过滤，文档正文由工具读取。"""
+        """每轮提供已升级的有效文档清单和图片身份，正文由工具按需读取。"""
         with self.database.connect() as connection:
             if not connection.execute(
                 "SELECT id FROM conversations WHERE id=%s AND user_id=%s AND NOT deleting",
@@ -221,7 +223,7 @@ class AttachmentService:
                 ('pages' if row['parse_info'].get('format') in ('pdf', 'docx') else 'paragraphs'): row['parse_info'].get('total_units', 0),
             }
             for row in rows
-            if row['image_metadata'] is None and row['knowledge_version'] == 1
+            if row['image_metadata'] is None and row['knowledge_version'] == 2
         ]
         images = [row for row in rows if row['image_metadata'] is not None]
         if not documents and not images:

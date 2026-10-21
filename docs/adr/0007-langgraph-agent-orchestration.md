@@ -2,6 +2,8 @@
 
 Status: Partially superseded by ADR 0008 for web search routing and approval; request routing removed on 2026-10-20.
 
+2026-10-21：节点间数据传递与外层检查点策略由 [ADR 0012](0012-state-based-conversation-flow.md) 替代。当前节点通过 State 共享结果，不再修改 runtime.context 或新增外层 PostgreSQL 检查点；下文相关段落保留为历史决策。
+
 ## 背景
 
 项目此前在 `MemoryTools.prepare` 中用固定循环手写模型决策、工具执行和回传流程。该实现能工作，但节点、路由、执行上限和后续暂停恢复没有统一的编排模型。

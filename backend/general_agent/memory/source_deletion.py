@@ -133,7 +133,7 @@ class SourceDeletion:
                     self.invalidate(lock,identifier)
                     self.cleanup(lock,row)
                     if row['kind'] == 'conversation' and self.delete_graph_threads is not None:
-                        # 会话正文删除时同步清掉以助手回答标识保存的 LangGraph 检查点。
+                        # 当前图不写检查点；会话删除仍清理旧版本按回答标识保存的元数据。
                         self.delete_graph_threads(row['message_ids'])
                     lock.execute("UPDATE source_deletions SET status='complete',phase='complete',error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s",(identifier,))
             except Exception:

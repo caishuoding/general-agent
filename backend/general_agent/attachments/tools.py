@@ -4,9 +4,13 @@ import json
 from typing import Any
 from uuid import UUID
 
+import httpx
+
 from pydantic import BaseModel, ConfigDict, Field
 
-from general_agent.attachments.knowledge import ChunkPolicy, rank_chunks, search_terms
+from general_agent.attachments.knowledge import ChunkPolicy, rank_chunks
+from general_agent.attachments.retrieval import DocumentRetrieval, chunk_key, reciprocal_rank_fusion
+from general_agent.infrastructure.provider import ModelFailure
 from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.tokens import TokenCounter
 
@@ -52,46 +56,100 @@ def document_tools() -> list[dict[str, Any]]:
 class DocumentTools:
     """隐藏文档访问权限、切片召回和原文位置，不接受模型指定会话身份。"""
 
-    def __init__(self, database: Database, policy: ChunkPolicy) -> None:
-        """绑定业务数据库和切片返回策略，所有工具执行必须提供服务端会话身份。"""
-        self.database, self.policy = database, policy
+    def __init__(self, database: Database, policy: ChunkPolicy, retrieval: DocumentRetrieval | None = None) -> None:
+        """绑定访问边界、切片策略与可选的混合检索服务，缺少服务时明确降级。"""
+        self.database, self.policy, self.retrieval = database, policy, retrieval
 
     def search(self, conversation_id: UUID, account_id: UUID, arguments: dict[str, Any]) -> dict[str, Any]:
-        """只召回所属有效会话中未过期的切片，不计算或裁剪结果 Token。"""
+        """执行 BM25、语义、RRF 和重排；每次外部阶段后重核来源，返回完整正文。"""
         request = SearchDocumentsInput.model_validate(arguments)
         identifiers = [UUID(item) for item in request.document_ids] if request.document_ids is not None else None
-        terms = sorted(set(search_terms(request.query)))
+        rows = self.search_rows(conversation_id, account_id, identifiers, validate_ids=True)
+        candidates = max(30, self.policy.results)
+        lexical = rank_chunks(rows, request.query, candidates)
+        semantic: list[dict[str, Any]] = []
+        degraded: list[str] = []
+        def refresh(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            """为每批外部嵌入及重排核验当前来源，排除期间撤回的切片。"""
+            return self.live_candidates(candidates, conversation_id, account_id, identifiers)
+
+        if rows:
+            try:
+                if self.retrieval is None:
+                    raise ValueError('embedding_unavailable')
+                semantic = self.retrieval.semantic(rows, request.query, candidates, refresh)
+            except (ValueError, OSError, ModelFailure, httpx.HTTPError):
+                degraded.append('embedding_unavailable')
+        fused = reciprocal_rank_fusion([lexical, semantic], candidates)
+        fused = self.live_candidates(fused, conversation_id, account_id, identifiers)
+        reranked = False
+        if fused:
+            try:
+                if self.retrieval is None:
+                    raise ValueError('rerank_unavailable')
+                fused = self.retrieval.rerank(fused, request.query)
+                reranked = True
+            except (ValueError, OSError, httpx.HTTPError) as error:
+                degraded.append('rerank_input_too_long' if str(error) == 'rerank_input_too_long' else 'rerank_unavailable')
+        results = self.live_candidates(fused, conversation_id, account_id, identifiers)[:self.policy.results]
+        public = [{key: value for key, value in row.items() if key not in ('embedding', 'embedding_revision')} for row in results]
+        return {'results': [{**row, 'document_id': str(row['document_id'])} for row in public], 'limit': self.policy.results,
+                'retrieval': {'mode': 'hybrid' if semantic else 'bm25', 'bm25_candidates': len(lexical),
+                              'vector_candidates': len(semantic), 'fused_candidates': len(fused),
+                              'reranked': reranked, 'degraded': degraded}}
+
+    def search_rows(self, conversation_id: UUID, account_id: UUID, identifiers: list[UUID] | None,
+                    *, validate_ids: bool = False,
+                    chunk_keys: list[tuple[str, int]] | None = None) -> list[dict[str, Any]]:
+        """首次读取完整授权语料；网络阶段按切片身份精确核验，避免分批重复全量读取。"""
+        chunk_documents = [UUID(key[0]) for key in chunk_keys] if chunk_keys is not None else None
+        chunk_ordinals = [key[1] for key in chunk_keys] if chunk_keys is not None else None
         with self.database.connect() as connection:
             self.guard(connection, conversation_id, account_id)
-            if identifiers is not None:
+            if validate_ids and identifiers is not None:
                 valid = connection.execute(
                     "SELECT id FROM attachments WHERE conversation_id=%s AND id=ANY(%s) AND status='ready' "
-                    "AND expires_at>CURRENT_TIMESTAMP AND knowledge_version=1", (conversation_id, identifiers),
+                    "AND expires_at>CURRENT_TIMESTAMP AND knowledge_version=2", (conversation_id, identifiers),
                 ).fetchall()
                 if {item['id'] for item in valid} != set(identifiers):
                     raise LookupError('文档不存在、已过期或不可读取。')
-            rows = connection.execute(
+            return connection.execute(
                 "SELECT d.attachment_id AS document_id,a.filename,d.ordinal AS chunk_id,d.content,"
-                "u.page,u.paragraph,d.start_offset,d.end_offset FROM document_chunks d "
+                "d.embedding,d.embedding_revision,"
+                "u.page,u.paragraph,e.page AS end_page,e.paragraph AS end_paragraph,d.start_offset,d.end_offset FROM document_chunks d "
                 "JOIN document_units u ON u.attachment_id=d.attachment_id AND u.ordinal=d.unit_ordinal "
+                "JOIN document_units e ON e.attachment_id=d.attachment_id AND e.ordinal=d.end_unit_ordinal "
                 "JOIN attachments a ON a.id=d.attachment_id WHERE a.conversation_id=%s AND a.status='ready' "
-                "AND a.expires_at>CURRENT_TIMESTAMP AND a.knowledge_version=1 AND d.terms && %s::text[] "
-                "AND (%s::uuid[] IS NULL OR a.id=ANY(%s)) ORDER BY a.created_at,a.id,d.ordinal",
-                (conversation_id, terms, identifiers, identifiers),
+                "AND a.expires_at>CURRENT_TIMESTAMP AND a.knowledge_version=2 "
+                "AND (%s::uuid[] IS NULL OR a.id=ANY(%s)) "
+                "AND (%s::uuid[] IS NULL OR (d.attachment_id,d.ordinal) IN "
+                "(SELECT * FROM unnest(%s::uuid[],%s::int[]))) ORDER BY a.created_at,a.id,d.ordinal",
+                (conversation_id, identifiers, identifiers, chunk_documents, chunk_documents, chunk_ordinals),
             ).fetchall()
-        results = rank_chunks(rows, request.query, self.policy.results)
-        return {'results': [{**row, 'document_id': str(row['document_id'])} for row in results], 'limit': self.policy.results}
+
+    def live_candidates(self, candidates: list[dict[str, Any]], conversation_id: UUID, account_id: UUID,
+                        identifiers: list[UUID] | None) -> list[dict[str, Any]]:
+        """网络阶段结束后重新核验内容和原文位置，阻止删除、到期和重切片的迟到结果。"""
+        current = {chunk_key(row): row for row in self.search_rows(
+            conversation_id, account_id, identifiers, chunk_keys=[chunk_key(row) for row in candidates])}
+        valid: list[dict[str, Any]] = []
+        fields = ('content', 'page', 'paragraph', 'end_page', 'end_paragraph', 'start_offset', 'end_offset')
+        for row in candidates:
+            live = current.get(chunk_key(row))
+            if live is not None and all(live[field] == row[field] for field in fields):
+                valid.append(live)
+        return valid
 
     def read(self, conversation_id: UUID, account_id: UUID, arguments: dict[str, Any],
              counter: TokenCounter, available_tokens: int) -> dict[str, Any]:
-        """按实际原文单元连续读取，完整序列化结果受单次上限和当前上下文预算约束。"""
+        """按第二版自然段原文连续读取，完整结果受单次上限和当前上下文预算约束。"""
         request = ReadDocumentInput.model_validate(arguments)
         identifier = UUID(request.document_id)
         with self.database.connect() as connection:
             self.guard(connection, conversation_id, account_id)
             document = connection.execute(
                 "SELECT filename FROM attachments WHERE id=%s AND conversation_id=%s AND status='ready' "
-                "AND expires_at>CURRENT_TIMESTAMP AND knowledge_version=1",
+                "AND expires_at>CURRENT_TIMESTAMP AND knowledge_version=2",
                 (identifier, conversation_id),
             ).fetchone()
             if document is None:
