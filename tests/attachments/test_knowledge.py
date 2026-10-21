@@ -196,20 +196,76 @@ def test_expiration_immediately_hides_and_cleans_knowledge(database_url: str, tm
             assert connection.execute('SELECT * FROM document_chunks WHERE attachment_id=%s', (identifier,)).fetchall() == []
 
 
-def test_legacy_attachment_rebuild_keeps_original_ttl(database_url: str, tmp_path: Path) -> None:
-    """已有文档从原件重建后可检索，升级和重启不会刷新附件有效期。"""
+@pytest.mark.parametrize('version', [0, 1])
+def test_legacy_attachment_rebuild_keeps_original_ttl(database_url: str, tmp_path: Path, version: int) -> None:
+    """旧原文和固定字符索引均升级为第二版，升级重启不刷新附件有效期。"""
     configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path) as client:
         conversation = configure(client)
         uploaded = client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('legacy.txt', b'LEGACY searchable original')}).json()[0]
         attachments = service(database_url, tmp_path)
         with attachments.database.connect() as connection:
-            before = connection.execute('UPDATE attachments SET knowledge_version=0 WHERE id=%s RETURNING expires_at', (UUID(uploaded['id']),)).fetchone()
+            before = connection.execute('UPDATE attachments SET knowledge_version=%s WHERE id=%s RETURNING expires_at', (version, UUID(uploaded['id']))).fetchone()
             connection.execute('DELETE FROM document_units WHERE attachment_id=%s', (UUID(uploaded['id']),))
         attachments.recover()
         assert attachments.documents.search(UUID(conversation), owner(database_url, conversation), {'query': 'LEGACY'})['results']
         with attachments.database.connect() as connection:
             assert connection.execute('SELECT expires_at FROM attachments WHERE id=%s', (UUID(uploaded['id']),)).fetchone() == before
+            upgraded = connection.execute('SELECT knowledge_version FROM attachments WHERE id=%s', (UUID(uploaded['id']),)).fetchone()
+            assert upgraded is not None and upgraded['knowledge_version'] == 2
+
+
+def test_search_chunk_maps_across_paragraphs_and_pages(database_url: str, tmp_path: Path) -> None:
+    """合并短段和跨物理页的切片均能按两端位置还原出完全相同的原文。"""
+    configure_settings(database_url, tmp_path)
+    with authenticated_client(database_url, tmp_path) as client:
+        conversation = configure(client)
+        attachments = service(database_url, tmp_path)
+        for filename, content in [('multi.txt', b'FIRST paragraph.\n\nSECOND paragraph.'),
+                                  ('multi.pdf', pdf_bytes(['FIRST page.', 'SECOND page.']))]:
+            uploaded = client.post(f'/api/conversations/{conversation}/attachments', files={'files': (filename, content)}).json()[0]
+            result = attachments.documents.search(UUID(conversation), owner(database_url, conversation),
+                                                  {'query': 'FIRST', 'document_ids': [uploaded['id']]})['results'][0]
+            assert 'SECOND' in result['content']
+            with attachments.database.connect() as connection:
+                chunk = connection.execute('SELECT * FROM document_chunks WHERE attachment_id=%s ORDER BY ordinal', (UUID(uploaded['id']),)).fetchone()
+                assert chunk is not None
+                units = connection.execute('SELECT * FROM document_units WHERE attachment_id=%s AND ordinal BETWEEN %s AND %s ORDER BY ordinal',
+                                           (UUID(uploaded['id']), chunk['unit_ordinal'], chunk['end_unit_ordinal'])).fetchall()
+            assert len(units) == 2
+            restored = units[0]['content'][chunk['start_offset']:] + units[-1]['content'][:chunk['end_offset']]
+            assert restored == result['content']
+            assert result['end_page'] == (2 if filename.endswith('.pdf') else None)
+            assert result['end_paragraph'] == (1 if filename.endswith('.pdf') else 2)
+
+
+def test_migration_deletes_legacy_chunks_but_preserves_sources(database_url: str, tmp_path: Path) -> None:
+    """从旧版表结构升级时移除旧切片，保留原文和新切片，随后能重建旧附件。"""
+    configure_settings(database_url, tmp_path)
+    with authenticated_client(database_url, tmp_path) as client:
+        conversation = configure(client)
+        legacy = client.post(f'/api/conversations/{conversation}/attachments',
+                             files={'files': ('legacy.txt', b'LEGACY original paragraph. ' * 100)}).json()[0]
+        current = client.post(f'/api/conversations/{conversation}/attachments',
+                              files={'files': ('current.txt', b'CURRENT original paragraph.')}).json()[0]
+        attachments = service(database_url, tmp_path)
+        identifier = UUID(legacy['id'])
+        migration = Path(__file__).resolve().parents[2] / 'backend/general_agent/infrastructure/migrations/042_recursive_document_chunks.sql'
+        with attachments.database.connect() as connection:
+            before = connection.execute('UPDATE attachments SET knowledge_version=1 WHERE id=%s RETURNING expires_at', (identifier,)).fetchone()
+            original = connection.execute('SELECT content FROM document_units WHERE attachment_id=%s ORDER BY ordinal', (identifier,)).fetchall()
+            # 恢复旧表形状，执行真实迁移验证删除范围及外键行为。
+            connection.execute('ALTER TABLE document_chunks DROP COLUMN end_unit_ordinal')
+            connection.execute(migration.read_text())
+            assert connection.execute('SELECT * FROM document_chunks WHERE attachment_id=%s', (identifier,)).fetchall() == []
+            assert connection.execute('SELECT * FROM document_chunks WHERE attachment_id=%s', (UUID(current['id']),)).fetchall()
+            assert connection.execute('SELECT content FROM document_units WHERE attachment_id=%s ORDER BY ordinal', (identifier,)).fetchall() == original
+        assert (tmp_path / 'attachments' / str(identifier)).exists()
+        attachments.recover()
+        assert attachments.documents.search(UUID(conversation), owner(database_url, conversation),
+                                            {'query': 'LEGACY', 'document_ids': [legacy['id']]})['results']
+        with attachments.database.connect() as connection:
+            assert connection.execute('SELECT expires_at FROM attachments WHERE id=%s', (identifier,)).fetchone() == before
 
 
 def test_real_prompt_usage_constrains_reading_budget(database_url: str, tmp_path: Path) -> None:

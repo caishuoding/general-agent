@@ -116,10 +116,8 @@ class ParsedDocument(BaseModel):
 
 
 def split_unit(location: str, text: str) -> list[tuple[str, str]]:
-    """短单元保留直接位置，长单元分片时补充原单元内字符范围。"""
-    if len(text) <= 1500:
-        return [(location, text)] if text.strip() else []
-    return [(f'{location}，字符 {offset + 1}–{min(offset + 1500, len(text))}', text[offset:offset + 1500]) for offset in range(0, len(text), 1500)]
+    """保留整页或整段正文与位置；检索切片统一由知识库递归生成，避免重复正文。"""
+    return [(location, text)] if text.strip() else []
 
 
 def parse_pdf(path: Path) -> ParsedDocument:

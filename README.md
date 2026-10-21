@@ -190,14 +190,16 @@ Mem0 由 `mem0/` 下的官方源码 Docker 服务运行，业务后端只使用 
 
 文字附件无论大小均不自动发送正文。每轮只发送文档 ID、文件名和页数／段落数清单，不附带状态或解析缺口。模型自主选择是否调用以下工具及其参数，没有前置检索、任务分类或固定读取顺序：
 
-- `search_documents(query, document_ids?)`：检索当前会话切片，返回完整正文及位置。默认每片最多 1,500 字符、返回五片，分别由服务端环境变量 `DOCUMENT_CHUNK_CHARACTERS`（100–10000）与 `DOCUMENT_SEARCH_RESULTS`（1–50）配置；检索不按 Token 数裁剪。当前使用中英文关键词倒排索引，不需要额外嵌入连接。
+- `search_documents(query, document_ids?)`：检索当前会话切片，返回完整正文及位置。按自然段→句子→分句→空白→字符递归切分，默认每片最多 1,500 字符（包含重叠）、重叠目标 200 字符、返回五片，分别由服务端环境变量 `DOCUMENT_CHUNK_CHARACTERS`（100–10000）、`DOCUMENT_CHUNK_OVERLAP`（0–10000，0 禁用）与 `DOCUMENT_SEARCH_RESULTS`（1–50）配置；检索不按 Token 数裁剪。检索方案升级为 BM25 + 向量语义混合召回，复用管理端既有嵌入配置；两路默认各取 30 片，经等权 RRF（k=60）去重融合取前 30 片，交给智谱 rerank，最终默认返回最多五片。若返回片数配置大于 30，候选上限同步提高。向量首次检索时分批生成并持久缓存，配置变更后按版本重建；首次检索可能较慢。向量不可用时降级为 BM25，重排不可用时使用融合排名，工具结果标明降级。详见 [混合召回规格](.scratch/attachment-hybrid-retrieval/spec.md)（实现状态以规格为准）。
 - `read_document(document_id, start_page?, end_page?, start_paragraph?, end_paragraph?, cursor?)`：PDF／Word 按页范围、TXT／Markdown 按段落范围读取连续解析原文。省略范围则读取全篇。结果含页、段落、字符偏移；超限返回 `next_cursor`，续读保留原范围。
+
+自然段按空行识别，段内单换行保留；短段顺序合并，长段按完整句子细分。重叠优先取末尾完整句子，单句超过目标时可以超出目标；放不下新句时减少重叠，超长句才退到分句或字符。Markdown `#` 标题及“第…章／节／篇／部”边界不跨片或重叠，物理页边界允许跨越；检索位置包含起止页、段落及各自段内偏移。PDF 依赖提取文本的空行，未增加版面分析。
 
 每个文档工具每轮分别最多调用五次，正常、失败、重试和续读均计数。原文读取连同结果包装最多 10,000 Token，且不超过执行点的剩余上下文预算；包装和调用计数字段会预留空间。管理端模型配置中填写实际上下文窗口与回答预留，默认 32,768／4,096 Token。已有模型请求用量可用于核对图片等实际占用；没有用量时文字消息使用本地估算；含图片且缺少实际用量时，原文工具返回预算不足，不能把短 file_id 当作图片的 Token 开销。切片检索没有额外 Token 预算。
 
 原文计数优先加载 `MODEL_TOKENIZERS` 环境变量中明确匹配模型的官方 `tokenizer.json`，例如 `{"your-model":"/absolute/path/tokenizer.json"}`。文件须由模型官方提供并对应当前模型，不自动套用其他模型分词器；未配置对应实现时，按字符 UTF-8 字节数保守估算，结果标记 `character_estimate`。DeepSeek 官方离线分词文件入口见 [Token 用量计算](https://api-docs.deepseek.com/zh-cn/quick_start/token_usage/)。本次不新增滑动窗口或摘要机制；后续压缩移除工具正文后，仍可通过每轮清单重新读取持久原文。
 
-原文件保存在 `APP_DATA_DIR/attachments/<UUID>`，Word 分页副本为 `<UUID>.pdf`。处理状态、TTL、解析范围在 `attachments`，结构原文在 `document_units`，切片和关键词索引在 `document_chunks`。原件与业务数据库均需备份；旧文字附件启动时从原件重建知识库，不延长原有效期。
+原文件保存在 `APP_DATA_DIR/attachments/<UUID>`，Word 分页副本为 `<UUID>.pdf`。处理状态、TTL、解析范围在 `attachments`，结构原文在 `document_units`，切片和关键词索引在 `document_chunks`。原件与业务数据库均需备份；旧文字附件（knowledge_version 0／1）启动时从原件重建第二版递归重叠知识库，不延长原有效期。
 
 到期后立即停止下载、清单展示、图片引用和工具访问。启动时及每分钟清理原件、副本、原文、切片和索引；图片同时清理远端文件。失败保留到期身份并自动重试，不恢复访问；已生成聊天正文保留。主动删除附件和会话沿用现有来源清理入口。
 

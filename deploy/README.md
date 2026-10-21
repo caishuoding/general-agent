@@ -115,6 +115,15 @@ uv run python scripts/restore_auth_backup.py \
 
 模型管理配置增加 context_window_tokens（默认 32768）与 output_reserve_tokens（默认 4096），应填写实际模型窗口及回答预留。原文工具按剩余预算返回，单次不超过 10000 Token；本次不引入摘要压缩或滑动窗口。
 
-可配置 DOCUMENT_CHUNK_CHARACTERS=1500、DOCUMENT_SEARCH_RESULTS=5。需要精确分词时，挂载对应模型官方 tokenizer.json，并向应用容器传入 MODEL_TOKENIZERS 的模型名到绝对路径 JSON 映射；没有对应文件时使用标记为估算的保守字符计数。分词运行库已锁定在应用 Python 依赖中。
+可配置 DOCUMENT_CHUNK_CHARACTERS=1500、DOCUMENT_CHUNK_OVERLAP=200、DOCUMENT_SEARCH_RESULTS=5；切片上限包含重叠，overlap 为 0 时禁用重叠。迁移 042 支持跨段／页位置，启动时将旧版文字索引重建为第二版，不延长附件有效期。需要精确分词时，挂载对应模型官方 tokenizer.json，并向应用容器传入 MODEL_TOKENIZERS 的模型名到绝对路径 JSON 映射；没有对应文件时使用标记为估算的保守字符计数。分词运行库已锁定在应用 Python 依赖中。
 
 到期访问在每个读取入口被拒绝；清理每分钟重试一次，远端图片清理失败也不会恢复文件访问。已完成聊天正文继续保留。没有使用私人文件调用外部模型验证文档理解质量。
+
+
+### 附件混合召回配置
+
+目标行为见 [ADR 0013](../docs/adr/0013-attachment-hybrid-retrieval.md) 及 [实施规格](../.scratch/attachment-hybrid-retrieval/spec.md)，当前进度以规格 Completion 为准。复用 APP_DATA_DIR/embedding.json 的嵌入配置，不单独配置附件模型。新增迁移 043 保存按嵌入配置版本区分的切片向量，旧附件首次查询时补齐，不刷新 TTL；缓存随切片删除。
+
+智谱重排使用 ZHIPU_RERANK_API_KEY 环境变量或 APP_DATA_DIR/rerank.json 私有文件（字段 api_key），环境变量优先；私有文件权限为 0600。默认地址为 https://open.bigmodel.cn/api/paas/v4/rerank，超时 10 秒。密钥不得写入版本库、日志或工具结果。重排未配置或失败时仍提供融合结果，embedding 失败时仍提供 BM25 结果；通过工具结果的 retrieval 字段识别降级。现阶段不添加新管理界面。
+
+智谱协议依据：[官方 OpenAPI](https://docs.bigmodel.cn/openapi/openapi.json) 的 `/paas/v4/rerank`：模型 `rerank`，最多 128 条候选，每条最多 4096 字符。超长候选不截断正文，明确标记 `rerank_input_too_long` 并使用融合顺序。
