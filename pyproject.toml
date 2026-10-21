@@ -15,7 +15,6 @@ dependencies = [
   "tokenizers>=0.22,<1",
   "langgraph>=1,<2",
   "langsmith>=0.14,<1",
-  "langgraph-checkpoint-postgres>=3,<4",
   "argon2-cffi>=23,<26",
 ]
 

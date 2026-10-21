@@ -6,6 +6,8 @@
 
 回答流程为 `prepare_context → agent → finalize`；内部由模型决定是否进入工具循环。后端不按“记住、忘记、修改记忆”等关键词分类请求或隐藏图片，统一提供当前会话的有效文档清单、图片 file_id 和可用工具。附件所属账号、会话及有效期仍在读取时核验。
 
+各节点通过 State 返回并共享消息、材料来源、工具结果、回答及错误；`runtime.context` 只保存本次运行固定的身份、模型配置和传输方式。外层图不再挂 PostgreSQL checkpointer；聊天正文、流式增量、操作幂等及用量仍保存在现有业务表，旧检查点随会话删除清理。运行与持久化的边界见 [ADR 0012](docs/adr/0012-state-based-conversation-flow.md)。
+
 2026-10-17：附件只用于当前会话的问答和资料处理，不再从附件提取长期记忆。聊天记忆仍使用 Mem0 原生自动记忆和对话记忆工具；详见 [ADR 0005](docs/adr/0005-native-automatic-memory.md) 与 [ADR 0006](docs/adr/0006-attachments-do-not-create-memories.md)。
 
 当前已实现本机 Web 对话、预创建多账号登录、独立管理端、模型配置与独立嵌入、会话持久化、流式回答、停止与失败重试、逐次调用用量、通过独立 Mem0 服务自动提取、更新、删除和召回长期记忆，以及会话 TXT / Markdown / PDF / DOCX 知识库与工具读取、PNG / JPEG 文件上传与视觉问答和模型工具联网搜索。任务 16 的历史聊天检索已按任务 20 移除；附件不提供独立总结任务；模型通过两个工具自主检索和读取。附件不会生成长期记忆，切片关键词索引保存在业务 PostgreSQL，独立于 Mem0。
@@ -84,7 +86,7 @@ LangSmith 追踪读取应用数据目录中的 `langsmith.json`（默认 `.local
 }
 ```
 
-配置文件应使用 `chmod 600 .local/langsmith.json` 限制访问，修改后重启后端生效；Docker 部署需将该文件放入服务器挂载的 `.local/`。上述配置绑定 LangSmith 智能体 `general-agent` 的 Local 环境；独立追踪项目则改用 `LANGSMITH_PROJECT`，不要与两个 `LANGSMITH_AGENT_*` 同时设置，同名独立项目与智能体环境并非同一追踪目标。未配置时不开启追踪。启用后，LangGraph 节点及自定义模型调用会嵌套上报到目标环境，包含模型输入消息、工具参数、输出及真实 token 用量；模型连接密钥和客户端对象不进入模型追踪输入。追踪元数据使用会话 ID 和回答尝试 ID 关联，检查点仍按回答尝试隔离。Mem0 独立服务内部的模型与嵌入调用不在本应用追踪范围内。接入方式遵循 [LangSmith 官方 LangGraph 追踪说明](https://docs.langchain.com/langsmith/trace-with-langgraph)。
+配置文件应使用 `chmod 600 .local/langsmith.json` 限制访问，修改后重启后端生效；Docker 部署需将该文件放入服务器挂载的 `.local/`。上述配置绑定 LangSmith 智能体 `general-agent` 的 Local 环境；独立追踪项目则改用 `LANGSMITH_PROJECT`，不要与两个 `LANGSMITH_AGENT_*` 同时设置，同名独立项目与智能体环境并非同一追踪目标。未配置时不开启追踪。启用后，LangGraph 节点及自定义模型调用会嵌套上报到目标环境，包含模型输入消息、工具参数、输出及真实 token 用量；模型连接密钥和客户端对象不进入模型追踪输入。追踪元数据使用会话 ID 和回答尝试 ID 关联，各节点输出可直接观察 State 更新；模型配置和凭据不放入 State。Mem0 独立服务内部的模型与嵌入调用不在本应用追踪范围内。接入方式遵循 [LangSmith 官方 LangGraph 追踪说明](https://docs.langchain.com/langsmith/trace-with-langgraph)。
 
 数据库结构在应用启动时按版本迁移，已应用的迁移不会重复执行。应用使用单个后端进程运行；启动时会将上次进程中断的生成记录标为失败并保留已提交的内容与用量，请勿用多个 worker 共用同一业务库。请保留数据库卷；`docker compose down -v` 会删除其数据。
 

@@ -123,12 +123,11 @@ class ChatExecution:
         messages: list[ModelMessage],
         assistant_message_id: UUID,
         on_content: Callable[[str], None] | None = None,
-        material: AttachmentContext | None = None,
+        source_attachment_ids: list[UUID] | None = None,
     ) -> ToolOutcome:
-        """把完整回答上下文交给统一流式工具循环。"""
+        """把 State 中的模型消息和材料标识交给工具循环，返回回答及完整消息快照。"""
         if settings is None:
             return ToolOutcome(None, False)
-        source_attachment_ids = self.material_attachment_ids(material)
         return self.memory_tools.prepare(
             conversation_id,
             account_id,

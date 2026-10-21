@@ -22,7 +22,7 @@ class ChatService:
         self.graph = graph
 
     def send(self, conversation_id: UUID, account_id: UUID, content: str, settings: StoredSettings, operation: OperationContext) -> None:
-        """在有效会话登记消息、标记附件展示位置，并准备完整附件材料保存最终答案。"""
+        """登记消息和附件位置，将历史作为初始 State 交给统一回答图。"""
         user_id, answer_id = uuid4(), uuid4()
         with self.database.connect() as connection:
             if not connection.execute('SELECT id FROM conversations WHERE id=%s AND user_id=%s AND NOT deleting FOR NO KEY UPDATE', (conversation_id, account_id)).fetchone():
@@ -42,9 +42,7 @@ class ChatService:
             assistant_message_id=answer_id,
             settings=settings,
             operation=operation,
-            reserved_call_id=reserved,
-            rows=rows,
             delivery="sync",
-        ))
+        ), rows, reserved)
         if result["failure"]:
             raise ModelFailure(result["failure"])

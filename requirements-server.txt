@@ -86,10 +86,7 @@ langgraph==1.2.16
 langgraph-checkpoint==4.3.0
     # via
     #   langgraph
-    #   langgraph-checkpoint-postgres
     #   langgraph-prebuilt
-langgraph-checkpoint-postgres==3.2.0
-    # via general-agent
 langgraph-prebuilt==1.1.1
     # via langgraph
 langgraph-sdk==0.4.8
@@ -104,7 +101,6 @@ opentelemetry-api==1.45.1
     # via fastapi
 orjson==3.13.0
     # via
-    #   langgraph-checkpoint-postgres
     #   langgraph-sdk
     #   langsmith
 ormsgpack==1.13.0
@@ -117,15 +113,11 @@ packaging==26.3
 pillow==12.3.0
     # via general-agent
 psycopg==3.3.6
-    # via
-    #   general-agent
-    #   langgraph-checkpoint-postgres
+    # via general-agent
 psycopg-binary==3.3.6 ; implementation_name != 'pypy'
     # via psycopg
 psycopg-pool==3.3.3
-    # via
-    #   langgraph-checkpoint-postgres
-    #   psycopg
+    # via psycopg
 pycparser==3.11 ; implementation_name != 'PyPy'
     # via cffi
 pydantic==2.14.1

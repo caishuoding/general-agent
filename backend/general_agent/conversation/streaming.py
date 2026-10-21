@@ -93,7 +93,7 @@ class StreamingChat:
         return new_id
 
     def execute(self, conversation_id: UUID, account_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
-        """把后台回答尝试交给统一 LangGraph，线程仅负责不阻塞 HTTP 请求。"""
+        """将历史作为初始 State 交给统一回答图，固定身份和配置经不可变上下文注入。"""
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT role, content FROM messages WHERE conversation_id = %s AND status = 'complete' AND position <= (SELECT position FROM messages WHERE id = %s) ORDER BY position",
@@ -106,11 +106,9 @@ class StreamingChat:
             assistant_message_id=message_id,
             settings=settings,
             operation=operation,
-            reserved_call_id=call_id,
-            rows=rows,
             delivery="stream",
         )
-        self.graph.run(context)
+        self.graph.run(context, rows, call_id)
 
     def stop(self, conversation_id: UUID, account_id: UUID, message_id: UUID) -> None:
         """冻结回答并取消尚未完成的搜索记录；已发出的请求仍可回传真实用量。"""
@@ -123,7 +121,7 @@ class StreamingChat:
             connection.execute("UPDATE model_calls SET status = 'stopped' WHERE assistant_message_id = %s AND status = 'generating' AND EXISTS (SELECT 1 FROM messages WHERE id = %s AND status = 'stopped')", (message_id, message_id))
 
     def close(self) -> None:
-        """停机时终结未完成回答并等待图线程释放，随后才允许关闭检查点连接。"""
+        """停机时终结未完成回答并等待图线程释放，业务记录保留停止和恢复依据。"""
         self.recover()
         with self.lock:
             threads = tuple(self.threads)
