@@ -18,12 +18,13 @@ from general_agent.attachments.images import validate_image
 from general_agent.attachments.files import DeepSeekFiles, file_api_base
 from general_agent.infrastructure.database import Database
 from general_agent.attachments.documents import parse_document
-from general_agent.attachments.knowledge import ChunkPolicy, store_units, text_units
+from general_agent.attachments.knowledge import ChunkPolicy, store_chunks, text_units
 from general_agent.attachments.pagination import paginate_word
 from general_agent.attachments.tools import DocumentTools
 from general_agent.attachments.retrieval import DocumentRetrieval
 from general_agent.infrastructure.provider import FilePart, ModelMessage, TextPart
-from general_agent.infrastructure.settings import SettingsStore
+from general_agent.infrastructure.settings import SettingsStore, EmbeddingSettingsStore
+from general_agent.infrastructure.tokens import TokenCounter
 from general_agent.attachments.upload import UploadedFile
 from general_agent.prompts import attachment_data, image_material_label
 
@@ -41,17 +42,20 @@ class AttachmentService:
     """隐藏会话知识库、文件生命周期、固定分页和图片读取。"""
 
     def __init__(self, database: Database, directory: Path, transport: httpx.BaseTransport | None = None) -> None:
-        """绑定文件服务、递归切片策略和复用嵌入配置的混合检索服务。"""
+        """绑定目标八百、容差两百 Token 的策略，计数器优先使用嵌入模型的官方配置。"""
         self.database = database
         self.directory = directory / 'attachments'
         self.files = DeepSeekFiles(SettingsStore(directory), transport)
-        self.policy = ChunkPolicy(int(os.environ.get('DOCUMENT_CHUNK_CHARACTERS', '1500')),
+        settings = EmbeddingSettingsStore(directory).read() or SettingsStore(directory).read()
+        counter = TokenCounter(os.environ.get('DOCUMENT_CHUNK_TOKENIZER_MODEL') or (settings.model if settings else 'document-default'))
+        self.policy = ChunkPolicy(int(os.environ.get('DOCUMENT_CHUNK_TOKENS', '800')),
                                   int(os.environ.get('DOCUMENT_SEARCH_RESULTS', '5')),
-                                  int(os.environ.get('DOCUMENT_CHUNK_OVERLAP', '200')))
+                                  int(os.environ.get('DOCUMENT_CHUNK_OVERLAP_TOKENS', '160')),
+                                  int(os.environ.get('DOCUMENT_CHUNK_OVERFLOW_TOKENS', '200')), counter)
         self.documents = DocumentTools(database, self.policy, DocumentRetrieval(database, directory, transport))
 
     def recover(self) -> None:
-        """恢复中断处理并从原文件升级为递归重叠索引；不更改原有到期时间。"""
+        """恢复中断处理与旧版索引；仅 Word 升级原生结构，不改变 PDF 解析或附件有效期。"""
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self.database.connect() as connection:
             connection.execute("UPDATE attachments SET status='failed', error='应用重启中断了文件处理，请重新上传。' WHERE status='processing'")
@@ -64,7 +68,11 @@ class AttachmentService:
         with self.database.connect() as connection:
             legacy = connection.execute(
                 "UPDATE attachments SET status='processing' WHERE status='ready' AND image_metadata IS NULL "
-                "AND knowledge_version<2 AND expires_at>CURRENT_TIMESTAMP RETURNING id",
+                "AND (knowledge_version<2 OR (lower(filename) LIKE '%%.docx' "
+                "AND (parse_info->>'text_source' IS DISTINCT FROM 'word_native_markdown_v2' "
+                "OR parse_info->>'chunk_policy' IS DISTINCT FROM %s))) "
+                "AND expires_at>CURRENT_TIMESTAMP RETURNING id",
+                (self.policy.signature,),
             ).fetchall()
         for row in legacy:
             self.process(row['id'])
@@ -117,9 +125,8 @@ class AttachmentService:
             self.process_file(attachment_id)
 
     def process_file(self, attachment_id: UUID) -> None:
-        """发布原文及第二版重叠索引或上传图片；重核来源和 TTL，阻止迟到发布。"""
+        """解析仅作切片输入；Word 由书签定位页码，发布共用切片前重核来源与 TTL。"""
         info: dict[str, Any] = {}
-        content: str | None = None
         try:
             with self.database.connect() as connection:
                 row = connection.execute("SELECT filename FROM attachments WHERE id=%s AND status='processing' AND expires_at>CURRENT_TIMESTAMP", (attachment_id,)).fetchone()
@@ -146,15 +153,19 @@ class AttachmentService:
                     if document.error:
                         raise ValueError(document.error)
                     if extension == '.docx':
-                        paginate_word(path, paginated)
-                        document = parse_document(paginated, '.pdf')
-                        document.info.format = 'docx'
-                        document.info.limitations.append('Word 文字来自固定分页副本；修订及附属内容以该副本中的可见内容为准。')
+                        pages, positions = paginate_word(path, paginated)
+                        if len(positions) != len(document.units):
+                            raise ValueError('Word 原文结构与分页定位数量不一致。')
+                        for ordinal, unit in enumerate(document.units, 1):
+                            unit.page, unit.end_page = positions[ordinal]
+                        document.info.total_units = pages
+                        document.info.readable_units = pages
+                        document.info.limitations.append('正文直接读取 Word 原件；固定分页副本仅提供页码，跨页段落和表格行保持完整。')
                         info = document.info.model_dump()
-                        if document.error:
-                            raise ValueError(document.error)
+                        info.update(chunk_policy=self.policy.signature, chunk_tokens=self.policy.tokens,
+                                    chunk_max_tokens=self.policy.max_tokens, chunk_overlap_tokens=self.policy.overlap,
+                                    token_count_method=self.policy.counter.method, tokenizer_model=self.policy.counter.model)
                     units = document.units
-                    content = self.document_content(document.chunks)
                 else:
                     text = path.read_bytes().decode('utf-8-sig')
                     if not text.strip():
@@ -162,16 +173,15 @@ class AttachmentService:
                     if any(ord(char) < 32 and char not in '\n\r\t' for char in text):
                         raise ValueError('文件包含二进制控制字符，不能作为文本读取。')
                     units = text_units(text)
-                    content = text
                     info = {'format': extension.lstrip('.'), 'total_units': len(units),
                             'readable_units': sum(bool(unit.content.strip()) for unit in units)}
                 with self.database.connect() as connection:
                     if not connection.execute("SELECT id FROM attachments WHERE id=%s AND status='processing' AND expires_at>CURRENT_TIMESTAMP FOR UPDATE", (attachment_id,)).fetchone():
                         return
-                    store_units(connection, attachment_id, units, self.policy)
+                    store_chunks(connection, attachment_id, units, self.policy)
                     if paginated.exists():
                         paginated.replace(self.directory / f'{attachment_id}.pdf')
-                    connection.execute("UPDATE attachments SET status='ready',error=NULL,parse_info=%s,content=%s,knowledge_version=2 WHERE id=%s", (Jsonb(info), content, attachment_id))
+                    connection.execute("UPDATE attachments SET status='ready',error=NULL,parse_info=%s,knowledge_version=2 WHERE id=%s", (Jsonb(info), attachment_id))
         except (UnicodeDecodeError, ValueError, OSError) as error:
             message = str(error) if isinstance(error, ValueError) and not isinstance(error, UnicodeDecodeError) else '无法读取文字；请上传 UTF-8 编码的 TXT 或 Markdown 文件。'
             with self.database.connect() as connection:
@@ -180,11 +190,6 @@ class AttachmentService:
             LOGGER.exception("附件处理失败 attachment_id=%s", attachment_id)
             with self.database.connect() as connection:
                 connection.execute("UPDATE attachments SET status='failed', error='文件处理失败，请重新上传。' WHERE id=%s AND status='processing'", (attachment_id,))
-
-    @staticmethod
-    def document_content(chunks: list[tuple[str, str]]) -> str:
-        """把解析器的页或段落片段合并成保留位置的完整文字。"""
-        return '\n\n'.join(f'[{location}]\n{text}' for location, text in chunks)
 
     def list_attachments(self, conversation_id: UUID, account_id: UUID) -> list[dict[str, Any]]:
         """列出会话内未到期附件的持久状态，不返回正文或已过期资料。"""
@@ -289,7 +294,7 @@ class AttachmentService:
             try:
                 self.delete_file(row['id'])
                 with self.database.connect() as connection:
-                    connection.execute('DELETE FROM document_units WHERE attachment_id=%s', (row['id'],))
-                    connection.execute("UPDATE attachments SET content=NULL,expired_cleaned=TRUE WHERE id=%s AND expires_at<=CURRENT_TIMESTAMP", (row['id'],))
+                    connection.execute('DELETE FROM document_chunks WHERE attachment_id=%s', (row['id'],))
+                    connection.execute("UPDATE attachments SET expired_cleaned=TRUE WHERE id=%s AND expires_at<=CURRENT_TIMESTAMP", (row['id'],))
             except Exception:
                 LOGGER.exception('到期附件清理未完成 attachment_id=%s', row['id'])

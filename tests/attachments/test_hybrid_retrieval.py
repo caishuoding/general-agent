@@ -233,8 +233,8 @@ def test_large_result_configuration_remains_effective(database_url: str, tmp_pat
 
 
 def test_oversized_rerank_input_falls_back_without_truncation(database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """大切片超过智谱限制时不调用重排、不截断正文，并明确声明原因。"""
-    monkeypatch.setenv('DOCUMENT_CHUNK_CHARACTERS', '10000')
+    """显式配置一万 Token 后，大切片超过智谱限制时不调用重排，正文保持完整并说明原因。"""
+    monkeypatch.setenv('DOCUMENT_CHUNK_TOKENS', '10000')
     configure_settings(database_url, tmp_path)
     (tmp_path / 'rerank.json').write_text(json.dumps({'api_key': 'test'}))
 

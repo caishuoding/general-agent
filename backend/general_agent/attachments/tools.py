@@ -1,4 +1,4 @@
-"""提供仅限当前会话的文档检索及有预算的连续原文读取工具。"""
+"""提供仅限当前会话的文档检索及按页顺序读取共用切片的工具。"""
 
 import json
 from typing import Any
@@ -24,15 +24,14 @@ class SearchDocumentsInput(BaseModel):
 
 
 class ReadCursor(BaseModel):
-    """定位原文单元及字符偏移，支持在同一页和段落内继续读取。"""
+    """定位下一片待返回切片；仅由工具生成，续读时沿用原页码或段落范围。"""
 
     model_config = ConfigDict(extra='forbid', strict=True)
-    unit: int = Field(ge=1)
-    offset: int = Field(ge=0)
+    chunk_id: int = Field(ge=1)
 
 
 class ReadDocumentInput(BaseModel):
-    """分页文档按页范围读取，非分页文档按段落范围读取；省略范围读取全文。"""
+    """分页文档按页定位切片，非分页文档按段落定位；省略范围顺序读取全部切片。"""
 
     model_config = ConfigDict(extra='forbid', strict=True)
     document_id: str
@@ -44,10 +43,10 @@ class ReadDocumentInput(BaseModel):
 
 
 def document_tools() -> list[dict[str, Any]]:
-    """描述两个工具的能力和参数，不规定模型调用时机、任务路由或执行顺序。"""
+    """描述检索与按页读取完整切片的能力，不规定模型调用时机和顺序。"""
     definitions: list[tuple[str, str, type[BaseModel]]] = [
         ('search_documents', '检索当前会话文档，返回匹配的完整切片及原文位置；可限定 document_ids。每轮最多五次。', SearchDocumentsInput),
-        ('read_document', '按页读取 PDF／Word 的连续原文，TXT／Markdown 按段落读取。省略范围读取全文；超限返回 next_cursor，续读时保持原范围并传入游标。最多 10000 Token 且不超过剩余上下文，每轮最多五次。', ReadDocumentInput),
+        ('read_document', '按页定位 PDF／Word 的全部匹配切片并按原文顺序返回完整正文；TXT／Markdown 按段落定位。省略范围读取全部切片；超限按整片返回 next_cursor，续读保持原范围。最多 10000 Token 且不超过剩余上下文，每轮最多五次。', ReadDocumentInput),
     ]
     return [{'type': 'function', 'function': {'name': name, 'description': description,
              'parameters': schema.model_json_schema()}} for name, description, schema in definitions]
@@ -101,7 +100,7 @@ class DocumentTools:
     def search_rows(self, conversation_id: UUID, account_id: UUID, identifiers: list[UUID] | None,
                     *, validate_ids: bool = False,
                     chunk_keys: list[tuple[str, int]] | None = None) -> list[dict[str, Any]]:
-        """首次读取完整授权语料；网络阶段按切片身份精确核验，避免分批重复全量读取。"""
+        """直接读取授权切片及自带位置、结构和计数元数据，无需关联另一份原文。"""
         chunk_documents = [UUID(key[0]) for key in chunk_keys] if chunk_keys is not None else None
         chunk_ordinals = [key[1] for key in chunk_keys] if chunk_keys is not None else None
         with self.database.connect() as connection:
@@ -116,9 +115,8 @@ class DocumentTools:
             return connection.execute(
                 "SELECT d.attachment_id AS document_id,a.filename,d.ordinal AS chunk_id,d.content,"
                 "d.embedding,d.embedding_revision,"
-                "u.page,u.paragraph,e.page AS end_page,e.paragraph AS end_paragraph,d.start_offset,d.end_offset FROM document_chunks d "
-                "JOIN document_units u ON u.attachment_id=d.attachment_id AND u.ordinal=d.unit_ordinal "
-                "JOIN document_units e ON e.attachment_id=d.attachment_id AND e.ordinal=d.end_unit_ordinal "
+                "d.context_prefix,d.context_suffix,d.token_count,d.token_count_method,"
+                "d.page,d.paragraph,d.end_page,d.end_paragraph,d.structure,d.end_structure FROM document_chunks d "
                 "JOIN attachments a ON a.id=d.attachment_id WHERE a.conversation_id=%s AND a.status='ready' "
                 "AND a.expires_at>CURRENT_TIMESTAMP AND a.knowledge_version=2 "
                 "AND (%s::uuid[] IS NULL OR a.id=ANY(%s)) "
@@ -129,11 +127,12 @@ class DocumentTools:
 
     def live_candidates(self, candidates: list[dict[str, Any]], conversation_id: UUID, account_id: UUID,
                         identifiers: list[UUID] | None) -> list[dict[str, Any]]:
-        """网络阶段结束后重新核验内容和原文位置，阻止删除、到期和重切片的迟到结果。"""
+        """网络阶段后核验正文、结构和页码，阻止删除、到期和 Word 重切片的迟到结果。"""
         current = {chunk_key(row): row for row in self.search_rows(
             conversation_id, account_id, identifiers, chunk_keys=[chunk_key(row) for row in candidates])}
         valid: list[dict[str, Any]] = []
-        fields = ('content', 'page', 'paragraph', 'end_page', 'end_paragraph', 'start_offset', 'end_offset')
+        fields = ('content', 'page', 'paragraph', 'end_page', 'end_paragraph',
+                  'structure', 'end_structure', 'context_prefix', 'context_suffix', 'token_count', 'token_count_method')
         for row in candidates:
             live = current.get(chunk_key(row))
             if live is not None and all(live[field] == row[field] for field in fields):
@@ -142,38 +141,40 @@ class DocumentTools:
 
     def read(self, conversation_id: UUID, account_id: UUID, arguments: dict[str, Any],
              counter: TokenCounter, available_tokens: int) -> dict[str, Any]:
-        """按第二版自然段原文连续读取，完整结果受单次上限和当前上下文预算约束。"""
+        """按页或段落元数据筛选共用切片，按原文顺序整片返回，不裁剪跨页和重叠内容。"""
         request = ReadDocumentInput.model_validate(arguments)
         identifier = UUID(request.document_id)
         with self.database.connect() as connection:
             self.guard(connection, conversation_id, account_id)
             document = connection.execute(
-                "SELECT filename FROM attachments WHERE id=%s AND conversation_id=%s AND status='ready' "
+                "SELECT filename,parse_info FROM attachments WHERE id=%s AND conversation_id=%s AND status='ready' "
                 "AND expires_at>CURRENT_TIMESTAMP AND knowledge_version=2",
                 (identifier, conversation_id),
             ).fetchone()
             if document is None:
                 raise LookupError('文档不存在、已过期或不可读取。')
-            units = connection.execute('SELECT ordinal,page,paragraph,content FROM document_units WHERE attachment_id=%s ORDER BY ordinal', (identifier,)).fetchall()
-        paginated = any(unit['page'] is not None for unit in units)
-        if paginated and (request.start_paragraph is not None or request.end_paragraph is not None):
-            raise ValueError('PDF／Word 请使用页码范围。')
-        if not paginated and (request.start_page is not None or request.end_page is not None):
-            raise ValueError('非分页文档请使用段落范围。')
-        key = 'page' if paginated else 'paragraph'
-        maximum = max((unit[key] for unit in units), default=0)
-        start = (request.start_page if paginated else request.start_paragraph) or 1
-        end = (request.end_page if paginated else request.end_paragraph) or maximum
-        if not 1 <= start <= end <= maximum:
-            raise ValueError('读取范围超出文档范围。')
-        selected = [unit for unit in units if start <= unit[key] <= end]
-        if request.cursor is not None:
-            selected = [unit for unit in selected if unit['ordinal'] >= request.cursor.unit]
-            if not selected or selected[0]['ordinal'] != request.cursor.unit or request.cursor.offset > len(selected[0]['content']):
-                raise ValueError('续读位置不属于当前读取范围。')
+            paginated = document['parse_info'].get('format') in ('pdf', 'docx')
+            if paginated and (request.start_paragraph is not None or request.end_paragraph is not None):
+                raise ValueError('PDF／Word 请使用页码范围。')
+            if not paginated and (request.start_page is not None or request.end_page is not None):
+                raise ValueError('非分页文档请使用段落范围。')
+            maximum = document['parse_info'].get('total_units', 0)
+            start = (request.start_page if paginated else request.start_paragraph) or 1
+            end = (request.end_page if paginated else request.end_paragraph) or maximum
+            if not 1 <= start <= end <= maximum:
+                raise ValueError('读取范围超出文档范围。')
+            # 列名由文件格式白名单选择；范围和游标仍使用绑定参数。
+            key = 'page' if paginated else 'paragraph'
+            chunks = connection.execute(
+                f'SELECT ordinal,content FROM document_chunks WHERE attachment_id=%s '
+                f'AND {key}<=%s AND end_{key}>=%s AND ordinal>=%s ORDER BY ordinal',
+                (identifier, end, start, request.cursor.chunk_id if request.cursor else 1),
+            ).fetchall()
+        if request.cursor is not None and (not chunks or chunks[0]['ordinal'] != request.cursor.chunk_id):
+            raise ValueError('续读位置不属于当前读取范围。')
         # 计入图执行器追加的调用计数字段，保证最终工具结果也在上限内。
         budget = max(0, min(10000, available_tokens) - 128)
-        return self.read_result(request, document['filename'], selected, counter, budget)
+        return self.read_result(request, document['filename'], chunks, counter, budget)
 
     @staticmethod
     def guard(connection: Any, conversation_id: UUID, account_id: UUID) -> None:
@@ -183,43 +184,27 @@ class DocumentTools:
             raise LookupError('会话不存在。')
 
     @staticmethod
-    def read_result(request: ReadDocumentInput, filename: str, units: list[dict[str, Any]],
+    def read_result(request: ReadDocumentInput, filename: str, chunks: list[dict[str, Any]],
                     counter: TokenCounter, budget: int) -> dict[str, Any]:
-        """构造预算内的原文块和无损游标，连结果包装一起计数，不足时返回明确错误。"""
+        """整片装入预算，连包装一起计数；剩余切片用游标续读，不拆正文或移除重叠。"""
         result: dict[str, Any] = {'document_id': request.document_id, 'filename': filename, 'content': [],
                                   'complete': True, 'next_cursor': None, 'token_count_method': counter.method}
         blocks: list[dict[str, Any]] = result['content']
-        for index, unit in enumerate(units):
-            offset = request.cursor.offset if index == 0 and request.cursor is not None else 0
-            remaining = unit['content'][offset:]
-            block = {'page': unit['page'], 'paragraph': unit['paragraph'], 'start_offset': offset,
-                     'end_offset': offset, 'content': ''}
-            blocks.append(block)
-            # 先按最坏续读包装保留位置，避免正文填满后游标挤出预算。
-            result['complete'] = False
-            result['next_cursor'] = {'unit': unit['ordinal'], 'offset': len(unit['content'])}
-            overhead = counter.count(json.dumps(result, ensure_ascii=False))
-            text = counter.prefix(remaining, max(0, budget - overhead))
-            block.update(content=text, end_offset=offset + len(text))
-            result['next_cursor'] = {'unit': unit['ordinal'], 'offset': offset + len(text)}
-            # JSON 转义和分词边界会改变计数，必须对完整结果再次核验。
-            while text and counter.count(json.dumps(result, ensure_ascii=False)) > budget:
-                text = text[:max(0, len(text) - max(1, len(text) // 20))]
-                block.update(content=text, end_offset=offset + len(text))
-                result['next_cursor']['offset'] = offset + len(text)
-            if len(text) < len(remaining):
-                if not text:
-                    blocks.pop()
-                if not blocks:
-                    return {'error': '当前上下文预算不足以返回原文，请先释放上下文空间。', 'code': 'context_budget_exhausted'}
-                return result
-            result['complete'] = index == len(units) - 1
-            result['next_cursor'] = None if result['complete'] else {'unit': units[index + 1]['ordinal'], 'offset': 0}
+        for index, chunk in enumerate(chunks):
+            blocks.append({'chunk_id': chunk['ordinal'], 'content': chunk['content']})
+            result['complete'] = index == len(chunks) - 1
+            result['next_cursor'] = None if result['complete'] else {'chunk_id': chunks[index + 1]['ordinal']}
             if counter.count(json.dumps(result, ensure_ascii=False)) > budget:
                 blocks.pop()
                 result['complete'] = False
-                result['next_cursor'] = {'unit': unit['ordinal'], 'offset': offset}
+                result['next_cursor'] = {'chunk_id': chunk['ordinal']}
+                # 末片由 complete 改为游标会增大包装，必要时再退回上一整片。
+                while blocks and counter.count(json.dumps(result, ensure_ascii=False)) > budget:
+                    removed = blocks.pop()
+                    result['next_cursor'] = {'chunk_id': removed['chunk_id']}
                 if not blocks:
-                    return {'error': '当前上下文预算不足以返回原文，请先释放上下文空间。', 'code': 'context_budget_exhausted'}
+                    return {'error': '当前上下文预算不足以返回完整切片，请先释放上下文空间。', 'code': 'context_budget_exhausted'}
                 return result
+        if counter.count(json.dumps(result, ensure_ascii=False)) > budget:
+            return {'error': '当前上下文预算不足以返回完整切片，请先释放上下文空间。', 'code': 'context_budget_exhausted'}
         return result

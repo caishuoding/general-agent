@@ -14,9 +14,6 @@ from zipfile import ZipFile
 from xml.etree import ElementTree
 
 from docx import Document
-from docx.document import Document as WordDocument
-from docx.table import _Cell
-from docx.text.paragraph import Paragraph
 
 from pydantic import BaseModel, Field
 from pypdf import PdfReader, filters
@@ -27,6 +24,7 @@ from general_agent.attachments.limits import (
     MAX_DOCUMENT_RSS_BYTES,
 )
 from general_agent.attachments.knowledge import DocumentUnit, text_units, MAX_DOCUMENT_UNITS
+from general_agent.attachments.word_structure import word_units
 
 MAX_TEXT_CHARACTERS = 2_000_000
 
@@ -105,23 +103,18 @@ class DocumentInfo(BaseModel):
     missing_units: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     coverage: str = 'complete'
+    text_source: str | None = None
 
 
 class ParsedDocument(BaseModel):
-    """可保存的文字片段、处理范围及真实失败原因。"""
-    chunks: list[tuple[str, str]] = Field(default_factory=list)
+    """传给切片器的临时解析块、处理范围及真实失败原因。"""
     info: DocumentInfo
     error: str | None = None
     units: list[DocumentUnit] = Field(default_factory=list)
 
 
-def split_unit(location: str, text: str) -> list[tuple[str, str]]:
-    """保留整页或整段正文与位置；检索切片统一由知识库递归生成，避免重复正文。"""
-    return [(location, text)] if text.strip() else []
-
-
 def parse_pdf(path: Path) -> ParsedDocument:
-    """按固定物理页提取段落原文，保留空页和解析缺口，不做 OCR。"""
+    """按物理页提取临时段落供统一切片，保留空页和解析缺口，不做 OCR。"""
     info = DocumentInfo(format='pdf', limitations=['仅提取文字；复杂图表、内嵌图片和特殊排版未被理解，需要将相关图像单独上传。'])
     try:
         filters.ZLIB_MAX_OUTPUT_LENGTH = 10_000_000
@@ -131,7 +124,6 @@ def parse_pdf(path: Path) -> ParsedDocument:
         info.total_units = len(reader.pages)
         if info.total_units > 200:
             return ParsedDocument(info=info, error='单份 PDF 最多 200 页，请拆分后上传。')
-        chunks: list[tuple[str, str]] = []
         units: list[DocumentUnit] = []
         text_size = 0
         for number, page in enumerate(reader.pages, 1):
@@ -154,42 +146,17 @@ def parse_pdf(path: Path) -> ParsedDocument:
                 info.missing_units.append(f'第 {number} 页没有可提取文字（可能是空白或扫描图像）')
             else:
                 info.readable_units += 1
-                chunks.extend(split_unit(f'第 {number} 页', text))
         info.coverage = 'partial' if info.missing_units else 'complete'
-        if not chunks:
+        if not info.readable_units:
             return ParsedDocument(info=info, error='PDF 没有可提取文字；可能是扫描版或空白文档，本版本不提供 OCR。')
-        return ParsedDocument(chunks=chunks, info=info, units=units)
+        return ParsedDocument(info=info, units=units)
     except Exception:
         return ParsedDocument(info=info, error='PDF 损坏或不是有效 PDF，无法读取文字。')
 
 
-def word_units(container: WordDocument | _Cell, prefix: str = '', depth: int = 0) -> list[tuple[str, str]]:
-    """按真实正文顺序展开段落和表格，保留空段落计数且不生成分页信息。"""
-    if depth > 8:
-        raise ValueError('DOCX 表格嵌套过深，请简化文档后上传。')
-    units: list[tuple[str, str]] = []
-    paragraphs, tables = 0, 0
-    for item in container.iter_inner_content():
-        if isinstance(item, Paragraph):
-            paragraphs += 1
-            location = f'{prefix}，段落 {paragraphs}' if prefix else f'正文段落 {paragraphs}'
-            units.append((location, item.text))
-        else:
-            tables += 1
-            table_prefix = f'{prefix}，嵌套表格 {tables}' if prefix else f'表格 {tables}'
-            seen: set[object] = set()
-            for row_number, row in enumerate(item.rows, 1):
-                for column_number, cell in enumerate(row.cells, 1):
-                    if cell._tc in seen:
-                        continue
-                    seen.add(cell._tc)
-                    units.extend(word_units(cell, f'{table_prefix}，第 {row_number} 行，第 {column_number} 列', depth + 1))
-    return units
-
-
 def parse_docx(path: Path) -> ParsedDocument:
-    """先限制ZIP展开与XML实体，再解析正文表格并说明修订及附属内容缺口。"""
-    info = DocumentInfo(format='docx', limitations=['仅提取正文及表格文字；复杂图表、内嵌图片和特殊排版未被理解，需要将相关图像单独上传。'])
+    """校验 ZIP 与 XML 后生成临时原生段落、标题和 Markdown 表格行，明确未读取的附属内容。"""
+    info = DocumentInfo(format='docx', text_source='word_native_markdown_v2', limitations=['仅提取正文及表格文字；复杂图表、内嵌图片和特殊排版未被理解，需要将相关图像单独上传。'])
     try:
         with ZipFile(path) as archive:
             entries = archive.infolist()
@@ -216,15 +183,14 @@ def parse_docx(path: Path) -> ParsedDocument:
             if any(name.startswith(('word/header', 'word/footer', 'word/footnotes', 'word/endnotes', 'word/comments')) for name in names):
                 info.missing_units.append('页眉、页脚、脚注、尾注及批注不在当前提取范围。')
         units = word_units(Document(str(path)))
-        if sum(len(text) for _, text in units) > MAX_TEXT_CHARACTERS:
+        if sum(len(unit.content) for unit in units) > MAX_TEXT_CHARACTERS:
             raise ValueError('文档提取文字超过 2,000,000 字符资源限制，请拆分后上传。')
         info.total_units = len(units)
-        info.readable_units = sum(bool(text.strip()) for _, text in units)
+        info.readable_units = sum(bool(unit.content.strip()) for unit in units)
         info.coverage = 'partial' if info.missing_units else 'complete'
-        chunks = [chunk for location, text in units for chunk in split_unit(location, text)]
-        if not chunks:
+        if not info.readable_units:
             return ParsedDocument(info=info, error='DOCX 没有可提取的正文或表格文字；图像和扫描内容不会自动识别。')
-        return ParsedDocument(chunks=chunks, info=info)
+        return ParsedDocument(info=info, units=units)
     except ValueError as error:
         return ParsedDocument(info=info, error=str(error))
     except Exception:

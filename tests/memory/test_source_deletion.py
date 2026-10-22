@@ -126,7 +126,7 @@ def test_parser_late_result_cannot_restore_deleted_file(database_url: str, tmp_p
             assert upload.result(timeout=5).status_code == 201
         assert client.get(f'/api/conversations/{conversation}/attachments').json()[0]['status'] == 'deleting'
         with psycopg.connect(database_url) as connection:
-            assert connection.execute('SELECT content FROM attachments WHERE id=%s', (file['id'],)).fetchone() == (None,)
+            assert connection.execute('SELECT count(*) FROM document_chunks WHERE attachment_id=%s', (file['id'],)).fetchone() == (0,)
         physical.rmdir()
         assert client.post('/api/source-deletions/' + failed.json()['id'] + '/retry').json()['status'] == 'complete'
         with psycopg.connect(database_url) as connection:

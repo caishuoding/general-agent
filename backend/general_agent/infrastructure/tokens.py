@@ -2,6 +2,8 @@
 
 import json
 import os
+from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
 from tokenizers import Tokenizer
@@ -13,7 +15,8 @@ class TokenCounter:
     """只加载明确匹配模型的官方 tokenizer.json，不猜用其他模型的分词器。"""
 
     def __init__(self, model: str) -> None:
-        """通过 MODEL_TOKENIZERS 的模型名到官方文件路径映射加载可选分词器。"""
+        """加载明确匹配模型的可选官方分词器，并记录计数配置指纹供切片重建使用。"""
+        self.model = model
         self.tokenizer: Tokenizer | None = None
         paths = json.loads(os.environ.get('MODEL_TOKENIZERS', '{}'))
         path = paths.get(model)
@@ -22,6 +25,8 @@ class TokenCounter:
             self.tokenizer.no_truncation()
             self.tokenizer.no_padding()
         self.method = 'official_tokenizer' if self.tokenizer is not None else 'character_estimate'
+        identity = Path(path).read_bytes() if path else b'utf8-conservative-v1'
+        self.fingerprint = sha256(model.encode() + b'\n' + identity).hexdigest()
 
     def count(self, text: str) -> int:
         """官方按普通文本编码计数；无对应实现时每个字符按其 UTF-8 字节数保守估算。"""

@@ -192,18 +192,18 @@ Mem0 由 `mem0/` 下的官方源码 Docker 服务运行，业务后端只使用 
 
 文字附件无论大小均不自动发送正文。每轮只发送文档 ID、文件名和页数／段落数清单，不附带状态或解析缺口。模型自主选择是否调用以下工具及其参数，没有前置检索、任务分类或固定读取顺序：
 
-- `search_documents(query, document_ids?)`：检索当前会话切片，返回完整正文及位置。按自然段→句子→分句→空白→字符递归切分，默认每片最多 1,500 字符（包含重叠）、重叠目标 200 字符、返回五片，分别由服务端环境变量 `DOCUMENT_CHUNK_CHARACTERS`（100–10000）、`DOCUMENT_CHUNK_OVERLAP`（0–10000，0 禁用）与 `DOCUMENT_SEARCH_RESULTS`（1–50）配置；检索不按 Token 数裁剪。检索方案升级为 BM25 + 向量语义混合召回，复用管理端既有嵌入配置；两路默认各取 30 片，经等权 RRF（k=60）去重融合取前 30 片，交给智谱 rerank，最终默认返回最多五片。若返回片数配置大于 30，候选上限同步提高。向量首次检索时分批生成并持久缓存，配置变更后按版本重建；首次检索可能较慢。向量不可用时降级为 BM25，重排不可用时使用融合排名，工具结果标明降级。详见 [混合召回规格](.scratch/attachment-hybrid-retrieval/spec.md)（实现状态以规格为准）。
-- `read_document(document_id, start_page?, end_page?, start_paragraph?, end_paragraph?, cursor?)`：PDF／Word 按页范围、TXT／Markdown 按段落范围读取连续解析原文。省略范围则读取全篇。结果含页、段落、字符偏移；超限返回 `next_cursor`，续读保留原范围。
+- `search_documents(query, document_ids?)`：检索当前会话切片，返回完整正文及位置。按自然段→句子→分句→空白→字符递归切分，默认目标 800 Token，为保留完整段落、句子或表格行可使用 200 Token 容差，绝对上限 1000 Token（包含重叠、Markdown 语法和重复表头）；正文重叠最多 160 Token，始终不超过目标的 20%。环境变量 `DOCUMENT_CHUNK_TOKENS`（100–10000）、`DOCUMENT_CHUNK_OVERFLOW_TOKENS`（0–200）、`DOCUMENT_CHUNK_OVERLAP_TOKENS`（0–10000，0 禁用，超过目标 20% 时自动收敛）与 `DOCUMENT_SEARCH_RESULTS`（1–50，默认五片）分别配置预算和片数；检索返回完整切片。检索方案升级为 BM25 + 向量语义混合召回，复用管理端既有嵌入配置；两路默认各取 30 片，经等权 RRF（k=60）去重融合取前 30 片，交给智谱 rerank，最终默认返回最多五片。若返回片数配置大于 30，候选上限同步提高。向量首次检索时分批生成并持久缓存，配置变更后按版本重建；首次检索可能较慢。向量不可用时降级为 BM25，重排不可用时使用融合排名，工具结果标明降级。详见 [混合召回规格](.scratch/attachment-hybrid-retrieval/spec.md)（实现状态以规格为准）。
+- `read_document(document_id, start_page?, end_page?, start_paragraph?, end_paragraph?, cursor?)`：PDF／Word 按页范围、TXT／Markdown 按段落范围定位与所选范围有交集的全部检索切片，按原文顺序返回完整正文。省略范围则读取全部切片，不受检索返回片数限制；跨页、重叠和重复表头直接保留，不再裁剪或拆分。结果 `content` 中每项包含 `chunk_id` 和 `content`；超限按整片分页，返回 `next_cursor: {"chunk_id": 下一片编号}`，续读保留原范围。预算不足以放入一整片时返回 `context_budget_exhausted`。
 
-自然段按空行识别，段内单换行保留；短段顺序合并，长段按完整句子细分。重叠优先取末尾完整句子，单句超过目标时可以超出目标；放不下新句时减少重叠，超长句才退到分句或字符。Markdown `#` 标题及“第…章／节／篇／部”边界不跨片或重叠，物理页边界允许跨越；检索位置包含起止页、段落及各自段内偏移。PDF 依赖提取文本的空行，未增加版面分析。
+TXT／Markdown 自然段按空行识别，段内单换行保留；短段顺序合并，长段按完整句子细分。Word 直接读取原件中的段落、标题和表格行，保留所属章节，表格转为标准 Markdown；长表按完整行分片，各片重复表头，表头计入预算，数据行不重叠；超长单行按单元格续片并保留列位置；不再从分页 PDF 反向提取 Word 正文。重叠优先取末尾完整句子，超出硬上限的整句不再重复；放不下新句时减少重叠，超长句才退到分句或字符。Markdown `#` 标题及“第…章／节／篇／部”边界不跨片或重叠，物理页边界允许跨越；切片自身保存起止页、段落及章节／表格结构。PDF 依赖提取文本的空行，未增加版面分析。
 
-每个文档工具每轮分别最多调用五次，正常、失败、重试和续读均计数。原文读取连同结果包装最多 10,000 Token，且不超过执行点的剩余上下文预算；包装和调用计数字段会预留空间。管理端模型配置中填写实际上下文窗口与回答预留，默认 32,768／4,096 Token。已有模型请求用量可用于核对图片等实际占用；没有用量时文字消息使用本地估算；含图片且缺少实际用量时，原文工具返回预算不足，不能把短 file_id 当作图片的 Token 开销。切片检索没有额外 Token 预算。
+每个文档工具每轮分别最多调用五次，正常、失败、重试和续读均计数。切片阅读连同结果包装最多 10,000 Token，且不超过执行点的剩余上下文预算；包装和调用计数字段会预留空间。管理端模型配置中填写实际上下文窗口与回答预留，默认 32,768／4,096 Token。已有模型请求用量可用于核对图片等实际占用；没有用量时文字消息使用本地估算；含图片且缺少实际用量时，阅读工具返回预算不足，不能把短 file_id 当作图片的 Token 开销。切片检索没有额外 Token 预算。
 
-原文计数优先加载 `MODEL_TOKENIZERS` 环境变量中明确匹配模型的官方 `tokenizer.json`，例如 `{"your-model":"/absolute/path/tokenizer.json"}`。文件须由模型官方提供并对应当前模型，不自动套用其他模型分词器；未配置对应实现时，按字符 UTF-8 字节数保守估算，结果标记 `character_estimate`。DeepSeek 官方离线分词文件入口见 [Token 用量计算](https://api-docs.deepseek.com/zh-cn/quick_start/token_usage/)。本次不新增滑动窗口或摘要机制；后续压缩移除工具正文后，仍可通过每轮清单重新读取持久原文。
+原文计数优先加载 `MODEL_TOKENIZERS` 环境变量中明确匹配模型的官方 `tokenizer.json`，例如 `{"your-model":"/absolute/path/tokenizer.json"}`。文件须由模型官方提供并对应当前模型，不自动套用其他模型分词器；未配置对应实现时，按字符 UTF-8 字节数保守估算，结果标记 `character_estimate`。DeepSeek 官方离线分词文件入口见 [Token 用量计算](https://api-docs.deepseek.com/zh-cn/quick_start/token_usage/)。本次不新增滑动窗口或摘要机制；后续压缩移除工具正文后，仍可通过每轮清单重新读取持久切片。
 
-原文件保存在 `APP_DATA_DIR/attachments/<UUID>`，Word 分页副本为 `<UUID>.pdf`。处理状态、TTL、解析范围在 `attachments`，结构原文在 `document_units`，切片和关键词索引在 `document_chunks`。原件与业务数据库均需备份；旧文字附件（knowledge_version 0／1）启动时从原件重建第二版递归重叠知识库，不延长原有效期。
+原文件保存在 `APP_DATA_DIR/attachments/<UUID>`，Word 分页副本为 `<UUID>.pdf`。处理状态、TTL、解析范围在 `attachments`；唯一持久正文、页码／段落元数据、结构、关键词索引和向量均在 `document_chunks`。解析段落仅作生成切片的临时输入。迁移 046 将旧原文的位置和结构搬入已有切片，保留切片正文及向量，再删除 `document_units` 表、旧原文引用／偏移字段和重复全文列 `attachments.content`；无需为此次迁移重新解析或切片。原件与业务数据库均需备份；旧文字附件（knowledge_version 0／1）启动时从原件重建第二版递归重叠知识库；迁移 044 后 Word 单独升级原生结构并应用当前切片策略，PDF 不重建，不延长原有效期。
 
-到期后立即停止下载、清单展示、图片引用和工具访问。启动时及每分钟清理原件、副本、原文、切片和索引；图片同时清理远端文件。失败保留到期身份并自动重试，不恢复访问；已生成聊天正文保留。主动删除附件和会话沿用现有来源清理入口。
+到期后立即停止下载、清单展示、图片引用和工具访问。启动时及每分钟清理原件、副本、切片和索引；图片同时清理远端文件。失败保留到期身份并自动重试，不恢复访问；已生成聊天正文保留。主动删除附件和会话沿用现有来源清理入口。
 
 ## PDF 与 Word 文字资料
 
@@ -273,3 +273,5 @@ DeepSeek 不返回 token usage。项目用 `credits` 记录官方规则下的计
 ## 系统提示词
 
 所有发送给模型的稳定系统提示词、工具描述、资料信任边界和网页来源规则集中在 `backend/general_agent/prompts/`。附件、长期记忆和网页搜索模块只传入结构化动态资料，不再各自维护提示正文。
+
+切片计数器优先选用嵌入模型，也可通过 `DOCUMENT_CHUNK_TOKENIZER_MODEL` 指定模型；`MODEL_TOKENIZERS` 映射到对应官方 tokenizer.json。未配置对应分词器时使用 UTF-8 字节数保守估算，元数据明确标记 `character_estimate`，不声称是精确 Token 数。Word 的计数配置变化会触发本地启动重建。`context_prefix`／`context_suffix` 保存重复表头等结构包装，原文偏移只指向实际正文；旧字符配置不再用于切片预算。
