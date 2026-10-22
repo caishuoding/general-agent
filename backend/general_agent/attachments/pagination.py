@@ -11,11 +11,14 @@ from uuid import uuid4
 from docx import Document
 from pypdf import PdfReader
 
+from general_agent.attachments.document_images import bookmark_word_images
 from general_agent.attachments.word_structure import word_units
 
 
-def paginate_word(source: Path, destination: Path) -> tuple[int, dict[int, tuple[int, int]]]:
-    """仅用不可见书签映射原生 Word 块的起止页；不从 PDF 抽取正文，原件保持不变。"""
+def paginate_word(
+    source: Path, destination: Path,
+) -> tuple[int, dict[int, tuple[int, int]], dict[int, int]]:
+    """用不可见书签映射 Word 正文块和内嵌图片页码，不修改原件。"""
     executable = os.environ.get('LIBREOFFICE_BINARY') or shutil.which('soffice')
     if not executable:
         raise ValueError('Word 自动分页需要 LibreOffice，请安装后重新处理附件。')
@@ -25,6 +28,7 @@ def paginate_word(source: Path, destination: Path) -> tuple[int, dict[int, tuple
         document = Document(str(source))
         prefix = 'GA' + uuid4().hex[:16]
         units = word_units(document, bookmark_prefix=prefix)
+        image_names = bookmark_word_images(document, prefix)
         document.save(str(input_path))
         profile = directory / 'profile'
         if sys.platform == 'darwin':
@@ -62,5 +66,11 @@ def paginate_word(source: Path, destination: Path) -> tuple[int, dict[int, tuple
             if start is None or end is None or start > end:
                 raise ValueError('Word 原生块的分页定位失败，未生成不准确的页码。')
             positions[ordinal] = (start, end)
+        image_positions: dict[int, int] = {}
+        for ordinal, name in enumerate(image_names, 1):
+            page = pages.get(name)
+            if page is None:
+                raise ValueError('Word 内嵌图片的分页定位失败，未生成不准确的页码。')
+            image_positions[ordinal] = page
         shutil.copyfile(output, destination)
-        return len(reader.pages), positions
+        return len(reader.pages), positions, image_positions

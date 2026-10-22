@@ -4,7 +4,7 @@ import re
 from math import log
 from bisect import bisect_left, bisect_right
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 from uuid import UUID
 
@@ -254,7 +254,7 @@ def table_specs(group: list[DocumentUnit], offset: int, policy: ChunkPolicy) -> 
 
 
 def chunk_specs(units: list[DocumentUnit], policy: ChunkPolicy) -> list[ChunkSpec]:
-    """Word 按章节和表格分组，其他格式沿用自然切点；表格包装与原文范围分别保存。"""
+    """Word 按章节、Word／PDF 按表格分组，普通正文沿用自然切点，单独保存结构包装。"""
     specs: list[ChunkSpec] = []
     offset, index = 0, 0
     native = any(unit.location is not None for unit in units)
@@ -309,6 +309,78 @@ def store_chunks(connection: Any, identifier: UUID, units: list[DocumentUnit], p
                 'INSERT INTO document_chunks(attachment_id,ordinal,page,end_page,paragraph,end_paragraph,structure,end_structure,'
                 'content,terms,context_prefix,context_suffix,token_count,token_count_method) '
                 'VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)', chunks,
+            )
+
+
+def store_document_images(
+    connection: Any,
+    identifier: UUID,
+    images: list[dict[str, Any]],
+) -> None:
+    """重建附件图片元数据；删除旧图片会同步撤销其描述切片。"""
+    connection.execute('DELETE FROM document_images WHERE attachment_id=%s', (identifier,))
+    if not images:
+        return
+    rows = [
+        (
+            item['id'], identifier, item['ordinal'], item.get('page'), item.get('end_page'),
+            item['paragraph'], Jsonb(item.get('section', [])), item['location'],
+            item['storage_name'], item['sha256'], item['mime'], item['width'], item['height'],
+            item.get('ocr_text', ''), item.get('caption', ''), item.get('description', ''),
+            Jsonb(item.get('uncertainties', [])), Jsonb(item['provider_file']) if item.get('provider_file') else None,
+            item['vision_status'], item.get('vision_model'), item.get('vision_revision'), item.get('vision_error'),
+        )
+        for item in images
+    ]
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            'INSERT INTO document_images('
+            'id,attachment_id,ordinal,page,end_page,paragraph,section,location,storage_name,sha256,mime,'
+            'width,height,ocr_text,caption,description,uncertainties,provider_file,vision_status,'
+            'vision_model,vision_revision,vision_error'
+            ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+            rows,
+        )
+
+
+def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str, Any]], policy: ChunkPolicy) -> None:
+    """把成功的结构化图片描述写成普通检索切片，并绑定稳定图片身份。"""
+    next_ordinal = (connection.execute(
+        'SELECT COALESCE(MAX(ordinal),0)+1 AS ordinal FROM document_chunks WHERE attachment_id=%s',
+        (identifier,),
+    ).fetchone() or {'ordinal': 1})['ordinal']
+    rows: list[tuple[Any, ...]] = []
+    image_policy = replace(policy, overlap=0)
+    for image in images:
+        if image.get('vision_status') != 'complete':
+            continue
+        context = '；'.join(item for item in (
+            ' > '.join(image.get('section', [])),
+            image['location'],
+            f"图注：{image['caption']}" if image.get('caption') else '',
+            f"图中文字：{image['ocr_text']}" if image.get('ocr_text') else '',
+        ) if item)
+        content = f'[文档图片]\n{context}\n视觉描述：{image["description"]}'
+        for start, end in chunk_ranges(content, image_policy):
+            chunk = content[start:end]
+            if not chunk.strip():
+                continue
+            rows.append((
+                identifier, next_ordinal, image.get('page') or 1, image.get('end_page') or image.get('page') or 1,
+                image['paragraph'], image['paragraph'], Jsonb({'kind': 'image'}),
+                Jsonb({'kind': 'image', 'ordinal': image['ordinal']}), chunk,
+                sorted(set(search_terms(chunk))), '', '', image['id'], image_policy.counter.count(chunk),
+                image_policy.counter.method,
+            ))
+            next_ordinal += 1
+    if rows:
+        with connection.cursor() as cursor:
+            cursor.executemany(
+                'INSERT INTO document_chunks('
+                'attachment_id,ordinal,page,end_page,paragraph,end_paragraph,structure,end_structure,'
+                'content,terms,context_prefix,context_suffix,image_id,token_count,token_count_method'
+                ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+                rows,
             )
 
 

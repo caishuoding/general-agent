@@ -45,8 +45,8 @@ class ReadDocumentInput(BaseModel):
 def document_tools() -> list[dict[str, Any]]:
     """描述检索与按页读取完整切片的能力，不规定模型调用时机和顺序。"""
     definitions: list[tuple[str, str, type[BaseModel]]] = [
-        ('search_documents', '检索当前会话文档，返回匹配的完整切片及原文位置；可限定 document_ids。每轮最多五次。', SearchDocumentsInput),
-        ('read_document', '按页定位 PDF／Word 的全部匹配切片并按原文顺序返回完整正文；TXT／Markdown 按段落定位。省略范围读取全部切片；超限按整片返回 next_cursor，续读保持原范围。最多 10000 Token 且不超过剩余上下文，每轮最多五次。', ReadDocumentInput),
+        ('search_documents', '检索当前会话文档，返回匹配的完整切片、原文位置及可选 image_id；可限定 document_ids。每轮最多五次。', SearchDocumentsInput),
+        ('read_document', '按页定位 PDF／Word 的全部匹配切片并按原文顺序返回完整正文及 image_id；TXT／Markdown 按段落定位。省略范围读取全部切片；超限按整片返回 next_cursor，续读保持原范围。最多 10000 Token 且不超过剩余上下文，每轮最多五次。', ReadDocumentInput),
     ]
     return [{'type': 'function', 'function': {'name': name, 'description': description,
              'parameters': schema.model_json_schema()}} for name, description, schema in definitions]
@@ -91,8 +91,15 @@ class DocumentTools:
             except (ValueError, OSError, httpx.HTTPError) as error:
                 degraded.append('rerank_input_too_long' if str(error) == 'rerank_input_too_long' else 'rerank_unavailable')
         results = self.live_candidates(fused, conversation_id, account_id, identifiers)[:self.policy.results]
-        public = [{key: value for key, value in row.items() if key not in ('embedding', 'embedding_revision')} for row in results]
-        return {'results': [{**row, 'document_id': str(row['document_id'])} for row in public], 'limit': self.policy.results,
+        public = [
+            {
+                **{key: value for key, value in row.items() if key not in ('embedding', 'embedding_revision')},
+                'document_id': str(row['document_id']),
+                'image_id': str(row['image_id']) if row['image_id'] else None,
+            }
+            for row in results
+        ]
+        return {'results': public, 'limit': self.policy.results,
                 'retrieval': {'mode': 'hybrid' if semantic else 'bm25', 'bm25_candidates': len(lexical),
                               'vector_candidates': len(semantic), 'fused_candidates': len(fused),
                               'reranked': reranked, 'degraded': degraded}}
@@ -116,7 +123,8 @@ class DocumentTools:
                 "SELECT d.attachment_id AS document_id,a.filename,d.ordinal AS chunk_id,d.content,"
                 "d.embedding,d.embedding_revision,"
                 "d.context_prefix,d.context_suffix,d.token_count,d.token_count_method,"
-                "d.page,d.paragraph,d.end_page,d.end_paragraph,d.structure,d.end_structure FROM document_chunks d "
+                "d.page,d.paragraph,d.end_page,d.end_paragraph,d.structure,d.end_structure,d.image_id "
+                "FROM document_chunks d "
                 "JOIN attachments a ON a.id=d.attachment_id WHERE a.conversation_id=%s AND a.status='ready' "
                 "AND a.expires_at>CURRENT_TIMESTAMP AND a.knowledge_version=2 "
                 "AND (%s::uuid[] IS NULL OR a.id=ANY(%s)) "
@@ -132,7 +140,8 @@ class DocumentTools:
             conversation_id, account_id, identifiers, chunk_keys=[chunk_key(row) for row in candidates])}
         valid: list[dict[str, Any]] = []
         fields = ('content', 'page', 'paragraph', 'end_page', 'end_paragraph',
-                  'structure', 'end_structure', 'context_prefix', 'context_suffix', 'token_count', 'token_count_method')
+                  'structure', 'end_structure', 'context_prefix', 'context_suffix', 'token_count',
+                  'token_count_method', 'image_id')
         for row in candidates:
             live = current.get(chunk_key(row))
             if live is not None and all(live[field] == row[field] for field in fields):
@@ -166,7 +175,7 @@ class DocumentTools:
             # 列名由文件格式白名单选择；范围和游标仍使用绑定参数。
             key = 'page' if paginated else 'paragraph'
             chunks = connection.execute(
-                f'SELECT ordinal,content FROM document_chunks WHERE attachment_id=%s '
+                f'SELECT ordinal,content,image_id FROM document_chunks WHERE attachment_id=%s '
                 f'AND {key}<=%s AND end_{key}>=%s AND ordinal>=%s ORDER BY ordinal',
                 (identifier, end, start, request.cursor.chunk_id if request.cursor else 1),
             ).fetchall()
@@ -191,7 +200,11 @@ class DocumentTools:
                                   'complete': True, 'next_cursor': None, 'token_count_method': counter.method}
         blocks: list[dict[str, Any]] = result['content']
         for index, chunk in enumerate(chunks):
-            blocks.append({'chunk_id': chunk['ordinal'], 'content': chunk['content']})
+            blocks.append({
+                'chunk_id': chunk['ordinal'],
+                'content': chunk['content'],
+                **({'image_id': str(chunk['image_id'])} if chunk.get('image_id') else {}),
+            })
             result['complete'] = index == len(chunks) - 1
             result['next_cursor'] = None if result['complete'] else {'chunk_id': chunks[index + 1]['ordinal']}
             if counter.count(json.dumps(result, ensure_ascii=False)) > budget:

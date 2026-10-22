@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any, cast
 from uuid import UUID, uuid5
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from psycopg.types.json import Jsonb
 
@@ -15,7 +16,7 @@ from general_agent.memory.correction import MemoryCorrection
 from general_agent.memory.deletion import MemoryDeletion
 from general_agent.memory.automatic import AutomaticMemory, MemoryCheckpoint
 from general_agent.infrastructure.settings import StoredSettings
-from general_agent.infrastructure.provider import ModelMessage
+from general_agent.infrastructure.provider import ModelFailure, ModelMessage
 from general_agent.prompts import TOOL_DESCRIPTIONS
 from general_agent.search.service import FetchWebInput, SearchService, SearchWebInput, search_web_tool
 from general_agent.agent.graph import AgentToolGraph
@@ -209,6 +210,7 @@ class MemoryTools:
             raise LookupError("会话不存在。")
         counter = TokenCounter(settings.model)
         document_budget = 0
+        injected_images: set[UUID] = set()
 
         def update_document_budget(current_messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> None:
             """读取前用实际模型用量和当前消息核对预算，包含图片开销及同批已返回内容。"""
@@ -234,6 +236,25 @@ class MemoryTools:
         def execute(current: MemoryCheckpoint, name: str, arguments: dict[str, Any], current_settings: StoredSettings) -> dict[str, Any]:
             """把模型请求交给业务执行器，预算仅应用于原文读取，不裁剪检索切片。"""
             return self.execute(current, name, arguments, current_settings, source_attachment_ids, document_budget, counter)
+
+        def tool_images(results: list[dict[str, Any]]) -> list[ModelMessage]:
+            """将文档工具命中的图片加入下一轮请求，并记录已发送身份。"""
+            if self.attachments is None:
+                return []
+            try:
+                message, selected = self.attachments.document_image_message(
+                    conversation_id,
+                    account_id,
+                    results,
+                    injected_images,
+                )
+            except (ValueError, LookupError, ModelFailure, httpx.HTTPError):
+                return [{
+                    'role': 'user',
+                    'content': '部分文档原图本次未能加载，请仅根据工具返回的文字描述回答，并明确无法核对原图。',
+                }]
+            injected_images.update(selected)
+            return [message] if message is not None else []
         checkpoint = MemoryCheckpoint(self.memory, message_id, conversation_id, operation)
         with self.memory.database.connect() as connection:
             previous = connection.execute('SELECT status,result FROM memory_tool_runs WHERE message_id=%s', (message_id,)).fetchone()
@@ -259,6 +280,7 @@ class MemoryTools:
             on_content=on_content,
             execute_tool=execute,
             on_tool_context=update_document_budget,
+            on_tool_results=tool_images,
         )
         outcome = ToolOutcome(result['answer'], bool(result['used_tools']), result['messages'])
         with self.memory.database.connect() as connection:

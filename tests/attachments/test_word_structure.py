@@ -71,10 +71,10 @@ def test_word_upload_indexes_native_text_and_reads_bookmarked_pages(
     """真实上传不得回读 PDF 正文；原生数字、Markdown 表格和分页映射需一直保留到工具结果。"""
     original_parse = parse_document
 
-    def native_only(path: Path, extension: str) -> ParsedDocument:
+    def native_only(path: Path, extension: str, image_directory: Path) -> ParsedDocument:
         """确保 Word 路径只解析原件，禁止用 PDF 提取文字覆盖原生结构。"""
         assert extension == '.docx', 'Word 不得从分页 PDF 再次抽取正文。'
-        return original_parse(path, extension)
+        return original_parse(path, extension, image_directory)
 
     monkeypatch.setattr(service_module, 'parse_document', native_only)
     configure_settings(database_url, tmp_path)
@@ -112,6 +112,7 @@ def test_word_bookmarks_cover_a_paragraph_across_multiple_pages(tmp_path: Path) 
     doc.add_paragraph('LONGWORD ' * 1200)
     path = tmp_path / 'long.docx'
     doc.save(str(path))
-    count, positions = paginate_word(path, tmp_path / 'long.pdf')
+    count, positions, image_positions = paginate_word(path, tmp_path / 'long.pdf')
+    assert image_positions == {}
     assert count > 1
     assert positions == {1: (1, count)}

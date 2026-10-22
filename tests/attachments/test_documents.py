@@ -56,7 +56,8 @@ def test_pdf_question_reads_page_chunks_and_survives_restart(database_url: str, 
         attachment = client.get(f'/api/conversations/{conversation}/attachments').json()[0]
         assert attachment['status'] == 'ready'
         assert attachment['parse_info']['readable_units'] == 2
-        assert '内嵌图片' in str(attachment['parse_info']['limitations'])
+        assert attachment['parse_info']['image_count'] == 0
+        assert '复杂矢量图表' in str(attachment['parse_info']['limitations'])
         assert client.post(f'/api/conversations/{conversation}/runs', json={'content': 'ORBIT deadline?'}).status_code == 202
         message = wait_message(client, conversation, 'complete')
         assert message['content'] == 'Friday.'
@@ -205,7 +206,7 @@ def test_pdf_scans_gaps_encryption_and_corruption_are_visible(database_url: str,
     configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path) as client:
         conversation = configure(client)
-        samples = [('scan.pdf', image_pdf_bytes(), 'OCR'), ('blank.pdf', pdf_bytes(['']), '没有可提取文字'), ('encrypted.pdf', pdf_bytes(['Secret'], encrypted=True), '已加密'), ('broken.pdf', b'%PDF-1.7\ninvalid', '损坏'), ('fake.pdf', b'plain text', '有效 PDF')]
+        samples = [('scan.pdf', image_pdf_bytes(), '视觉模型'), ('blank.pdf', pdf_bytes(['']), '没有可提取文字'), ('encrypted.pdf', pdf_bytes(['Secret'], encrypted=True), '已加密'), ('broken.pdf', b'%PDF-1.7\ninvalid', '损坏'), ('fake.pdf', b'plain text', '有效 PDF')]
         for filename, content, expected in samples:
             response = client.post(f'/api/conversations/{conversation}/attachments', files={'files': (filename, content)})
             assert response.status_code == 201

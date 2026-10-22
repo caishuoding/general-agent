@@ -17,6 +17,7 @@ from general_agent.prompts import tool_result_fragment, tool_turn_fragment
 
 
 ToolExecutor = Callable[[MemoryCheckpoint, str, dict[str, Any], StoredSettings], dict[str, Any]]
+ToolResultImages = Callable[[list[dict[str, Any]]], list[ModelMessage]]
 LOGGER = logging.getLogger(__name__)
 DOCUMENT_TOOLS = {'search_documents', 'read_document'}
 
@@ -45,6 +46,7 @@ class AgentToolGraph:
         assistant_message_id: UUID | None = None,
         on_content: Callable[[str], None] | None = None,
         on_tool_context: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None] | None = None,
+        on_tool_results: ToolResultImages | None = None,
     ) -> AgentState:
         """运行工具循环；文档工具每轮最多执行五次，其他工具保持失败重试合同。"""
 
@@ -123,6 +125,7 @@ class AgentToolGraph:
         def execute_tools(state: AgentState) -> dict[str, Any]:
             """检查调用与重试限额；时间实时执行，文档读取预算包含同批已产生的结果。"""
             tool_messages: list[dict[str, Any]] = []
+            executed_results: list[dict[str, Any]] = []
             failures = dict(state["tool_failures"])
             document_calls = dict(state['document_calls'])
             known_tools = {tool["function"]["name"] for tool in tools}
@@ -156,6 +159,7 @@ class AgentToolGraph:
                                   'call_exhausted': document_calls[name] >= 5}
                     tool_messages.append({'role': 'tool', 'tool_call_id': call['id'],
                                           'content': json.dumps(result, ensure_ascii=False)})
+                    executed_results.append(result)
                     continue
                 tool_key = checkpoint.key("tools:result", [settings.revision, state["round_index"] - 1, call])
                 attempt_key = checkpoint.key("tools:attempt", [str(assistant_message_id), tool_key])
@@ -202,6 +206,9 @@ class AgentToolGraph:
                     "tool_call_id": call["id"],
                     "content": json.dumps(result, ensure_ascii=False),
                 })
+                executed_results.append(result)
+            if on_tool_results is not None and executed_results:
+                tool_messages.extend(cast(list[dict[str, Any]], on_tool_results(executed_results)))
             LOGGER.info("event=tool_execute names=%s", [call.get("function", {}).get("name") for call in state["tool_calls"]])
             return {
                 "messages": [*state["messages"], *tool_messages],
