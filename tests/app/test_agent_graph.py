@@ -47,6 +47,36 @@ def test_graph_streams_answer_without_tools() -> None:
     execute.assert_not_called()
 
 
+def test_time_tool_reads_fresh_clock_when_replaying_a_tool_call(monkeypatch: Any) -> None:
+    """即使恢复时复用模型的调用决定，执行入口仍读取新时钟而不复用旧时间。"""
+    from datetime import datetime, timezone
+
+    from general_agent.memory.tools import MemoryTools, agent_tools
+
+    clock = MagicMock()
+    clock.now.side_effect = [
+        datetime(2026, 10, 21, 16, 30, 45, tzinfo=timezone.utc),
+        datetime(2026, 10, 21, 16, 31, 45, tzinfo=timezone.utc),
+    ]
+    monkeypatch.setattr('general_agent.agent.time.datetime', clock)
+    saved = cast(MemoryCheckpoint, checkpoint())
+    tools = MemoryTools(MagicMock(), MagicMock())
+    results: list[str] = []
+    calls = MagicMock()
+    calls.stream.side_effect = [
+        [StreamChunk(tool_call=ToolCallDelta(index=0, id='time-1', name='get_current_time', arguments='{}'))],
+        [StreamChunk(content='已取得当前北京时间。')],
+        [StreamChunk(content='已取得更新后的北京时间。')],
+    ]
+    for _ in range(2):
+        result = AgentToolGraph().run(
+            messages=[{'role': 'user', 'content': '现在几点？'}], settings=settings(), calls=calls,
+            checkpoint=saved, tools=agent_tools(), execute_tool=tools.execute,
+        )
+        results.append(json.loads(result['messages'][-2]['content'])['datetime'])
+    assert results == ['2026-10-22T00:30:45+08:00', '2026-10-22T00:31:45+08:00']
+
+
 def test_graph_accumulates_streamed_tool_call_before_continuing() -> None:
     """工具名称和参数字符串可跨多个 SSE 分片到达，执行后继续流式回答。"""
     calls = MagicMock()

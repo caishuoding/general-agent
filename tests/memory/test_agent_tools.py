@@ -1,20 +1,47 @@
 """验证工具由模型自主选择，而不是由应用意图正则触发。"""
 
 from typing import Any, cast
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 from uuid import uuid4
+
+import pytest
+from pydantic import ValidationError
 
 from general_agent.memory.correction import MemoryCorrection
 from general_agent.memory.tools import MemoryTools, agent_tools, memory_tools
 
 
+def test_time_tool_returns_beijing_date_across_utc_midnight(monkeypatch: Any) -> None:
+    """工具执行入口将 UTC 时钟转换成北京时间，日期和星期同步跨日。"""
+    clock = MagicMock()
+    clock.now.return_value = datetime(2026, 10, 21, 16, 30, 45, tzinfo=timezone.utc)
+    monkeypatch.setattr('general_agent.agent.time.datetime', clock)
+    result = MemoryTools(MagicMock(), MagicMock()).execute(
+        MagicMock(), 'get_current_time', {}, MagicMock(),
+    )
+    assert result == {
+        'datetime': '2026-10-22T00:30:45+08:00',
+        'timezone': 'Asia/Shanghai',
+        'weekday': '星期四',
+    }
+
+
+def test_time_tool_rejects_timezone_override() -> None:
+    """无参数工具拒绝时区覆盖，避免模型改变已约定的北京时间。"""
+    with pytest.raises(ValidationError):
+        MemoryTools(MagicMock(), MagicMock()).execute(
+            MagicMock(), 'get_current_time', {'timezone': 'UTC'}, MagicMock(),
+        )
+
+
 def test_agent_tools_register_web_search_as_a_normal_model_tool() -> None:
-    """验证网页、文档和记忆工具注册在同一个模型自主调用循环中。"""
+    """验证网页、文档、记忆和北京时间工具注册在同一个模型自主调用循环中。"""
     memory_names = {item['function']['name'] for item in memory_tools()}
     names = {item['function']['name'] for item in agent_tools()}
 
     assert {'add_memory', 'search_memories', 'update_memory', 'delete_memory'} == memory_names
-    assert names == memory_names | {'search_web', 'fetch_web', 'search_documents', 'read_document'}
+    assert names == memory_names | {'search_web', 'fetch_web', 'search_documents', 'read_document', 'get_current_time'}
 
 
 def test_update_tool_does_not_reparse_user_intent(monkeypatch: Any) -> None:

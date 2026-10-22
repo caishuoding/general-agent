@@ -19,6 +19,7 @@ from general_agent.infrastructure.provider import ModelMessage
 from general_agent.prompts import TOOL_DESCRIPTIONS
 from general_agent.search.service import FetchWebInput, SearchService, SearchWebInput, search_web_tool
 from general_agent.agent.graph import AgentToolGraph
+from general_agent.agent.time import current_time_tool, get_current_time
 from general_agent.attachments.service import AttachmentService
 from general_agent.attachments.tools import document_tools
 from general_agent.infrastructure.tokens import TokenCounter
@@ -68,8 +69,8 @@ def memory_tools() -> list[dict[str, Any]]:
 
 
 def agent_tools() -> list[dict[str, Any]]:
-    """返回统一循环的记忆、网页和会话文档工具，不规定调用顺序。"""
-    return [*memory_tools(), search_web_tool(), search_web_tool("fetch_web"), *document_tools()]
+    """返回统一循环的记忆、网页、会话文档和北京时间工具，不规定调用顺序。"""
+    return [*memory_tools(), search_web_tool(), search_web_tool("fetch_web"), *document_tools(), current_time_tool()]
 
 
 class MemoryTools:
@@ -134,8 +135,10 @@ class MemoryTools:
         document_budget: int = 0,
         token_counter: TokenCounter | None = None,
     ) -> dict[str, Any]:
-        """执行白名单工具；文档按服务端会话身份读取，记忆变更核对观察版本。"""
+        """执行白名单工具；时间实时读取，文档核对会话身份，记忆变更核对观察版本。"""
         checkpoint.guard()
+        if name == 'get_current_time':
+            return get_current_time(arguments)
         if name in ('search_documents', 'read_document'):
             if self.attachments is None:
                 raise ValueError('会话文档工具未配置。')

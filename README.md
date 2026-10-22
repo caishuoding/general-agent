@@ -225,6 +225,10 @@ PDF 使用真实物理分页；Word 先检查 DOCX 包，再通过 LibreOffice �
 
 运行 `pnpm --dir frontend test:images` 可验证上传和视觉回答；支持测试端口环境变量。已用程序生成测试图验证真实 Files 上传、30 天 TTL 和删除；真实视觉回答质量仍待验，详见 [DeepSeek 文件上传验证](docs/verification-deepseek-files.md)。
 
+## 当前北京时间
+
+模型可在现有工具循环中自主调用 `get_current_time()`，无需参数或额外配置。工具每次执行实时读取系统时钟，固定转换为 `Asia/Shanghai` 北京时间（UTC+8），不受服务器本地时区影响，也不需要联网。返回包含 UTC 偏移的日期时间（精确到秒）、时区和中文星期；时间结果不复用工具步骤缓存。
+
 ## 模型自主联网与来源核验
 
 管理端“系统配置 → 联网搜索”填写 DeepSeek API 密钥，默认 API 地址为 `https://api.deepseek.com`，也支持以 `/v1` 结尾的地址。搜索与抓取共用这份独立配置，不自动复用聊天密钥；旧智谱配置不会作为 DeepSeek 凭据使用，需要重新填写密钥。保存配置不会联网，未配置时仍可聊天。

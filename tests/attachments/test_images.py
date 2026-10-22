@@ -70,7 +70,7 @@ def upload_response(request: httpx.Request, identifier: str, expected: bytes | N
 def test_message_keywords_do_not_hide_image_or_tools(
     database_url: str, tmp_path: Path, content: str, streaming: bool,
 ) -> None:
-    """同步与流式回答均发送有效图片和完整工具，不按用户消息关键词预先筛选。"""
+    """同步与流式回答均发送有效图片和含时间工具的完整列表，不按消息关键词筛选。"""
     payloads: list[dict[str, Any]] = []
 
     def provider(request: httpx.Request) -> httpx.Response:
@@ -99,7 +99,7 @@ def test_message_keywords_do_not_hide_image_or_tools(
         assert payloads[0]['messages'][-1] == {'role': 'user', 'content': content}
         assert {tool['function']['name'] for tool in payloads[0]['tools']} == {
             'add_memory', 'search_memories', 'update_memory', 'delete_memory',
-            'search_web', 'fetch_web', 'search_documents', 'read_document',
+            'search_web', 'fetch_web', 'search_documents', 'read_document', 'get_current_time',
         }
 
 
