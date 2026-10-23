@@ -17,6 +17,7 @@ from general_agent.infrastructure.calls import CallGateway
 from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.settings import EmbeddingSettingsStore
 from general_agent.attachments.document_images import VISION_PROMPT_VERSION
+from general_agent.attachments.pdf_text import PDF_TEXT_SOURCE
 
 LOGGER = logging.getLogger(__name__)
 
@@ -52,9 +53,9 @@ class KnowledgeService:
                 "AND (COALESCE(d.parse_info->>'chunk_layout',d.chunk_policy) IS DISTINCT FROM %s OR (%s::text IS NOT NULL AND d.index_revision IS DISTINCT FROM %s) "
                 "OR (EXISTS(SELECT 1 FROM knowledge_document_images i WHERE i.document_id=d.id) AND d.parse_info->>'vision_rules' IS DISTINCT FROM %s) "
                 "OR (lower(d.filename) LIKE '%%.docx' AND d.parse_info->>'text_source' IS DISTINCT FROM 'word_native_markdown_v3') "
-                "OR (lower(d.filename) LIKE '%%.pdf' AND d.parse_info->>'text_source' IS DISTINCT FROM 'pdf_tables_v2'))",
+                "OR (lower(d.filename) LIKE '%%.pdf' AND d.parse_info->>'text_source' IS DISTINCT FROM %s))",
                 (uuid4(), policy.layout_signature, embedding.revision if embedding else None,
-                 embedding.revision if embedding else None, VISION_PROMPT_VERSION),
+                 embedding.revision if embedding else None, VISION_PROMPT_VERSION, PDF_TEXT_SOURCE),
             )
             rows = connection.execute(
                 "SELECT d.id FROM knowledge_documents d JOIN knowledge_bases b ON b.id=d.knowledge_base_id "

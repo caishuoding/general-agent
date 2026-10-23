@@ -7,7 +7,8 @@ from typing import Any
 from pdfplumber.page import Page
 from pdfplumber.table import Table
 
-from general_agent.attachments.knowledge import DocumentUnit, text_units
+from general_agent.attachments.knowledge import DocumentRegion, DocumentUnit
+from general_agent.attachments.pdf_text import PdfLine, PdfTextLayout, margin_line, paragraph_units, text_line
 from general_agent.attachments.word_structure import markdown_cell
 
 
@@ -74,43 +75,37 @@ def table_position(table: PdfTable) -> tuple[float, float]:
     return table.bbox[1], table.bbox[0]
 
 
-def event_position(event: tuple[float, float, str | PdfTable]) -> tuple[float, float]:
+def event_position(event: tuple[float, float, PdfLine | PdfTable]) -> tuple[float, float]:
     """按位置合并正文行和表格，保持表格前后正文的页面顺序。"""
     return event[0], event[1]
 
 
-def page_units(page: Page, number: int, table_offset: int, fallback: str) -> tuple[list[DocumentUnit], int]:
-    """将识别表格转为 Markdown 行并排除正文重复；无表页面沿用原文字提取结果。"""
+def page_units(page: Page, number: int, table_offset: int, layout: PdfTextLayout) -> tuple[list[DocumentUnit], int]:
+    """按真实坐标交错输出自然段、标题与表格，表格文字不重复进入正文。"""
     tables = page_tables(page)
-    if not tables:
-        return text_units(fallback, number), 0
 
     def outside_tables(item: dict[str, Any]) -> bool:
         """从普通正文中排除已归属表格的字符，表格区域以字符中心判断。"""
         x, y = (item['x0'] + item['x1']) / 2, (item['top'] + item['bottom']) / 2
         return not any(table.bbox[0] <= x <= table.bbox[2] and table.bbox[1] <= y <= table.bbox[3] for table in tables)
 
-    lines = page.filter(outside_tables).extract_text_lines(return_chars=False)
-    events: list[tuple[float, float, str | PdfTable]] = [(line['top'], line['x0'], line['text']) for line in lines]
+    lines = [text_line(line) for line in page.filter(outside_tables).extract_text_lines()]
+    lines = [line for line in lines if not margin_line(line, page.height, number, layout)]
+    events: list[tuple[float, float, PdfLine | PdfTable]] = [(line.bbox[1], line.bbox[0], line) for line in lines]
     events.extend((table.bbox[1], table.bbox[0], table) for table in tables)
     units: list[DocumentUnit] = []
-    paragraphs: list[str] = []
-    last_bottom: float | None = None
+    paragraphs: list[PdfLine] = []
 
     def flush_paragraph() -> None:
-        """将相邻正文行聚合为自然段，表格和显著行间距阻断正文聚合。"""
+        """将相邻正文行恢复为带章节和区域的自然段，表格阻断段落聚合。"""
         if paragraphs:
-            units.append(DocumentUnit(page=number, paragraph=len(units) + 1, content='\n'.join(paragraphs) + '\n\n',
-                                      location=f'第 {number} 页正文'))
+            units.extend(paragraph_units(paragraphs, number, layout))
             paragraphs.clear()
 
     table_number = table_offset
-    for top, _, content in sorted(events, key=event_position):
-        if isinstance(content, str):
-            if last_bottom is not None and top - last_bottom > 22:
-                flush_paragraph()
+    for _, _, content in sorted(events, key=event_position):
+        if isinstance(content, PdfLine):
             paragraphs.append(content)
-            last_bottom = top
             continue
         flush_paragraph()
         table_number += 1
@@ -122,7 +117,10 @@ def page_units(page: Page, number: int, table_offset: int, fallback: str) -> tup
                 text += '| ' + ' | '.join('---' for _ in cells) + ' |\n'
             units.append(DocumentUnit(page=number, paragraph=len(units) + 1, content=text, kind='table_row',
                                       table=table_number, row=index, end_page=number,
+                                      section=[title for _, title in layout.section],
+                                      regions=[DocumentRegion(page=number, bbox=content.bbox)],
                                       location=f'第 {number} 页，表格 {table_number}，第 {index} 行'))
-        last_bottom = None
     flush_paragraph()
+    for index, unit in enumerate(units, 1):
+        unit.paragraph = index
     return units, len(tables)

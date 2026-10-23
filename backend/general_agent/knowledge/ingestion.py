@@ -115,7 +115,7 @@ def process(service: 'KnowledgeService', row: dict[str, Any], calls: BoundCalls)
 
 
 def describe_images(service: 'KnowledgeService', row: dict[str, Any], parsed: list[ParsedImage], vision: DocumentVision) -> list[dict[str, Any]]:
-    """有界并发保存图片纯文字描述，重试复用同哈希和同提示词版本的成功结果。"""
+    """有界并发保存图片描述，仅复用原图、图注及提示词版本均一致的成功结果。"""
     identifier, attempt = row['id'], row['attempt']
     folder = service.directory / str(identifier) / 'images'
     with service.database.connect() as connection:
@@ -129,7 +129,8 @@ def describe_images(service: 'KnowledgeService', row: dict[str, Any], parsed: li
         previous = by_ordinal.get(image.ordinal)
         if previous:
             old = previous['metadata']
-            if old['sha256'] == image.sha256 and previous['vision_status'] == 'complete' and old.get('vision_revision') == vision.revision:
+            if (old['sha256'] == image.sha256 and old.get('caption') == image.caption
+                    and previous['vision_status'] == 'complete' and old.get('vision_revision') == vision.revision):
                 (folder / image.storage_name).unlink(missing_ok=True)
                 return {**old, 'provider_file': previous['provider_file'], 'vision_status': 'complete'}, False
             # 覆盖远端身份前先完成旧文件清理；失败时保留原记录供重试，不遗失删除凭据。

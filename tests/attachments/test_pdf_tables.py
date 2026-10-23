@@ -133,7 +133,7 @@ def test_multiline_cell_stays_in_one_markdown_row(tmp_path: Path) -> None:
 
 
 def test_pdf_upload_search_read_and_legacy_recovery_share_table_chunks(database_url: str, tmp_path: Path) -> None:
-    """真实上传后检索和阅读共用 Markdown 片；旧 PDF 启动升级保持原 TTL，匹配版本不再重建。"""
+    """上传后检索保留 PDF 区域且阅读共用 Markdown 片；旧版升级保留 TTL，匹配版本不重建。"""
     from uuid import UUID
     from psycopg.types.json import Jsonb
     from general_agent.attachments.service import AttachmentService
@@ -151,13 +151,14 @@ def test_pdf_upload_search_read_and_legacy_recovery_share_table_chunks(database_
                                files={'files': ('table.pdf', table_pdf(rows=48))}).json()[0]
         listed = client.get(f'/api/conversations/{conversation}/attachments').json()[0]
         assert listed['status'] == 'ready', listed['error']
-        assert listed['parse_info']['text_source'] == 'pdf_tables_v2'
+        assert listed['parse_info']['text_source'] == 'pdf_single_column_v3'
         db = Database(database_url)
         attachments = AttachmentService(db, tmp_path)
         tools = DocumentTools(db, attachments.policy)
         account = owner(database_url, conversation)
         hits = tools.search(UUID(conversation), account, {'query': 'ITEM47'})['results']
         assert any('| ITEM47 | 447.00 | 5.42 |' in hit['content'] for hit in hits)
+        assert all(hit['structure']['regions'][0]['page'] == 1 for hit in hits)
         read = tools.read(UUID(conversation), account, {'document_id': uploaded['id'], 'start_page': 1, 'end_page': 1},
                           TokenCounter('test'), 10000)
         assert read['complete']
@@ -179,7 +180,7 @@ def test_pdf_upload_search_read_and_legacy_recovery_share_table_chunks(database_
         recovered = client.get(f'/api/conversations/{conversation}/attachments').json()[0]
         assert recovered['status'] == 'ready', recovered['error']
         assert recovered['expires_at'] == listed['expires_at']
-        assert recovered['parse_info']['text_source'] == 'pdf_tables_v2'
+        assert recovered['parse_info']['text_source'] == 'pdf_single_column_v3'
         with db.connect() as connection:
             cached = connection.execute('SELECT count(*) AS n FROM document_chunks WHERE attachment_id=%s AND embedding IS NOT NULL',
                                         (UUID(uploaded['id']),)).fetchone()

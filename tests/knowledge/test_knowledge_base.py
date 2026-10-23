@@ -63,7 +63,7 @@ def test_knowledge_lives_across_conversations_and_enforces_account_scope(databas
 
 @pytest.mark.parametrize('extension', ['docx', 'pdf', 'md'])
 def test_supported_document_formats_keep_real_positions(database_url: str, tmp_path: Path, extension: str) -> None:
-    """Word、PDF 和 Markdown 使用真实解析链路，并保存适合各格式的位置。"""
+    """Word、单栏 PDF 和 Markdown 使用当前解析版本，并保存适合各格式的位置。"""
     content = docx_bytes() if extension == 'docx' else pdf_bytes(['alpha handbook']) if extension == 'pdf' else b'# Alpha\n\nhandbook'
     with authenticated_client(database_url, tmp_path) as client:
         base = client.post('/api/knowledge-bases', json={'name': '格式验证'}).json()['id']
@@ -76,4 +76,4 @@ def test_supported_document_formats_keep_real_positions(database_url: str, tmp_p
         if extension == 'docx':
             assert document['parse_info']['text_source'] == 'word_native_markdown_v3'
         elif extension == 'pdf':
-            assert document['parse_info']['text_source'] == 'pdf_tables_v2'
+            assert document['parse_info']['text_source'] == 'pdf_single_column_v3'

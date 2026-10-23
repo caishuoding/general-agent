@@ -20,8 +20,15 @@ from general_agent.infrastructure.settings import SettingsStore
 MAX_DOCUMENT_UNITS = 20_000
 
 
+class DocumentRegion(BaseModel):
+    """记录物理页中以左上角为原点、单位为 point 的原文矩形区域。"""
+
+    page: int
+    bbox: tuple[float, float, float, float]
+
+
 class DocumentUnit(BaseModel):
-    """保存原文块及真实位置；Word 额外保留标题、表格行、所属章节和跨页范围。"""
+    """保存标题、段落、表格行及章节；PDF 额外保留各物理页的原文区域。"""
 
     page: int | None = None
     paragraph: int
@@ -33,6 +40,7 @@ class DocumentUnit(BaseModel):
     section: list[str] = Field(default_factory=list)
     location: str | None = None
     end_page: int | None = None
+    regions: list[DocumentRegion] = Field(default_factory=list)
 
 
 def default_chunk_counter() -> TokenCounter:
@@ -303,7 +311,7 @@ def chunk_specs(units: list[DocumentUnit], policy: ChunkPolicy) -> list[ChunkSpe
 
 def store_chunks(connection: Any, identifier: UUID, units: list[DocumentUnit], policy: ChunkPolicy,
                  *, knowledge: bool = False) -> None:
-    """复用切片算法向指定业务的独立表写入正文，默认仍写附件表；表名只由内部白名单选择。"""
+    """向各业务独立表保存共用切片与覆盖的 PDF 原文区域；表名仅由内部白名单选择。"""
     table, parent = ('knowledge_chunks', 'document_id') if knowledge else ('document_chunks', 'attachment_id')
     connection.execute(sql.SQL('DELETE FROM {} WHERE {}=%s').format(sql.Identifier(table), sql.Identifier(parent)), (identifier,))
     chunks: list[tuple[Any, ...]] = []
@@ -321,9 +329,13 @@ def store_chunks(connection: Any, identifier: UUID, units: list[DocumentUnit], p
         if policy.counter.count(content) > policy.max_tokens:
             raise ValueError('切片正文和结构包装超过 Token 上限。')
         start_unit, end_unit = units[first], units[last]
+        structure = start_unit.model_dump(exclude={'page', 'paragraph', 'content'}, exclude_none=True, exclude_defaults=True)
+        regions = list(dict.fromkeys((region.page, region.bbox) for unit in units[first:last + 1] for region in unit.regions))
+        if regions:
+            structure['regions'] = [DocumentRegion(page=page, bbox=bbox).model_dump() for page, bbox in regions]
         chunks.append((identifier, len(chunks) + 1, start_unit.page, end_unit.end_page or end_unit.page,
                        start_unit.paragraph, end_unit.paragraph,
-                       Jsonb(start_unit.model_dump(exclude={'page', 'paragraph', 'content'}, exclude_none=True, exclude_defaults=True)),
+                       Jsonb(structure),
                        Jsonb(end_unit.model_dump(exclude={'page', 'paragraph', 'content'}, exclude_none=True, exclude_defaults=True)),
                        content, sorted(set(search_terms(content))), spec.prefix, spec.suffix,
                        policy.counter.count(content), policy.counter.method))

@@ -17,6 +17,7 @@ from general_agent.attachments.images import validate_image
 from general_agent.attachments.files import DeepSeekFiles, file_api_base
 from general_agent.infrastructure.database import Database
 from general_agent.attachments.documents import parse_document
+from general_agent.attachments.pdf_text import PDF_TEXT_SOURCE
 from general_agent.attachments.document_images import DocumentVision, ParsedImage, VISION_PROMPT_VERSION
 from general_agent.attachments.knowledge import (
     ChunkPolicy,
@@ -105,12 +106,12 @@ class AttachmentService:
                 "OR COALESCE(parse_info->>'chunk_layout',parse_info->>'chunk_policy') IS DISTINCT FROM %s "
                 "OR (COALESCE((parse_info->>'image_count')::int,0)>0 "
                 "AND parse_info->>'vision_rules' IS DISTINCT FROM %s))) "
-                "OR (lower(filename) LIKE '%%.pdf' AND (parse_info->>'text_source' IS DISTINCT FROM 'pdf_tables_v2' "
+                "OR (lower(filename) LIKE '%%.pdf' AND (parse_info->>'text_source' IS DISTINCT FROM %s "
                 "OR COALESCE(parse_info->>'chunk_layout',parse_info->>'chunk_policy') IS DISTINCT FROM %s "
                 "OR (COALESCE((parse_info->>'image_count')::int,0)>0 "
                 "AND parse_info->>'vision_rules' IS DISTINCT FROM %s)))) "
                 "AND expires_at>CURRENT_TIMESTAMP RETURNING id",
-                (policy.layout_signature, VISION_PROMPT_VERSION, policy.layout_signature, VISION_PROMPT_VERSION),
+                (policy.layout_signature, VISION_PROMPT_VERSION, PDF_TEXT_SOURCE, policy.layout_signature, VISION_PROMPT_VERSION),
             ).fetchall()
         for row in legacy:
             self.process(row['id'])
