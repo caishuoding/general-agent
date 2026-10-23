@@ -31,10 +31,10 @@ def chart_png() -> bytes:
 
 
 def word_with_chart() -> bytes:
-    """生成带章节、图注和内嵌图片的真实 Word 文档。"""
+    """生成带章节、独立图注和内嵌图片的真实 Word 文档。"""
     document = Document()
     document.add_heading('销售分析', level=1)
-    document.add_paragraph('图 1：季度趋势')
+    document.add_paragraph('图 03 订单状态图及风险冻结旁路')
     document.add_picture(BytesIO(chart_png()))
     output = BytesIO()
     document.save(output)
@@ -114,6 +114,8 @@ def test_word_image_description_is_searchable_and_readable(
         assert attachment['parse_info']['image_count'] == 1
         assert attachment['parse_info']['vision_model'] == 'controlled'
         assert len(requests) == 1
+        prompt = requests[0]['messages'][0]['content'][0]['text']
+        assert '图 03 订单状态图及风险冻结旁路' in prompt
 
         service = AttachmentService(Database(database_url), tmp_path, httpx.MockTransport(provider))
         account = owner(database_url, conversation)
@@ -135,6 +137,13 @@ def test_word_image_description_is_searchable_and_readable(
         image_blocks = [block for block in read['content'] if block.get('image_id')]
         assert len(image_blocks) == 1
         assert image_blocks[0]['image_id'] == image_id
+        with service.database.connect() as connection:
+            chunks = connection.execute(
+                'SELECT content,image_id FROM document_chunks WHERE attachment_id=%s',
+                (UUID(uploaded['id']),),
+            ).fetchall()
+        assert all('图 03 订单状态图及风险冻结旁路' not in row['content']
+                   for row in chunks if row['image_id'] is None)
         service.delete_file(UUID(uploaded['id']))
         assert deleted == ['/files/file-api-word-chart']
         assert not (tmp_path / 'attachments' / f"{uploaded['id']}.images").exists()
@@ -284,9 +293,10 @@ def test_word_text_remains_available_when_image_description_fails(
         searched = service.documents.search(
             UUID(conversation),
             owner(database_url, conversation),
-            {'query': '季度趋势'},
+            {'query': '销售分析'},
         )['results']
-        assert any('图 1：季度趋势' in item['content'] for item in searched)
+        assert any('销售分析' in item['content'] for item in searched)
+        assert all('图 03 订单状态图及风险冻结旁路' not in item['content'] for item in searched)
         assert all(item['image_id'] is None for item in searched)
 
 

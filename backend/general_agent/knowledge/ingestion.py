@@ -9,7 +9,7 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from general_agent.attachments.documents import parse_document, MAX_TEXT_CHARACTERS
-from general_agent.attachments.document_images import DocumentVision, ParsedImage
+from general_agent.attachments.document_images import DocumentVision, ParsedImage, VISION_PROMPT_VERSION
 from general_agent.attachments.knowledge import store_chunks, store_image_chunks, text_units
 from general_agent.attachments.pagination import paginate_word
 from general_agent.infrastructure.calls import BoundCalls
@@ -44,7 +44,8 @@ def ingest(service: 'KnowledgeService', row: dict[str, Any]) -> None:
 
 
 def process(service: 'KnowledgeService', row: dict[str, Any], calls: BoundCalls) -> None:
-    """解析各格式并将共用算法结果写入知识库表，索引失败明确标记降级。"""
+    """固定本次 LLM 计数快照并写入独立切片表，索引失败明确标记降级。"""
+    policy = service.policy
     identifier, attempt = row['id'], row['attempt']
     folder = service.directory / str(identifier)
     original, images_directory = folder / 'original', folder / 'images'
@@ -78,7 +79,10 @@ def process(service: 'KnowledgeService', row: dict[str, Any], calls: BoundCalls)
     failures = sum(image['vision_status'] == 'failed' for image in images)
     if not any(unit.content.strip() for unit in units) and not any(image['vision_status'] == 'complete' for image in images):
         raise ValueError('文档没有可用正文，图片描述也未完成，请检查视觉模型后重试。')
-    info.update(image_count=len(images), image_failed_count=failures, vision_revision=vision.revision)
+    info.update(image_count=len(images), image_failed_count=failures, vision_revision=vision.revision,
+                vision_rules=VISION_PROMPT_VERSION,
+                chunk_layout=policy.layout_signature, tokenizer_model=policy.counter.model,
+                token_count_method=policy.counter.method, tokenizer_fingerprint=policy.counter.fingerprint)
     service.progress(identifier, attempt, 'chunking')
     with service.database.connect() as connection:
         live = connection.execute("SELECT id FROM knowledge_documents WHERE id=%s AND attempt=%s AND status='processing' FOR UPDATE", (identifier, attempt)).fetchone()
@@ -86,14 +90,14 @@ def process(service: 'KnowledgeService', row: dict[str, Any], calls: BoundCalls)
             raise LookupError('文档处理已撤销。')
         # 相同正文的向量可在失败重试时复用；切片重建事务不会留下半份正文。
         cached = connection.execute('SELECT ordinal,content,embedding,embedding_revision FROM knowledge_chunks WHERE document_id=%s', (identifier,)).fetchall()
-        store_chunks(connection, identifier, units, service.policy, knowledge=True)
-        store_image_chunks(connection, identifier, images, service.policy, knowledge=True)
+        store_chunks(connection, identifier, units, policy, knowledge=True)
+        store_image_chunks(connection, identifier, images, policy, knowledge=True)
         for chunk in cached:
             if chunk['embedding'] is not None:
                 connection.execute('UPDATE knowledge_chunks SET embedding=%s,embedding_revision=%s WHERE document_id=%s AND ordinal=%s AND content=%s',
                                    (Jsonb(chunk['embedding']), chunk['embedding_revision'], identifier, chunk['ordinal'], chunk['content']))
         connection.execute('UPDATE knowledge_documents SET parse_info=%s,chunk_policy=%s WHERE id=%s AND attempt=%s',
-                           (Jsonb(info), service.policy.signature, identifier, attempt))
+                           (Jsonb(info), policy.signature, identifier, attempt))
     warnings = [f'{failures} 张图片描述失败，可重试。'] if failures else []
     try:
         index_document(service, identifier, attempt, calls)

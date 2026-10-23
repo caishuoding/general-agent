@@ -90,7 +90,7 @@ class SearchService:
         *,
         kind: Literal["search", "fetch"] = "search",
     ) -> dict[str, Any]:
-        """执行搜索或抓取，复用本轮已完成结果并保存来源及停止状态。"""
+        """允许本轮执行多个查询，按查询或 URL 复用结果并累计来源及停止状态。"""
         query = (SearchWebInput(query=query).query if kind == "search"
                  else FetchWebInput(url=query).url)
         saved = self.settings.read()
@@ -134,12 +134,10 @@ class SearchService:
         assert row is not None
         if row['search_revision'] != saved.revision:
             raise ValueError('搜索配置已经变化，请停止当前回答后重新发送。')
-        if kind == 'search' and row['query'] and row['query'] != query:
-            raise ValueError('本轮已经使用了其他联网查询，不能在同一次回答中改写。')
         cached = [item for item in row['results']
-                  if (kind == 'search' and item.get('kind', 'search') == 'search')
+                  if (kind == 'search' and item.get('kind', 'search') == 'search' and item.get('query') == query)
                   or (kind == 'fetch' and item.get('kind') == 'fetch' and item['url'] == query)]
-        if row['status'] in ('complete', 'failed') and (cached or (kind == 'search' and row['search_completed'])):
+        if row['status'] in ('complete', 'failed') and (cached or (kind == 'search' and query in row['completed_queries'])):
             return {'query': query, 'results': cached}
         if row['status'] in ('cancelled', 'rejected', 'expired'):
             raise ValueError('该搜索已经结束或失效，请重新发送问题。')
@@ -161,14 +159,16 @@ class SearchService:
                 raise ValueError('原操作已停止，迟到的搜索结果不会继续使用。')
             for item in results:
                 item['kind'] = kind
+                if kind == 'search':
+                    item['query'] = query
                 key = connection.execute("SELECT nextval('web_source_keys') AS value").fetchone()
                 assert key is not None
                 item['key'] = 'W' + str(key['value'])
             updated = connection.execute(
                 "UPDATE search_requests SET status='complete',results=results || %s,error=NULL, "
-                "search_completed=search_completed OR %s "
+                "completed_queries=completed_queries || CASE WHEN %s THEN ARRAY[%s]::text[] ELSE ARRAY[]::text[] END "
                 "WHERE id=%s AND status='approved' RETURNING id",
-                (Jsonb(results), kind == 'search', row['id']),
+                (Jsonb(results), kind == 'search', query, row['id']),
             ).fetchone()
             if updated is None:
                 raise ValueError('搜索操作已经停止或失效，结果不会继续使用。')

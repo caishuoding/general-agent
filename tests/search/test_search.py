@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
@@ -511,3 +512,60 @@ def test_failed_search_is_disabled_after_five_retries_and_answer_continues(datab
         assert message['content'] == '暂时无法取得最新天气，请稍后再查。'
         assert attempts == 6
         assert message['search_action']['status'] == 'failed'
+
+
+@pytest.mark.parametrize('streaming', [False, True])
+def test_multiple_queries_keep_independent_results_and_retry_failures(
+    database_url: str, tmp_path: Path, streaming: bool,
+) -> None:
+    """同步和流式回答可换词搜索；缓存区分查询及空结果，失败后换词再重试仍执行。"""
+    from tests.conversation.test_streaming import wait_message
+
+    queries = ['北京天气', '上海天气', '北京天气', '空结果', '空结果', '暂时失败', '广州天气', '暂时失败']
+    outbound: list[str] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """模拟多轮自主搜索，逐条核对模型取得的查询结果和实际来源编号。"""
+        payload = json.loads(request.content)
+        if request.url.host == 'search.example':
+            query = payload['query']
+            outbound.append(query)
+            if query == '暂时失败' and outbound.count(query) == 1:
+                return httpx.Response(500, json={'error': 'temporary'})
+            results = [] if query == '空结果' else [{
+                'url': f'https://weather.example/{queries.index(query)}', 'title': query, 'summary': query + '的结果',
+            }]
+            return httpx.Response(200, json={'results': results})
+        messages = tool_messages(payload)
+        if messages:
+            result = json.loads(messages[-1]['content'])
+            index = len(messages) - 1
+            if index == 5:
+                assert 'HTTP 500' in result['error']
+            else:
+                assert result['query'] == queries[index]
+                if index in (3, 4):
+                    assert result['results'] == []
+                else:
+                    assert [item['title'] for item in result['results']] == [queries[index]]
+            if index == 2:
+                assert result == json.loads(messages[0]['content'])
+        if len(messages) < len(queries):
+            return tool_call('search_web', {'query': queries[len(messages)]}, f'query-{len(messages)}')
+        keys = [json.loads(messages[index]['content'])['results'][0]['key'] for index in (0, 1, 6, 7)]
+        return structured_text('已完成比较。' + ''.join(f'[{key}]' for key in keys))
+
+    configure_search_settings(database_url, tmp_path, 'https://search.example')
+    with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
+        conversation = configure(client)
+        endpoint = 'runs' if streaming else 'messages'
+        response = client.post(f'/api/conversations/{conversation}/{endpoint}', json={'content': '搜索并比较多个城市的天气'})
+        assert response.status_code == (202 if streaming else 200)
+        message = (wait_message(client, conversation, 'complete') if streaming
+                   else response.json()['messages'][-1])
+        assert message['status'] == 'complete'
+        assert outbound == ['北京天气', '上海天气', '空结果', '暂时失败', '广州天气', '暂时失败']
+        assert len(message['web_sources']) == 4
+        assert len({item['key'] for item in message['web_sources']}) == 4
+        usage = [call for call in client.get('/api/usage').json() if call['unit'] == 'credits']
+        assert sorted(Decimal(call['credits']) for call in usage) == [0, 0, 1, 1, 1, 1]

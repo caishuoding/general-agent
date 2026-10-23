@@ -82,6 +82,7 @@ class Message(BaseModel):
     memory_recall: dict[str, Any] | None = None
     search_action: dict[str, Any] | None = None
     web_sources: list[dict[str, object]] = Field(default_factory=list)
+    knowledge_sources: list[dict[str, object]] = Field(default_factory=list)
 
 
 class ConversationDetail(Conversation):

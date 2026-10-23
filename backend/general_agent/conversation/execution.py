@@ -23,8 +23,6 @@ from general_agent.prompts import (
     attachment_context_fragment,
     compose_system_prompt,
     memory_context_fragment,
-    knowledge_context_fragment,
-    knowledge_data,
 )
 
 
@@ -88,7 +86,7 @@ class ChatExecution:
         reserved: UUID | None,
         rows: list[dict[str, Any]],
     ) -> AnswerPreparation:
-        """组合附件、已选知识库清单和记忆，知识库正文仅经模型自主工具调用取得。"""
+        """组合附件和记忆；知识库范围只保存在会话绑定中，不向模型暴露库清单。"""
         content = str(rows[-1]['content'])
         chat_reserved = self.chat_reservation(content, reserved)
         material = self.search.attachments.prepare(conversation_id, account_id)
@@ -98,17 +96,11 @@ class ChatExecution:
             context_fragments.append(memory_context_fragment())
         if material.messages:
             context_fragments.append(attachment_context_fragment())
-        knowledge_messages: list[ModelMessage] = []
-        if self.knowledge is not None:
-            selected = self.knowledge.service.selected(conversation_id, account_id)
-            if selected:
-                context_fragments.append(knowledge_context_fragment())
-                knowledge_messages.append({'role': 'user', 'content': knowledge_data(selected)})
         system_prompt: ModelMessage = {
             'role': 'system',
             'content': compose_system_prompt(*context_fragments),
         }
-        data_messages: list[ModelMessage] = [*memory_material, *material.messages, *knowledge_messages]
+        data_messages: list[ModelMessage] = [*memory_material, *material.messages]
         conversation: list[ModelMessage] = [system_prompt, *data_messages]
         conversation.extend({'role': str(row['role']), 'content': str(row['content'])} for row in rows)
         return AnswerPreparation(conversation, material, chat_reserved)
@@ -172,3 +164,9 @@ class ChatExecution:
                 if isinstance(item, dict) and item.get("document_id")
             )
         return list(dict.fromkeys(identifiers))
+
+    def resolve_knowledge_citations(self, messages: list[dict[str, Any]], answer: str) -> tuple[str, list[dict[str, Any]]]:
+        """从本次工具消息核对知识库 [K编号]，返回可信来源供消息持久化和界面展示。"""
+        if self.knowledge is None:
+            return answer, []
+        return self.knowledge.resolve_citations(messages, answer)

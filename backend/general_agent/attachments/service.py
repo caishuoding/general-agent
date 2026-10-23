@@ -1,7 +1,6 @@
 """管理会话知识库、图片文件身份及附件三十天生命周期。"""
 
 import logging
-import os
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -18,9 +17,10 @@ from general_agent.attachments.images import validate_image
 from general_agent.attachments.files import DeepSeekFiles, file_api_base
 from general_agent.infrastructure.database import Database
 from general_agent.attachments.documents import parse_document
-from general_agent.attachments.document_images import DocumentVision, ParsedImage
+from general_agent.attachments.document_images import DocumentVision, ParsedImage, VISION_PROMPT_VERSION
 from general_agent.attachments.knowledge import (
     ChunkPolicy,
+    configured_chunk_policy,
     store_chunks,
     store_document_images,
     store_image_chunks,
@@ -30,8 +30,7 @@ from general_agent.attachments.pagination import paginate_word
 from general_agent.attachments.tools import DocumentTools
 from general_agent.attachments.retrieval import DocumentRetrieval
 from general_agent.infrastructure.provider import FilePart, ModelFailure, ModelMessage, TextPart
-from general_agent.infrastructure.settings import SettingsStore, EmbeddingSettingsStore
-from general_agent.infrastructure.tokens import TokenCounter
+from general_agent.infrastructure.settings import SettingsStore
 from general_agent.attachments.upload import UploadedFile
 from general_agent.prompts import attachment_data, image_material_label
 
@@ -72,21 +71,22 @@ class AttachmentService:
     """隐藏会话知识库、文件生命周期、固定分页和图片读取。"""
 
     def __init__(self, database: Database, directory: Path, transport: httpx.BaseTransport | None = None) -> None:
-        """绑定目标八百、容差两百 Token 的策略，计数器优先使用嵌入模型的官方配置。"""
+        """绑定文档处理依赖；每个新任务按当前回答 LLM 获取切片计数快照。"""
         self.database = database
+        self.settings_directory = directory
         self.directory = directory / 'attachments'
         self.files = DeepSeekFiles(SettingsStore(directory), transport)
         self.vision = DocumentVision(directory, self.files, transport)
-        settings = EmbeddingSettingsStore(directory).read() or SettingsStore(directory).read()
-        counter = TokenCounter(os.environ.get('DOCUMENT_CHUNK_TOKENIZER_MODEL') or (settings.model if settings else 'document-default'))
-        self.policy = ChunkPolicy(int(os.environ.get('DOCUMENT_CHUNK_TOKENS', '800')),
-                                  int(os.environ.get('DOCUMENT_SEARCH_RESULTS', '5')),
-                                  int(os.environ.get('DOCUMENT_CHUNK_OVERLAP_TOKENS', '160')),
-                                  int(os.environ.get('DOCUMENT_CHUNK_OVERFLOW_TOKENS', '200')), counter)
         self.documents = DocumentTools(database, self.policy, DocumentRetrieval(database, directory, transport))
 
+    @property
+    def policy(self) -> ChunkPolicy:
+        """返回最新 LLM 配置对应的策略，新任务不沿用服务启动时的模型选择。"""
+        return configured_chunk_policy(self.settings_directory)
+
     def recover(self) -> None:
-        """恢复中断任务，并按解析、切片预算或视觉模型版本重建旧索引，不延长有效期。"""
+        """按结构和解析版本恢复旧索引，保留人工清空状态，不因单独切换 LLM 重切。"""
+        policy = self.policy
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self.database.connect() as connection:
             connection.execute("UPDATE attachments SET status='failed', error='应用重启中断了文件处理，请重新上传。' WHERE status='processing'")
@@ -99,17 +99,18 @@ class AttachmentService:
         with self.database.connect() as connection:
             legacy = connection.execute(
                 "UPDATE attachments SET status='processing' WHERE status='ready' AND image_metadata IS NULL "
+                "AND COALESCE(parse_info->>'index_cleared','false')<>'true' "
                 "AND (knowledge_version<2 OR (lower(filename) LIKE '%%.docx' "
                 "AND (parse_info->>'text_source' IS DISTINCT FROM 'word_native_markdown_v3' "
-                "OR parse_info->>'chunk_policy' IS DISTINCT FROM %s "
+                "OR COALESCE(parse_info->>'chunk_layout',parse_info->>'chunk_policy') IS DISTINCT FROM %s "
                 "OR (COALESCE((parse_info->>'image_count')::int,0)>0 "
-                "AND parse_info->>'vision_revision' IS DISTINCT FROM %s))) "
+                "AND parse_info->>'vision_rules' IS DISTINCT FROM %s))) "
                 "OR (lower(filename) LIKE '%%.pdf' AND (parse_info->>'text_source' IS DISTINCT FROM 'pdf_tables_v2' "
-                "OR parse_info->>'chunk_policy' IS DISTINCT FROM %s "
+                "OR COALESCE(parse_info->>'chunk_layout',parse_info->>'chunk_policy') IS DISTINCT FROM %s "
                 "OR (COALESCE((parse_info->>'image_count')::int,0)>0 "
-                "AND parse_info->>'vision_revision' IS DISTINCT FROM %s)))) "
+                "AND parse_info->>'vision_rules' IS DISTINCT FROM %s)))) "
                 "AND expires_at>CURRENT_TIMESTAMP RETURNING id",
-                (self.policy.signature, self.vision.revision, self.policy.signature, self.vision.revision),
+                (policy.layout_signature, VISION_PROMPT_VERSION, policy.layout_signature, VISION_PROMPT_VERSION),
             ).fetchall()
         for row in legacy:
             self.process(row['id'])
@@ -162,13 +163,14 @@ class AttachmentService:
             self.process_file(attachment_id)
 
     def process_file(self, attachment_id: UUID) -> None:
-        """提取正文、表格、图片位置和视觉描述，原子发布切片前重核来源与原 TTL。"""
+        """用同一 LLM 计数快照提取并切片，发布前重核来源与原 TTL。"""
         info: dict[str, Any] = {}
         try:
             with self.database.connect() as connection:
                 row = connection.execute("SELECT filename FROM attachments WHERE id=%s AND status='processing' AND expires_at>CURRENT_TIMESTAMP", (attachment_id,)).fetchone()
             if row is None:
                 return
+            policy = self.policy
             path = self.directory / str(attachment_id)
             extension = Path(str(row['filename'])).suffix.lower()
             if extension in {'.png', '.jpg', '.jpeg'}:
@@ -213,12 +215,10 @@ class AttachmentService:
                         image_failed_count=failed,
                         vision_model=self.vision.name,
                         vision_revision=self.vision.revision,
+                        vision_rules=VISION_PROMPT_VERSION,
                     )
                     if images and not described and not any(unit.content.strip() for unit in document.units):
                         raise ValueError('文档图片未能生成描述，请检查视觉模型后重新处理。')
-                    info.update(chunk_policy=self.policy.signature, chunk_tokens=self.policy.tokens,
-                                chunk_max_tokens=self.policy.max_tokens, chunk_overlap_tokens=self.policy.overlap,
-                                token_count_method=self.policy.counter.method, tokenizer_model=self.policy.counter.model)
                     units = document.units
                 else:
                     images = []
@@ -230,13 +230,17 @@ class AttachmentService:
                     units = text_units(text)
                     info = {'format': extension.lstrip('.'), 'total_units': len(units),
                             'readable_units': sum(bool(unit.content.strip()) for unit in units)}
+                info.update(chunk_policy=policy.signature, chunk_layout=policy.layout_signature,
+                            chunk_tokens=policy.tokens, chunk_max_tokens=policy.max_tokens,
+                            chunk_overlap_tokens=policy.overlap, token_count_method=policy.counter.method,
+                            tokenizer_model=policy.counter.model, tokenizer_fingerprint=policy.counter.fingerprint)
                 with self.database.connect() as connection:
                     if not connection.execute("SELECT id FROM attachments WHERE id=%s AND status='processing' AND expires_at>CURRENT_TIMESTAMP FOR UPDATE", (attachment_id,)).fetchone():
                         return
-                    store_chunks(connection, attachment_id, units, self.policy)
+                    store_chunks(connection, attachment_id, units, policy)
                     if extension in {'.pdf', '.docx'}:
                         store_document_images(connection, attachment_id, images)
-                        store_image_chunks(connection, attachment_id, images, self.policy)
+                        store_image_chunks(connection, attachment_id, images, policy)
                     if paginated.exists():
                         paginated.replace(self.directory / f'{attachment_id}.pdf')
                     connection.execute("UPDATE attachments SET status='ready',error=NULL,parse_info=%s,knowledge_version=2 WHERE id=%s", (Jsonb(info), attachment_id))

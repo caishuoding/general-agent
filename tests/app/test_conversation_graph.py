@@ -47,6 +47,7 @@ def graph_dependencies() -> tuple[ConversationGraph, MagicMock, MagicMock]:
         return answer, []
 
     execution.search.resolve.side_effect = resolve
+    execution.resolve_knowledge_citations.side_effect = lambda _messages, answer: (answer, [])
     execution.material_attachment_ids.return_value = []
     graph = ConversationGraph(database, execution)
     return graph, database, execution
@@ -117,7 +118,8 @@ def test_context_failure_is_finalized_without_calling_model() -> None:
 def initial_state() -> ConversationState:
     """提供节点追踪测试的实际图输入，身份及私密配置只由 context 注入。"""
     return {'messages': [{'role': 'user', 'content': '你好'}], 'source_attachment_ids': [],
-            'reserved_call_id': None, 'answer': '', 'failure': None, 'used_tools': False, 'web_sources': []}
+            'reserved_call_id': None, 'answer': '', 'failure': None, 'used_tools': False,
+            'web_sources': [], 'knowledge_sources': []}
 
 
 def test_nodes_share_preparation_tools_and_final_answer_through_state() -> None:

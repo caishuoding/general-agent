@@ -106,7 +106,7 @@ class MemoryTools:
         return {'status': 'complete', 'action': 'memory_added', 'detail': detail}
 
     def search(self, checkpoint: MemoryCheckpoint, query: str) -> dict[str, Any]:
-        """通过 Mem0 语义查找或本地列表取得有效记忆，登记可修改的观察版本。"""
+        """通过 Mem0 混合召回或本地列表取得有效记忆，再核对业务版本并登记观察。"""
         checkpoint.guard()
         account_id = self.memory.account_id_for_conversation(checkpoint.conversation_id)
         rows = [row for row in self.memory.list(account_id) if row['status'] == 'complete']
@@ -140,7 +140,7 @@ class MemoryTools:
         document_budget: int = 0,
         token_counter: TokenCounter | None = None,
     ) -> dict[str, Any]:
-        """执行白名单工具；知识库和附件分别核验权限，记忆变更核对观察版本。"""
+        """执行授权工具；文档阅读使用当前回答 LLM 计数，记忆变更核对观察版本。"""
         checkpoint.guard()
         if name == 'search_knowledge':
             if self.knowledge is None:
@@ -158,7 +158,7 @@ class MemoryTools:
             if name == 'search_documents':
                 return self.attachments.documents.search(checkpoint.conversation_id, account_id, arguments)
             return self.attachments.documents.read(checkpoint.conversation_id, account_id, arguments,
-                                                   token_counter or TokenCounter(settings.model), document_budget)
+                                                   token_counter or TokenCounter.for_settings(settings, self.memory.directory), document_budget)
         if name == 'add_memory':
             return self.add(checkpoint, arguments, settings)
         if name == 'search_memories':
@@ -216,10 +216,10 @@ class MemoryTools:
         on_content: Callable[[str], None] | None = None,
         source_attachment_ids: list[UUID] | None = None,
     ) -> ToolOutcome:
-        """运行统一工具循环，附件与知识库命中的原图按业务分别核验后加入下一轮。"""
+        """按本轮 LLM 分词核算预算，命中原图分别核验后加入下一轮模型上下文。"""
         if self.memory.account_id_for_conversation(conversation_id) != account_id:
             raise LookupError("会话不存在。")
-        counter = TokenCounter(settings.model)
+        counter = TokenCounter.for_settings(settings, self.memory.directory)
         document_budget = 0
         injected_images: set[UUID] = set()
 
@@ -249,19 +249,27 @@ class MemoryTools:
             return self.execute(current, name, arguments, current_settings, source_attachment_ids, document_budget, counter)
 
         def tool_images(results: list[dict[str, Any]]) -> list[ModelMessage]:
-            """分别加载附件与知识库图片，共享每批五张和单次回答图片去重限制。"""
+            """按切片来源加载附件或会话绑定知识库原图，共享单批五张和去重限制。"""
             messages: list[ModelMessage] = []
             selected: list[UUID] = []
+            knowledge_results = [
+                result for result in results
+                if any(isinstance(item, dict) and 'knowledge_base_id' in item
+                       for item in result.get('results', []) if isinstance(result.get('results'), list))
+            ]
+            attachment_results = [
+                result for result in results if not any(result is knowledge for knowledge in knowledge_results)
+            ]
             try:
                 if self.attachments is not None:
                     message, selected = self.attachments.document_image_message(
-                        conversation_id, account_id, [result for result in results if 'knowledge_base_id' not in result], injected_images,
+                        conversation_id, account_id, attachment_results, injected_images,
                     )
                     if message is not None:
                         messages.append(message)
                 if self.knowledge is not None and len(selected) < 5:
                     message, knowledge_selected = self.knowledge.image_message(
-                        conversation_id, account_id, [result for result in results if 'knowledge_base_id' in result],
+                        conversation_id, account_id, knowledge_results,
                         injected_images | set(selected), limit=5 - len(selected),
                     )
                     selected.extend(knowledge_selected)

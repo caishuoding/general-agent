@@ -31,6 +31,7 @@ from general_agent.attachments.document_images import (
     ParsedImage,
     extract_pdf_images,
     extract_word_images,
+    figure_caption,
 )
 
 MAX_TEXT_CHARACTERS = 2_000_000
@@ -122,6 +123,42 @@ class ParsedDocument(BaseModel):
     images: list[ParsedImage] = Field(default_factory=list)
 
 
+def attach_pdf_captions(units: list[DocumentUnit], images: list[ParsedImage]) -> list[ParsedImage]:
+    """把同页图注与 PDF 图片按原文顺序绑定；数量不一致时只绑定可确定的部分。"""
+    captions: dict[int, list[str]] = {}
+    for unit in units:
+        if unit.page is None:
+            continue
+        caption = figure_caption(unit.content.strip())
+        if caption is not None:
+            captions.setdefault(unit.page, []).append(caption)
+    by_page: dict[int, list[int]] = {}
+    for index, image in enumerate(images):
+        if image.page is not None:
+            by_page.setdefault(image.page, []).append(index)
+    result = list(images)
+    for page, indexes in by_page.items():
+        page_captions = captions.get(page, [])
+        if len(indexes) == 1 and page_captions:
+            result[indexes[0]] = result[indexes[0]].model_copy(update={'caption': page_captions[0]})
+        elif len(indexes) == len(page_captions):
+            for index, caption in zip(indexes, page_captions):
+                result[index] = result[index].model_copy(update={'caption': caption})
+    return result
+
+
+def exclude_caption_units(units: list[DocumentUnit], images: list[ParsedImage]) -> None:
+    """从普通正文单位中移除已绑定图注，保留单位数量以维持分页位置映射。"""
+    captions = {image.caption.strip() for image in images if image.caption and image.caption.strip()}
+    if not captions:
+        return
+    for unit in units:
+        lines = unit.content.splitlines(keepends=True)
+        remaining = [line for line in lines if figure_caption(line.strip()) not in captions]
+        if len(remaining) != len(lines):
+            unit.content = ''.join(remaining)
+
+
 def parse_pdf(path: Path, image_directory: Path | None = None) -> ParsedDocument:
     """提取 PDF 文字、表格和图片，图片由后续视觉阶段生成描述。"""
     info = DocumentInfo(format='pdf', text_source='pdf_tables_v2', limitations=['SmartArt、EMF、WMF 和复杂矢量图表暂不解析。', '表格首行作为列头；无框表格仅接受稳定对齐和明显列间隙，复杂跨页或多级表头不保证还原。'])
@@ -175,6 +212,9 @@ def parse_pdf(path: Path, image_directory: Path | None = None) -> ParsedDocument
                     info.readable_units += 1
         if sum(len(unit.content) for unit in units) > MAX_TEXT_CHARACTERS:
             return ParsedDocument(info=info, error='文档提取文字超过 2,000,000 字符资源限制，请拆分后上传。')
+        images = attach_pdf_captions(units, images)
+        exclude_caption_units(units, images)
+        info.readable_units = sum(bool(unit.content.strip()) for unit in units)
         info.coverage = 'partial' if info.missing_units else 'complete'
         if not info.readable_units:
             if not images:
@@ -223,6 +263,7 @@ def parse_docx(path: Path, image_directory: Path | None = None) -> ParsedDocumen
         except ValueError as error:
             return ParsedDocument(info=info, error=str(error))
         info.image_count = len(images)
+        exclude_caption_units(units, images)
         if sum(len(unit.content) for unit in units) > MAX_TEXT_CHARACTERS:
             raise ValueError('文档提取文字超过 2,000,000 字符资源限制，请拆分后上传。')
         info.total_units = len(units)

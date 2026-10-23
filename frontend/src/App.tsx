@@ -234,7 +234,7 @@ export function App() {
   }
 
   useEffect(
-    // 首次进入时读取服务端登录会话，未登录时只显示登录页。
+    // 首次进入时读取登录会话；确认普通用户后先进入加载态，避免聊天区短暂可用。
     function restoreSession() {
       let mounted = true;
       // 只在组件仍有效时应用会话恢复结果。
@@ -246,6 +246,7 @@ export function App() {
             window.location.replace("/admin");
             return;
           }
+          setLoading(true);
           setUser(current);
         } catch {
           if (mounted) setUser(null);
@@ -423,19 +424,21 @@ export function App() {
     }
   }
 
-  // 登录成功后保存当前账号并触发工作区加载。
+  // 登录成功后先进入工作区加载态，再保存账号，避免暴露未初始化的聊天控件。
   function handleAuthenticated(next: AuthUser) {
     setError("");
     if (next.role === "admin") {
       window.location.replace("/admin");
       return;
     }
+    setLoading(true);
     setUser(next);
   }
 
-  // 强制改密成功后更新当前账号状态。
+  // 强制改密成功后进入加载态并更新账号，确保聊天区只在工作区就绪后开放。
   function handlePasswordChanged(next: AuthUser) {
     setError("");
+    setLoading(true);
     setUser(next);
     setScreen("chat");
   }
@@ -698,7 +701,7 @@ export function App() {
           </span>
           <div>
             <strong>对话</strong>
-            <span>留一点空间，给想法。</span>
+            <span>一处会记住你的对话空间</span>
           </div>
         </div>
         <button
@@ -742,7 +745,7 @@ export function App() {
             <button ref={navigationTrigger} className="navigation-toggle" type="button" aria-label="打开会话列表" aria-expanded={navigationOpen} aria-controls="conversation-navigation" onClick={openNavigation}>☰</button>
             <h1>个人对话空间</h1>
             <span className="topbar-divider">/</span>
-            <span className="topbar-subtitle">日常、灵感与思考</span>
+            <span className="topbar-subtitle">{screen === "knowledge" ? "长期资料" : conversation?.title || "日常、灵感与思考"}</span>
           </div>
           <span className="user-pill">{user.username}</span>
         </header>
@@ -767,17 +770,13 @@ export function App() {
                     <div className="hello-mark" aria-hidden="true">
                       ✳
                     </div>
-                    <div className="eyebrow">从一个问题开始</div>
-                    <h2>今天，想聊些什么？</h2>
-                    <p>
-                      整理思路、写一段文字，
-                      <br />
-                      或把脑海里还没成形的想法说出来。
-                    </p>
+                    <div className="eyebrow">开始一段对话</div>
+                    <h2>把还没想清楚的事，放在这里。</h2>
+                    <p>一句话、一份资料，或一个还没成形的念头。先说出来，再慢慢理清。</p>
                     <div className="topic-tags">
-                      <span>日常问答</span>
-                      <span>写作灵感</span>
-                      <span>梳理想法</span>
+                      <span>问一个问题</span>
+                      <span>理清一件事</span>
+                      <span>读一份资料</span>
                     </div>
                   </section>
                 ) : (

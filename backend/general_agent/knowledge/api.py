@@ -90,6 +90,16 @@ def knowledge_router(service: KnowledgeService) -> APIRouter:
         except LookupError as error:
             raise HTTPException(404, str(error)) from None
 
+    @router.get('/api/knowledge-bases/{base_id}/documents/{document_id}/images/{image_id}/file')
+    def image(base_id: UUID, document_id: UUID, image_id: UUID, request: Request) -> FileResponse:
+        """权限核验后以内联图片返回知识库原图，供已核验引用来源展示。"""
+        try:
+            path, media_type = service.image_file(base_id, document_id, image_id, current_user(request).id)
+            return FileResponse(path, media_type=media_type,
+                                headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=3600'})
+        except LookupError as error:
+            raise HTTPException(404, str(error)) from None
+
     @router.post('/api/knowledge-bases/{base_id}/documents/{document_id}/retry')
     def retry(base_id: UUID, document_id: UUID, request: Request) -> dict[str, str]:
         """重试失败图片或索引，已有成功结果保留。"""

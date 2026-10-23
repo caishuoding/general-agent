@@ -11,11 +11,12 @@ import httpx
 from psycopg.types.json import Jsonb
 
 from general_agent.attachments.service import AttachmentService
+from general_agent.attachments.knowledge import ChunkPolicy, configured_chunk_policy
 from general_agent.attachments.upload import UploadedFile
 from general_agent.infrastructure.calls import CallGateway
 from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.settings import EmbeddingSettingsStore
-from general_agent.attachments.document_images import DocumentVision
+from general_agent.attachments.document_images import VISION_PROMPT_VERSION
 
 LOGGER = logging.getLogger(__name__)
 
@@ -25,29 +26,35 @@ class KnowledgeService:
 
     def __init__(self, database: Database, directory: Path, attachments: AttachmentService,
                  calls: CallGateway, transport: httpx.BaseTransport | None = None) -> None:
-        """复用附件的算法配置和模型连接，文件与后台队列保持独立。"""
+        """复用公共切片策略和模型连接，文件与后台队列保持独立。"""
         self.database, self.directory = database, directory / 'knowledge'
-        self.policy, self.files = attachments.policy, attachments.files
+        self.files = attachments.files
         self.calls, self.transport, self.settings_directory = calls, transport, directory
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='knowledge')
 
+    @property
+    def policy(self) -> ChunkPolicy:
+        """按当前 LLM 创建切片策略，后台任务在开始时固定本次快照。"""
+        return configured_chunk_policy(self.settings_directory)
+
     def recover(self) -> None:
-        """恢复中断或配置已变化的索引任务，已删除对象继续清理且不恢复访问。"""
+        """恢复中断或结构规则变化的任务，人工清空和单独切换 LLM 不触发重切。"""
+        policy = self.policy
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         for path in self.directory.glob('*.upload'):
             path.unlink(missing_ok=True)
         with self.database.connect() as connection:
             embedding = EmbeddingSettingsStore(self.settings_directory).read()
-            vision_revision = DocumentVision(self.settings_directory, self.files, self.transport).revision
             connection.execute(
                 "UPDATE knowledge_documents d SET status='processing',stage='queued',attempt=%s "
                 "FROM knowledge_bases b WHERE b.id=d.knowledge_base_id AND NOT b.deleting AND d.status='ready' "
-                "AND (d.chunk_policy IS DISTINCT FROM %s OR (%s::text IS NOT NULL AND d.index_revision IS DISTINCT FROM %s) "
-                "OR EXISTS(SELECT 1 FROM knowledge_document_images i WHERE i.document_id=d.id AND i.metadata->>'vision_revision' IS DISTINCT FROM %s) "
+                "AND COALESCE(d.parse_info->>'index_cleared','false')<>'true' "
+                "AND (COALESCE(d.parse_info->>'chunk_layout',d.chunk_policy) IS DISTINCT FROM %s OR (%s::text IS NOT NULL AND d.index_revision IS DISTINCT FROM %s) "
+                "OR (EXISTS(SELECT 1 FROM knowledge_document_images i WHERE i.document_id=d.id) AND d.parse_info->>'vision_rules' IS DISTINCT FROM %s) "
                 "OR (lower(d.filename) LIKE '%%.docx' AND d.parse_info->>'text_source' IS DISTINCT FROM 'word_native_markdown_v3') "
                 "OR (lower(d.filename) LIKE '%%.pdf' AND d.parse_info->>'text_source' IS DISTINCT FROM 'pdf_tables_v2'))",
-                (uuid4(), self.policy.signature, embedding.revision if embedding else None,
-                 embedding.revision if embedding else None, vision_revision),
+                (uuid4(), policy.layout_signature, embedding.revision if embedding else None,
+                 embedding.revision if embedding else None, VISION_PROMPT_VERSION),
             )
             rows = connection.execute(
                 "SELECT d.id FROM knowledge_documents d JOIN knowledge_bases b ON b.id=d.knowledge_base_id "
@@ -229,6 +236,21 @@ class KnowledgeService:
         if row is None or not path.is_file():
             raise LookupError('知识库文档不存在。')
         return path, row['filename']
+
+    def image_file(self, base_id: UUID, document_id: UUID, image_id: UUID, account_id: UUID) -> tuple[Path, str]:
+        """授权后返回仍存在的知识库原图及其真实媒体类型。"""
+        with self.database.connect() as connection:
+            self.guard(connection, base_id, account_id)
+            row = connection.execute(
+                'SELECT i.metadata FROM knowledge_document_images i JOIN knowledge_documents d ON d.id=i.document_id '
+                "WHERE i.id=%s AND i.document_id=%s AND d.knowledge_base_id=%s AND d.status='ready'",
+                (image_id, document_id, base_id),
+            ).fetchone()
+        storage_name = str((row or {}).get('metadata', {}).get('storage_name', ''))
+        path = self.directory / str(document_id) / 'images' / Path(storage_name).name
+        if row is None or not path.is_file():
+            raise LookupError('知识库图片不存在。')
+        return path, str(row['metadata'].get('mime') or 'application/octet-stream')
 
     def delete(self, base_id: UUID, account_id: UUID, document_id: UUID | None = None) -> None:
         """立即撤销对象的读取和选择范围，随后后台执行可重试的文件清理。"""

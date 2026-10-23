@@ -19,6 +19,27 @@ type ChangePasswordProps = {
   onCancel?: () => void;
 };
 
+/** 渲染登录页左侧的空间说明，用同一套品牌语言解释对话、资料与记忆的关系。 */
+function AuthStory() {
+  return (
+    <aside className="auth-story" aria-label="空间介绍">
+      <div className="auth-story-brand">
+        <span className="auth-orbit" aria-hidden="true" />
+        <strong>对话</strong>
+      </div>
+      <div className="auth-story-copy">
+        <p className="auth-story-line">把想法留下，<br />下一次接着谈。</p>
+        <p>对话、资料和记忆在同一个空间里延续，不必每次从零开始。</p>
+      </div>
+      <div className="auth-story-path" aria-hidden="true">
+        <span>对话</span>
+        <span>资料</span>
+        <span>记忆</span>
+      </div>
+    </aside>
+  );
+}
+
 // 渲染用户名密码登录页，并处理统一登录错误。
 export function LoginScreen({
   onAuthenticated,
@@ -53,8 +74,8 @@ export function LoginScreen({
 
   return (
     <main className="auth-shell">
+      <AuthStory />
       <section className="auth-card" aria-labelledby="login-title">
-        <div className="auth-brand" aria-hidden="true">✳</div>
         <p className="auth-kicker">{kicker}</p>
         <h1 id="login-title">{title}</h1>
         <p className="auth-description">{description}</p>
@@ -130,8 +151,8 @@ export function PasswordChangeScreen({
 
   return (
     <main className="auth-shell">
+      <AuthStory />
       <section className="auth-card" aria-labelledby="change-password-title">
-        <div className="auth-brand" aria-hidden="true">✳</div>
         <p className="auth-kicker">{forced ? "首次登录" : "账号安全"}</p>
         <h1 id="change-password-title">{forced ? "设置新密码" : "修改密码"}</h1>
         <p className="auth-description">

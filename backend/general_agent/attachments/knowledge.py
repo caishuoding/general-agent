@@ -1,6 +1,8 @@
 """保存会话文档共用切片及位置元数据，不另存解析正文，也不接触长期记忆。"""
 
+import os
 import re
+from pathlib import Path
 from math import log
 from bisect import bisect_left, bisect_right
 from collections import Counter
@@ -13,6 +15,7 @@ from psycopg.types.json import Jsonb
 from psycopg import sql
 
 from general_agent.infrastructure.tokens import TokenCounter
+from general_agent.infrastructure.settings import SettingsStore
 
 MAX_DOCUMENT_UNITS = 20_000
 
@@ -62,8 +65,13 @@ class ChunkPolicy:
 
     @property
     def signature(self) -> str:
-        """标识 Token 计数配置与 Markdown 规则，供旧 Word 索引按需升级。"""
-        return f'markdown-token-v1:{self.tokens}:{self.overflow}:{self.overlap}:{self.counter.fingerprint}'
+        """标识实际切片规则与计数快照，供结果追溯，不要求随 LLM 切换重切旧文档。"""
+        return f'{self.layout_signature}:{self.counter.fingerprint}'
+
+    @property
+    def layout_signature(self) -> str:
+        """仅标识切片结构和预算规则，使 LLM 切换不会单独触发旧文档重切。"""
+        return f'markdown-token-v1:{self.tokens}:{self.overflow}:{self.overlap}'
 
     def end(self, text: str, start: int, budget: int, stop: int) -> int:
         """返回预算内的字符结束位置，逐步扩展窗口，避免反复分词整个长文档。"""
@@ -73,6 +81,19 @@ class ChunkPolicy:
         while limit < stop and self.counter.count(text[start:limit]) <= budget:
             limit = min(stop, start + (limit - start) * 2)
         return start + len(self.counter.prefix(text[start:limit], budget))
+
+
+def configured_chunk_policy(directory: Path) -> ChunkPolicy:
+    """按当前回答 LLM 创建独立计数快照，附件与知识库共用该选择规则。"""
+    settings = SettingsStore(directory).read()
+    override = os.environ.get('DOCUMENT_CHUNK_TOKENIZER_MODEL')
+    if settings is not None and override:
+        settings = settings.model_copy(update={'model': override})
+    counter = TokenCounter.for_settings(settings, directory)
+    return ChunkPolicy(int(os.environ.get('DOCUMENT_CHUNK_TOKENS', '800')),
+                       int(os.environ.get('DOCUMENT_SEARCH_RESULTS', '5')),
+                       int(os.environ.get('DOCUMENT_CHUNK_OVERLAP_TOKENS', '160')),
+                       int(os.environ.get('DOCUMENT_CHUNK_OVERFLOW_TOKENS', '200')), counter)
 
 
 def text_units(text: str, page: int | None = None) -> list[DocumentUnit]:
@@ -359,7 +380,7 @@ def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str,
         if image.get('vision_status') != 'complete':
             continue
         content = image['description']
-        structure = Jsonb({'kind': 'image', 'ordinal': image['ordinal'],
+        structure = Jsonb({'kind': 'image', 'ordinal': image['ordinal'], 'caption': image.get('caption'),
                            'section': image.get('section', []), 'location': image['location']})
         for start, end in chunk_ranges(content, image_policy):
             chunk = content[start:end]
