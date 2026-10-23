@@ -20,6 +20,7 @@ from general_agent.attachments.files import DeepSeekFiles
 from general_agent.attachments.word_structure import add_bookmark, heading_level
 from general_agent.infrastructure.provider import ModelClient, ModelFailure
 from general_agent.infrastructure.settings import SettingsStore
+from general_agent.infrastructure.calls import BoundCalls
 
 MAX_DOCUMENT_IMAGES = 50
 MAX_IMAGE_PIXELS = 40_000_000
@@ -240,11 +241,12 @@ def extract_pdf_images(
 class DocumentVision:
     """使用当前聊天模型对文档图片生成受控的结构化描述。"""
 
-    def __init__(self, directory: Path, files: DeepSeekFiles, transport: Any = None) -> None:
-        """绑定同一 DeepSeek 设置、文件身份和模型 HTTP 边界。"""
+    def __init__(self, directory: Path, files: DeepSeekFiles, transport: Any = None,
+                 calls: BoundCalls | None = None) -> None:
+        """绑定同一 DeepSeek 设置、文件身份与 HTTP 边界；知识库可注入已绑定的计量网关。"""
         self.settings = SettingsStore(directory)
         self.files = files
-        self.model = ModelClient(transport)
+        self.model: ModelClient | BoundCalls = calls or ModelClient(transport)
 
     @property
     def name(self) -> str:
@@ -260,7 +262,7 @@ class DocumentVision:
         return f'{VISION_PROMPT_VERSION}:{model_revision}'
 
     def describe(self, path: Path, image: ParsedImage) -> tuple[ImageDescription, dict[str, Any]]:
-        """上传图片后要求模型返回 JSON；无效输出按图片失败处理。"""
+        """上传后请求结构化描述；模型失败或操作取消时回收尚未发布的远端文件。"""
         settings = self.settings.read()
         if settings is None:
             raise ValueError('请先配置支持图片的 LLM 连接。')
@@ -279,7 +281,7 @@ class DocumentVision:
                     {'type': 'file', 'file_id': remote['id']},
                 ],
             }])
-        except ModelFailure:
+        except Exception:
             self.discard(remote)
             raise
         content = completion.content.strip()

@@ -6,7 +6,7 @@ test.beforeEach(async ({ page }) => {
   await loginUser(page);
 });
 
-// 验证模型自主联网直接执行，并展示真实网页来源。
+// 验证当前文档可用状态及模型按需读取后自主联网，展示真实网页来源。
 test('联网搜索作为模型工具直接执行并提供来源链接', async ({ page }) => {
   await configureSearchModel(
     page,
@@ -17,7 +17,7 @@ test('联网搜索作为模型工具直接执行并提供来源链接', async ({
   await page.getByRole('button', { name: '新建会话', exact: true }).click();
   await expect(page.getByLabel('上传会话附件')).toBeEnabled();
   await page.getByLabel('上传会话附件').setInputFiles({ name: '位置.txt', mimeType: 'text/plain', buffer: Buffer.from('我的住址：上海市青松路 88 号。') });
-  await expect(page.getByText('可用 · 位置.txt', { exact: true })).toBeVisible();
+  await expect(page.getByText('文字可用 · 位置.txt', { exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: '消息', exact: true }).fill('联网搜索：根据附件里的住址查附近咖啡店');
   await page.getByRole('button', { name: '发送消息' }).click();
   await expect(page.getByText('咖啡店营业时间', { exact: true })).toBeVisible();

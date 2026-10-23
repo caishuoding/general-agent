@@ -22,10 +22,11 @@ import {
 } from "./api";
 import { AttachmentPanel } from "./AttachmentPanel";
 import { LoginScreen, PasswordChangeScreen } from "./AuthScreens";
+import { KnowledgePanel, KnowledgeSelector } from './KnowledgePanel';
 
-type Screen = "chat" | "password";
+type Screen = "chat" | "password" | "knowledge";
 
-// 展示响应式会话工作区、消息内附件与来源删除状态，并隔离过期异步响应。
+// 展示响应式会话与独立知识库入口，保持附件和知识库选择各自的业务边界。
 export function App() {
   const [mobile, setMobile] = useState(window.matchMedia("(max-width: 800px)").matches);
   const [navigationOpen, setNavigationOpen] = useState(false);
@@ -163,6 +164,9 @@ export function App() {
   function openPasswordScreen() { setNavigationOpen(false); setScreen("password"); }
   // 返回聊天工作区。
   function returnToChat() { setScreen("chat"); }
+
+  /** 打开独立知识库管理页，同时关闭手机导航抽屉。 */
+  function openKnowledge() { setNavigationOpen(false); setScreen('knowledge'); }
 
   // 当前会话最多有一条正在生成的回答。
   const generating = conversation?.messages.find(
@@ -704,6 +708,8 @@ export function App() {
         >
           <span aria-hidden="true">＋</span>新建会话
         </button>
+        <button className="conversation-button" onClick={openKnowledge} aria-pressed={screen === 'knowledge'}>知识库</button>
+        {screen === 'knowledge' && <button className="conversation-button" onClick={returnToChat}>返回对话</button>}
         <div className="section-label">
           你的会话 <span>{conversations.length || ""}</span>
         </div>
@@ -745,6 +751,7 @@ export function App() {
             {error}
           </div>
         )}
+        {screen === 'knowledge' ? <KnowledgePanel /> : <>
         <SourceDeletionPending revision={sourceRevision} onChanged={refreshSources} />
         {deleteTarget && <SourceDeletion key={deleteTarget.path} target={deleteTarget} onClose={closeDeletion} onChanged={refreshSources} />}
         {!mobile && conversation && <button className="delete-conversation" onClick={deleteConversation}>删除当前会话</button>}
@@ -798,6 +805,7 @@ export function App() {
             <div className="composer-wrap">
               {streamNotice && <p className="stream-notice" role="status">{streamNotice}</p>}
               <form className="composer" ref={composer} onSubmit={send}>
+                {conversation && <KnowledgeSelector key={conversation.id} conversationId={conversation.id} disabled={!!pending || !!generating || changingRun} />}
                 <AttachmentPanel revision={sourceRevision} resetToken={attachmentReset} onDelete={deleteAttachment} conversationId={activeId.current} disabled={!!pending || !!generating || changingRun || creating || loading} />
                 <textarea
                   ref={draftInput}
@@ -836,6 +844,7 @@ export function App() {
               <p className="composer-note">回答可能有误，请核对重要信息。停止生成不会撤回已经发出的服务请求。</p>
             </div>
         </div>
+        </>}
       </main>
     </div>
   );

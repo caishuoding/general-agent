@@ -18,10 +18,13 @@ from general_agent.attachments.service import AttachmentContext
 from general_agent.search.service import SearchService
 from general_agent.memory.automatic import AutomaticMemory
 from general_agent.memory.tools import MemoryTools, ToolOutcome
+from general_agent.knowledge.tools import KnowledgeTools
 from general_agent.prompts import (
     attachment_context_fragment,
     compose_system_prompt,
     memory_context_fragment,
+    knowledge_context_fragment,
+    knowledge_data,
 )
 
 
@@ -36,15 +39,17 @@ class AnswerPreparation:
 class ChatExecution:
     """共用工具、来源管理和回答准备；传输、线程及答案尝试留给聊天入口。"""
 
-    def __init__(self, calls: CallGateway, memory: MemoryService, search: SearchService) -> None:
-        """绑定自动记忆、工具和材料路由，所有聊天入口共用同一执行流程。"""
+    def __init__(self, calls: CallGateway, memory: MemoryService, search: SearchService,
+                 knowledge: KnowledgeTools | None = None) -> None:
+        """绑定自动记忆和各资料工具，所有聊天入口共用同一执行流程。"""
         self.calls, self.memory = calls, memory
         self.recall = MemoryRecall(memory)
         self.search = search
         self.correction = MemoryCorrection(memory)
         self.deletion = MemoryDeletion(memory)
         self.automatic = AutomaticMemory(memory)
-        self.memory_tools = MemoryTools(memory, self.automatic, search, search.attachments)
+        self.memory_tools = MemoryTools(memory, self.automatic, search, search.attachments, knowledge)
+        self.knowledge = knowledge
 
     def embedding_revision(self, content: str) -> str | None:
         """返回当前嵌入配置版本；Agent 每轮都可能选择记忆工具，因此每轮都绑定版本。"""
@@ -83,7 +88,7 @@ class ChatExecution:
         reserved: UUID | None,
         rows: list[dict[str, Any]],
     ) -> AnswerPreparation:
-        """统一组合有效文档清单、全部图片、长期记忆和历史，文档正文由模型按需调用工具读取。"""
+        """组合附件、已选知识库清单和记忆，知识库正文仅经模型自主工具调用取得。"""
         content = str(rows[-1]['content'])
         chat_reserved = self.chat_reservation(content, reserved)
         material = self.search.attachments.prepare(conversation_id, account_id)
@@ -93,11 +98,17 @@ class ChatExecution:
             context_fragments.append(memory_context_fragment())
         if material.messages:
             context_fragments.append(attachment_context_fragment())
+        knowledge_messages: list[ModelMessage] = []
+        if self.knowledge is not None:
+            selected = self.knowledge.service.selected(conversation_id, account_id)
+            if selected:
+                context_fragments.append(knowledge_context_fragment())
+                knowledge_messages.append({'role': 'user', 'content': knowledge_data(selected)})
         system_prompt: ModelMessage = {
             'role': 'system',
             'content': compose_system_prompt(*context_fragments),
         }
-        data_messages: list[ModelMessage] = [*memory_material, *material.messages]
+        data_messages: list[ModelMessage] = [*memory_material, *material.messages, *knowledge_messages]
         conversation: list[ModelMessage] = [system_prompt, *data_messages]
         conversation.extend({'role': str(row['role']), 'content': str(row['content'])} for row in rows)
         return AnswerPreparation(conversation, material, chat_reserved)

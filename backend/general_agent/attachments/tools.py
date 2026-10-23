@@ -4,13 +4,10 @@ import json
 from typing import Any
 from uuid import UUID
 
-import httpx
-
 from pydantic import BaseModel, ConfigDict, Field
 
-from general_agent.attachments.knowledge import ChunkPolicy, rank_chunks
-from general_agent.attachments.retrieval import DocumentRetrieval, chunk_key, reciprocal_rank_fusion
-from general_agent.infrastructure.provider import ModelFailure
+from general_agent.attachments.knowledge import ChunkPolicy
+from general_agent.attachments.retrieval import DocumentRetrieval, chunk_key, hybrid_retrieve
 from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.tokens import TokenCounter
 
@@ -60,49 +57,27 @@ class DocumentTools:
         self.database, self.policy, self.retrieval = database, policy, retrieval
 
     def search(self, conversation_id: UUID, account_id: UUID, arguments: dict[str, Any]) -> dict[str, Any]:
-        """执行 BM25、语义、RRF 和重排；每次外部阶段后重核来源，返回完整正文。"""
+        """通过共用混合算法召回附件；授权与实时来源检查仍只访问会话附件表。"""
         request = SearchDocumentsInput.model_validate(arguments)
         identifiers = [UUID(item) for item in request.document_ids] if request.document_ids is not None else None
         rows = self.search_rows(conversation_id, account_id, identifiers, validate_ids=True)
-        candidates = max(30, self.policy.results)
-        lexical = rank_chunks(rows, request.query, candidates)
-        semantic: list[dict[str, Any]] = []
-        degraded: list[str] = []
         def refresh(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
             """为每批外部嵌入及重排核验当前来源，排除期间撤回的切片。"""
             return self.live_candidates(candidates, conversation_id, account_id, identifiers)
 
-        if rows:
-            try:
-                if self.retrieval is None:
-                    raise ValueError('embedding_unavailable')
-                semantic = self.retrieval.semantic(rows, request.query, candidates, refresh)
-            except (ValueError, OSError, ModelFailure, httpx.HTTPError):
-                degraded.append('embedding_unavailable')
-        fused = reciprocal_rank_fusion([lexical, semantic], candidates)
-        fused = self.live_candidates(fused, conversation_id, account_id, identifiers)
-        reranked = False
-        if fused:
-            try:
-                if self.retrieval is None:
-                    raise ValueError('rerank_unavailable')
-                fused = self.retrieval.rerank(fused, request.query)
-                reranked = True
-            except (ValueError, OSError, httpx.HTTPError) as error:
-                degraded.append('rerank_input_too_long' if str(error) == 'rerank_input_too_long' else 'rerank_unavailable')
-        results = self.live_candidates(fused, conversation_id, account_id, identifiers)[:self.policy.results]
-        public = [
-            {
-                **{key: value for key, value in row.items() if key not in ('embedding', 'embedding_revision')},
-                'document_id': str(row['document_id']),
-                'image_id': str(row['image_id']) if row['image_id'] else None,
-            }
-            for row in results
-        ]
-        return {'results': public, 'limit': self.policy.results,
-                'retrieval': {'mode': 'hybrid' if semantic else 'bm25', 'bm25_candidates': len(lexical),
-                              'vector_candidates': len(semantic), 'fused_candidates': len(fused),
-                              'reranked': reranked, 'degraded': degraded}}
+        def semantic(candidates: list[dict[str, Any]], query: str, limit: int) -> list[dict[str, Any]]:
+            """调用附件的按需向量缓存路径，不把此生命周期带入知识库。"""
+            if self.retrieval is None:
+                raise ValueError('embedding_unavailable')
+            return self.retrieval.semantic(candidates, query, limit, refresh)
+
+        def rerank(candidates: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+            """复用重排协议，未配置时由公共流程标记降级。"""
+            if self.retrieval is None:
+                raise ValueError('rerank_unavailable')
+            return self.retrieval.rerank(candidates, query)
+
+        return hybrid_retrieve(rows, request.query, self.policy.results, semantic, rerank, refresh)
 
     def search_rows(self, conversation_id: UUID, account_id: UUID, identifiers: list[UUID] | None,
                     *, validate_ids: bool = False,

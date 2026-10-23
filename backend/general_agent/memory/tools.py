@@ -24,6 +24,7 @@ from general_agent.agent.time import current_time_tool, get_current_time
 from general_agent.attachments.service import AttachmentService
 from general_agent.attachments.tools import document_tools
 from general_agent.infrastructure.tokens import TokenCounter
+from general_agent.knowledge.tools import KnowledgeTools, knowledge_tool
 
 
 class SearchMemoryInput(BaseModel):
@@ -69,19 +70,22 @@ def memory_tools() -> list[dict[str, Any]]:
     return [{'type': 'function', 'function': {'name': name, 'description': description, 'parameters': model.model_json_schema()}} for name, description, model in definitions]
 
 
-def agent_tools() -> list[dict[str, Any]]:
-    """返回统一循环的记忆、网页、会话文档和北京时间工具，不规定调用顺序。"""
-    return [*memory_tools(), search_web_tool(), search_web_tool("fetch_web"), *document_tools(), current_time_tool()]
+def agent_tools(knowledge: bool = False) -> list[dict[str, Any]]:
+    """返回统一循环工具；已接入独立知识库时添加按库召回能力，不规定调用顺序。"""
+    return [*memory_tools(), search_web_tool(), search_web_tool("fetch_web"), *document_tools(), current_time_tool(),
+            *([knowledge_tool()] if knowledge else [])]
 
 
 class MemoryTools:
     """隐藏记忆与搜索工具协议、版本检查及可恢复执行。"""
 
-    def __init__(self, memory: MemoryService, automatic: AutomaticMemory, search: SearchService | None = None, attachments: AttachmentService | None = None) -> None:
-        """绑定记忆、搜索和附件业务边界，兼容没有附件依赖的独立工具测试。"""
+    def __init__(self, memory: MemoryService, automatic: AutomaticMemory, search: SearchService | None = None,
+                 attachments: AttachmentService | None = None, knowledge: KnowledgeTools | None = None) -> None:
+        """绑定各自独立的记忆、搜索、附件与知识库边界，兼容既有独立工具测试。"""
         self.memory, self.automatic, self.web_search = memory, automatic, search
         self.graph = AgentToolGraph()
         self.attachments = attachments
+        self.knowledge = knowledge
 
     def add(self, checkpoint: MemoryCheckpoint, arguments: dict[str, Any], settings: StoredSettings) -> dict[str, Any]:
         """从已持久化的少量会话构造 Mem0 输入；工具参数不能伪造记忆正文，返回实际处理状态。"""
@@ -136,8 +140,15 @@ class MemoryTools:
         document_budget: int = 0,
         token_counter: TokenCounter | None = None,
     ) -> dict[str, Any]:
-        """执行白名单工具；时间实时读取，文档核对会话身份，记忆变更核对观察版本。"""
+        """执行白名单工具；知识库和附件分别核验权限，记忆变更核对观察版本。"""
         checkpoint.guard()
+        if name == 'search_knowledge':
+            if self.knowledge is None:
+                raise ValueError('知识库工具未配置。')
+            account_id = self.memory.account_id_for_conversation(checkpoint.conversation_id)
+            result = self.knowledge.search(checkpoint.conversation_id, account_id, arguments, self.memory.calls.bind(checkpoint.operation))
+            checkpoint.guard()
+            return result
         if name == 'get_current_time':
             return get_current_time(arguments)
         if name in ('search_documents', 'read_document'):
@@ -205,7 +216,7 @@ class MemoryTools:
         on_content: Callable[[str], None] | None = None,
         source_attachment_ids: list[UUID] | None = None,
     ) -> ToolOutcome:
-        """运行流式工具循环并返回其消息 State，持久缓存仍只保存业务结果。"""
+        """运行统一工具循环，附件与知识库命中的原图按业务分别核验后加入下一轮。"""
         if self.memory.account_id_for_conversation(conversation_id) != account_id:
             raise LookupError("会话不存在。")
         counter = TokenCounter(settings.model)
@@ -238,23 +249,32 @@ class MemoryTools:
             return self.execute(current, name, arguments, current_settings, source_attachment_ids, document_budget, counter)
 
         def tool_images(results: list[dict[str, Any]]) -> list[ModelMessage]:
-            """将文档工具命中的图片加入下一轮请求，并记录已发送身份。"""
-            if self.attachments is None:
-                return []
+            """分别加载附件与知识库图片，共享每批五张和单次回答图片去重限制。"""
+            messages: list[ModelMessage] = []
+            selected: list[UUID] = []
             try:
-                message, selected = self.attachments.document_image_message(
-                    conversation_id,
-                    account_id,
-                    results,
-                    injected_images,
-                )
-            except (ValueError, LookupError, ModelFailure, httpx.HTTPError):
-                return [{
+                if self.attachments is not None:
+                    message, selected = self.attachments.document_image_message(
+                        conversation_id, account_id, [result for result in results if 'knowledge_base_id' not in result], injected_images,
+                    )
+                    if message is not None:
+                        messages.append(message)
+                if self.knowledge is not None and len(selected) < 5:
+                    message, knowledge_selected = self.knowledge.image_message(
+                        conversation_id, account_id, [result for result in results if 'knowledge_base_id' in result],
+                        injected_images | set(selected), limit=5 - len(selected),
+                    )
+                    selected.extend(knowledge_selected)
+                    if message is not None:
+                        messages.append(message)
+                checkpoint.guard()
+            except (ValueError, LookupError, OSError, ModelFailure, httpx.HTTPError):
+                messages.append({
                     'role': 'user',
                     'content': '部分文档原图本次未能加载，请仅根据工具返回的文字描述回答，并明确无法核对原图。',
-                }]
+                })
             injected_images.update(selected)
-            return [message] if message is not None else []
+            return messages
         checkpoint = MemoryCheckpoint(self.memory, message_id, conversation_id, operation)
         with self.memory.database.connect() as connection:
             previous = connection.execute('SELECT status,result FROM memory_tool_runs WHERE message_id=%s', (message_id,)).fetchone()
@@ -275,7 +295,7 @@ class MemoryTools:
             settings=settings,
             calls=self.memory.calls.bind(operation),
             checkpoint=checkpoint,
-            tools=agent_tools(),
+            tools=agent_tools(self.knowledge is not None),
             assistant_message_id=assistant_message_id,
             on_content=on_content,
             execute_tool=execute,

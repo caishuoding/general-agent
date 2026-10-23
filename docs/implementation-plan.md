@@ -4,6 +4,17 @@
 
 产品范围见 [正式规格](../.scratch/general-agent/spec.md)，历史任务及验收记录见 [任务目录](../.scratch/general-agent/issues/)，执行与合并证据见 [集成记录](../.scratch/general-agent/integration.md)。术语采用 [GLOSSARY.md](../GLOSSARY.md)。本文件描述交付实现；各项真实服务验收是否通过，以验证记录中的实际证据为准。
 
+## 独立知识库
+
+2026-10-22 确认方案，2026-10-23 接入独立存储、后台入库、对话工具和前端页面。完整合同与任务拆分见[知识库规格](../.scratch/knowledge-base/spec.md)，存储边界见 [ADR 0015](adr/0015-independent-knowledge-bases.md)。
+
+- 新增账号所有的 `knowledge_bases`、`knowledge_documents`、`knowledge_chunks`、`knowledge_document_images` 及会话选择关系；文件使用独立知识库目录，长期保留至用户删除。
+- 从附件能力中复用格式解析、`ChunkPolicy`、`deepseek-flash` 图片描述与绑定、BM25／向量／RRF／智谱重排。公共算法通过各自数据访问接口工作；附件仍使用原表，知识库不创建附件记录。
+- 后台入库顺序为解析 → 图片描述 → 切片 → 向量与索引；阶段状态和计数持久化，前端展示真实进度并提供失败重试。知识库向量在入库时生成，失败时明确降级为 BM25。
+- 会话保存知识库选择，每轮将已选知识库 ID／名称提供给模型。模型自主调用 `search_knowledge(knowledge_base_id, query)`，后端在召回前核验账号和选择范围；命中图片后同时提供描述和原图。
+- 按存储与生命周期、入库与进度、召回与对话工具、页面与会话选择四项任务实施。数据库迁移不改动现有附件内容，本期不重写附件处理流程。
+- 迁移 049 创建独立业务表，原件、分页副本与派生图片位于 `APP_DATA_DIR/knowledge/`。任务随应用恢复；图片最多三路并发，每张完成后保存进度。失败的远端／本机清理保留对象和重试入口。
+
 ## 模块与持久化
 
 | 部分 | 实现职责 |

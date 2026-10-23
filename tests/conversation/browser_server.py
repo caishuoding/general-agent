@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Thread
-from time import sleep
+from time import sleep, time
 from uuid import uuid4
 
 import psycopg
@@ -27,19 +27,42 @@ class ControlledModel(BaseHTTPRequestHandler):
     attempts: dict[str, int] = {}
 
     def do_POST(self) -> None:
-        """返回受控资料文字及 SSE，支持可控慢速和断流。"""
-        payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-        prompt = payload["messages"][-1]["content"]
+        """支持当前 Files、文档视觉及按需读取协议，保留慢速和断流验收。"""
+        raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if self.path == '/files':
+            self.send_json({'id': 'file-api-document-browser', 'created_at': int(time()), 'expires_at': int(time()) + 2592000})
+            return
+        payload = json.loads(raw)
+        if not payload.get('stream') and any(isinstance(item.get('content'), list) for item in payload['messages']):
+            self.send_json({'choices': [{'message': {'content': json.dumps({'description': '受控扫描图片描述', 'ocr_text': '', 'caption': '', 'uncertainties': []})}}]})
+            return
+        prompt = next((message['content'] for message in reversed(payload['messages'])
+                       if message['role'] == 'user' and isinstance(message.get('content'), str)), '')
         document_reply: str | None = None
+        document_id: str | None = None
         for message in payload['messages']:
             content = message.get('content', '')
+            if message['role'] == 'tool':
+                result = json.loads(content)
+                blocks = result.get('content', result.get('results', []))
+                if isinstance(blocks, list):
+                    document_reply = '\n'.join(str(item.get('content', '')) for item in blocks)
             if isinstance(content, str) and content.startswith('['):
                 try:
                     attachments = json.loads(content)
                 except ValueError:
                     attachments = None
                 if isinstance(attachments, list) and attachments:
-                    document_reply = '\n'.join(str(item.get('content', '')) for item in attachments if isinstance(item, dict))
+                    document_id = next((str(item['document_id']) for item in attachments if isinstance(item, dict) and item.get('document_id')), None)
+        if payload.get('stream') and document_id and document_reply is None:
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.end_headers()
+            self.write_event({'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'document-read', 'type': 'function',
+                'function': {'name': 'read_document', 'arguments': json.dumps({'document_id': document_id})}}]}, 'finish_reason': 'tool_calls'}]})
+            self.wfile.write(b'data: [DONE]\n\n')
+            self.wfile.flush()
+            return
         if not payload.get("stream"):
             if payload.get("tools") and document_reply is None:
                 content = "普通回答"
@@ -69,6 +92,19 @@ class ControlledModel(BaseHTTPRequestHandler):
         self.write_event({"choices": [{"delta": {"content": second}, "finish_reason": "stop"}]})
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
+
+    def send_json(self, payload: dict[str, object]) -> None:
+        """向浏览器测试的文件和视觉接口返回有长度边界的 JSON 响应。"""
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_DELETE(self) -> None:
+        """受控删除远端图片，避免测试文件进入真实服务。"""
+        self.send_json({'deleted': True})
 
     def write_event(self, payload: dict[str, object]) -> None:
         """写入并刷新单个模型事件，让浏览器能在下一段之前观察界面。"""

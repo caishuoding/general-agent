@@ -11,6 +11,8 @@ from general_agent.prompts.system import (
     memory_context_fragment,
     memory_data,
     memory_failure,
+    knowledge_context_fragment,
+    knowledge_data,
     tool_result_fragment,
     tool_turn_fragment,
 )
@@ -26,6 +28,8 @@ __all__ = [
     "memory_context_fragment",
     "memory_data",
     "memory_failure",
+    "knowledge_context_fragment",
+    "knowledge_data",
     "tool_result_fragment",
     "tool_turn_fragment",
 ]

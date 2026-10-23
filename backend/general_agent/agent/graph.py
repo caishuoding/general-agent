@@ -19,7 +19,7 @@ from general_agent.prompts import tool_result_fragment, tool_turn_fragment
 ToolExecutor = Callable[[MemoryCheckpoint, str, dict[str, Any], StoredSettings], dict[str, Any]]
 ToolResultImages = Callable[[list[dict[str, Any]]], list[ModelMessage]]
 LOGGER = logging.getLogger(__name__)
-DOCUMENT_TOOLS = {'search_documents', 'read_document'}
+DOCUMENT_TOOLS = {'search_documents', 'read_document', 'search_knowledge'}
 
 
 class AgentToolGraph:

@@ -10,6 +10,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 from psycopg.types.json import Jsonb
+from psycopg import sql
 
 from general_agent.infrastructure.tokens import TokenCounter
 
@@ -279,9 +280,11 @@ def chunk_specs(units: list[DocumentUnit], policy: ChunkPolicy) -> list[ChunkSpe
     return specs
 
 
-def store_chunks(connection: Any, identifier: UUID, units: list[DocumentUnit], policy: ChunkPolicy) -> None:
-    """从临时解析块生成唯一持久切片，保存自足的位置与结构，重建时同步撤销旧向量。"""
-    connection.execute('DELETE FROM document_chunks WHERE attachment_id=%s', (identifier,))
+def store_chunks(connection: Any, identifier: UUID, units: list[DocumentUnit], policy: ChunkPolicy,
+                 *, knowledge: bool = False) -> None:
+    """复用切片算法向指定业务的独立表写入正文，默认仍写附件表；表名只由内部白名单选择。"""
+    table, parent = ('knowledge_chunks', 'document_id') if knowledge else ('document_chunks', 'attachment_id')
+    connection.execute(sql.SQL('DELETE FROM {} WHERE {}=%s').format(sql.Identifier(table), sql.Identifier(parent)), (identifier,))
     chunks: list[tuple[Any, ...]] = []
     ends: list[int] = []
     total = 0
@@ -306,9 +309,9 @@ def store_chunks(connection: Any, identifier: UUID, units: list[DocumentUnit], p
     if chunks:
         with connection.cursor() as cursor:
             cursor.executemany(
-                'INSERT INTO document_chunks(attachment_id,ordinal,page,end_page,paragraph,end_paragraph,structure,end_structure,'
+                sql.SQL('INSERT INTO {}({},ordinal,page,end_page,paragraph,end_paragraph,structure,end_structure,'
                 'content,terms,context_prefix,context_suffix,token_count,token_count_method) '
-                'VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)', chunks,
+                'VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)').format(sql.Identifier(table), sql.Identifier(parent)), chunks,
             )
 
 
@@ -343,10 +346,12 @@ def store_document_images(
         )
 
 
-def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str, Any]], policy: ChunkPolicy) -> None:
-    """把成功的结构化图片描述写成普通检索切片，并绑定稳定图片身份。"""
+def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str, Any]], policy: ChunkPolicy,
+                       *, knowledge: bool = False) -> None:
+    """复用图片描述切片算法，按内部白名单写附件或知识库独立表并绑定同域图片。"""
+    table, parent = ('knowledge_chunks', 'document_id') if knowledge else ('document_chunks', 'attachment_id')
     next_ordinal = (connection.execute(
-        'SELECT COALESCE(MAX(ordinal),0)+1 AS ordinal FROM document_chunks WHERE attachment_id=%s',
+        sql.SQL('SELECT COALESCE(MAX(ordinal),0)+1 AS ordinal FROM {} WHERE {}=%s').format(sql.Identifier(table), sql.Identifier(parent)),
         (identifier,),
     ).fetchone() or {'ordinal': 1})['ordinal']
     rows: list[tuple[Any, ...]] = []
@@ -376,10 +381,10 @@ def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str,
     if rows:
         with connection.cursor() as cursor:
             cursor.executemany(
-                'INSERT INTO document_chunks('
-                'attachment_id,ordinal,page,end_page,paragraph,end_paragraph,structure,end_structure,'
+                sql.SQL('INSERT INTO {}('
+                '{},ordinal,page,end_page,paragraph,end_paragraph,structure,end_structure,'
                 'content,terms,context_prefix,context_suffix,image_id,token_count,token_count_method'
-                ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+                ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)').format(sql.Identifier(table), sql.Identifier(parent)),
                 rows,
             )
 

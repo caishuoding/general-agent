@@ -6,7 +6,7 @@ test.beforeEach(async ({ page }) => {
   await loginUser(page);
 });
 
-// 只延迟后端真实详情GET返回，验证删除后的旧会话刷新不能覆盖已经切换到的另一会话。
+// 在当前文字可用流程中延迟真实详情返回，验证删除旧会话资料不能覆盖新会话。
 test('删除附件后的迟到详情不会覆盖新选会话', async ({ page }) => {
   const base = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18117'}/v1`;
   await configureChatModel(page, base, 'chat');
@@ -18,7 +18,7 @@ test('删除附件后的迟到详情不会覆盖新选会话', async ({ page }) 
   await page.getByRole('button', { name: '资料会话 A', exact: true }).click();
   await expect(page.getByText('会话 A 独有消息', { exact: true })).toBeVisible();
   await page.getByLabel('上传会话附件').setInputFiles({ name: '待删除.txt', mimeType: 'text/plain', buffer: Buffer.from('owned by A') });
-  await expect(page.getByText('可用 · 待删除.txt', { exact: true })).toBeVisible();
+  await expect(page.getByText('文字可用 · 待删除.txt', { exact: true })).toBeVisible();
   let release!: () => void;
   let received!: () => void;
   const hold = new Promise<void>(
