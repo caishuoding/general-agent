@@ -168,7 +168,7 @@ export function AdminApp() {
         <div className="admin-session">
           <span>{user.username}</span>
           <button type="button" onClick={() => setChangingPassword(true)}>修改密码</button>
-          <button type="button" onClick={logout}>退出</button>
+          <button type="button" onClick={logout}>退出登录</button>
         </div>
       </header>
       <nav className="admin-tabs" aria-label="管理端页面">
@@ -177,7 +177,7 @@ export function AdminApp() {
           className={tab === "accounts" ? "active" : ""}
           onClick={() => setTab("accounts")}
         >
-          账号与用户数据
+          用户与数据
         </button>
         <button
           type="button"

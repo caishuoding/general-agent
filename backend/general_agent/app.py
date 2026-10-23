@@ -67,6 +67,11 @@ class MessageInput(BaseModel):
     content: str = Field(min_length=1, max_length=32000)
 
 
+class MessageProgress(BaseModel):
+    code: str
+    label: str
+
+
 class Message(BaseModel):
     id: UUID
     role: str
@@ -83,6 +88,8 @@ class Message(BaseModel):
     search_action: dict[str, Any] | None = None
     web_sources: list[dict[str, object]] = Field(default_factory=list)
     knowledge_sources: list[dict[str, object]] = Field(default_factory=list)
+    agent_tasks: list[dict[str, Any]] = Field(default_factory=list)
+    progress: MessageProgress | None = None
 
 
 class ConversationDetail(Conversation):
@@ -96,6 +103,8 @@ class UsageRecord(BaseModel):
     model: str
     status: str
     operation_id: UUID | None = None
+    agent_id: UUID | None = None
+    agent_run_id: UUID | None = None
     base_url: str | None = None
     unit: str = "chat_tokens"
     credits: str | None = None
@@ -130,14 +139,15 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     search = SearchService(database, model, search_settings, memory, attachments, model_transport)
     execution = ChatExecution(model, memory, search, KnowledgeTools(knowledge))
     conversation_graph = ConversationGraph(database, execution)
-    source_deletion = SourceDeletion(execution.deletion, memory, conversation_graph.delete_threads, attachments.delete_file)
+    source_deletion = SourceDeletion(execution.deletion, memory, attachments.delete_file)
     chat = ChatService(database, model, execution, attachments, conversation_graph)
     streaming = StreamingChat(database, model, execution, attachments, conversation_graph)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """恢复业务及知识库任务，停机时停止清理并等待后台处理线程。"""
+        """恢复业务及子任务终态，停机取消智能体并有界等待后台线程。"""
         database.migrate()
+        execution.agent_runtime.orchestrator.recover()
         streaming.recover()
         attachments.recover()
         knowledge.recover()
@@ -162,6 +172,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         finally:
             stopped.set()
             await expiration
+            await asyncio.to_thread(execution.agent_runtime.orchestrator.close)
             await asyncio.to_thread(streaming.close)
             await asyncio.to_thread(knowledge.close)
 
@@ -420,6 +431,21 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
                     return
                 await asyncio.sleep(0.1)
         return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.get('/api/conversations/{conversation_id}/messages/{message_id}/agents/{agent_id}')
+    def agent_detail(conversation_id: UUID, message_id: UUID, agent_id: UUID, request: Request) -> dict[str, Any]:
+        """按账号及回答授权读取最新子任务结果，不暴露模型消息或推理。"""
+        account_id = current_user(request).id
+        streaming.message(conversation_id, account_id, message_id)
+        execution.agent_runtime.repository.validate_detail(message_id)
+        with database.connect() as connection:
+            row = connection.execute('SELECT a.id AS agent_id,a.title,r.id AS run_id,r.task,r.status,r.result,r.error FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE a.id=%s AND a.answer_attempt_id=%s AND a.account_id=%s AND a.conversation_id=%s AND a.parent_agent_id IS NOT NULL ORDER BY r.sequence DESC LIMIT 1', (agent_id,message_id,account_id,conversation_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, '子任务不存在。')
+        with database.connect() as connection:
+            row['sources'] = [item['payload'] for item in connection.execute('SELECT payload FROM agent_sources WHERE run_id=%s', (row['run_id'],)).fetchall()]
+            row['usage'] = connection.execute('SELECT unit,count(*) AS calls,sum(prompt_tokens) AS prompt_tokens,sum(completion_tokens) AS completion_tokens,sum(credits) AS credits,bool_or(total_tokens IS NULL AND credits IS NULL) AS incomplete FROM model_calls WHERE agent_id=%s GROUP BY unit ORDER BY unit', (agent_id,)).fetchall()
+        return row
 
     @app.get("/api/usage", response_model=list[UsageRecord])
     def get_usage(request: Request) -> list[UsageRecord]:

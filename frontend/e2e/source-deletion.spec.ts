@@ -18,7 +18,7 @@ test('删除附件后的迟到详情不会覆盖新选会话', async ({ page }) 
   await page.getByRole('button', { name: '资料会话 A', exact: true }).click();
   await expect(page.getByText('会话 A 独有消息', { exact: true })).toBeVisible();
   await page.getByLabel('上传会话附件').setInputFiles({ name: '待删除.txt', mimeType: 'text/plain', buffer: Buffer.from('owned by A') });
-  await expect(page.getByText('文字可用 · 待删除.txt', { exact: true })).toBeVisible();
+  await expect(page.getByText('内容可读取 · 待删除.txt', { exact: true })).toBeVisible();
   let release!: () => void;
   let received!: () => void;
   const hold = new Promise<void>(
@@ -36,7 +36,7 @@ test('删除附件后的迟到详情不会覆盖新选会话', async ({ page }) 
   );
   await page.getByRole('button', { name: '删除附件 待删除.txt' }).click();
   const dialog = page.getByRole('dialog', { name: '删除来源影响预览' });
-  await dialog.getByRole('button', { name: '确认删除来源' }).click();
+  await dialog.getByRole('button', { name: '删除', exact: true }).click();
   try {
     await arrived;
     await page.getByRole('button', { name: '资料会话 B', exact: true }).click();

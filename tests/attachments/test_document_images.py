@@ -142,8 +142,13 @@ def test_word_image_description_is_searchable_and_readable(
                 'SELECT content,image_id FROM document_chunks WHERE attachment_id=%s',
                 (UUID(uploaded['id']),),
             ).fetchall()
+            stored_image = connection.execute(
+                'SELECT caption,description FROM document_images WHERE attachment_id=%s',
+                (UUID(uploaded['id']),),
+            ).fetchone()
         assert all('图 03 订单状态图及风险冻结旁路' not in row['content']
                    for row in chunks if row['image_id'] is None)
+        assert stored_image == {'caption': '图 03 订单状态图及风险冻结旁路', 'description': description}
         service.delete_file(UUID(uploaded['id']))
         assert deleted == ['/files/file-api-word-chart']
         assert not (tmp_path / 'attachments' / f"{uploaded['id']}.images").exists()

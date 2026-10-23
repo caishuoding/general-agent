@@ -8,8 +8,8 @@ type KnowledgeDocument = {
   completed: number; total: number | null; error: string | null; warning: string | null;
 };
 const stages: Record<string, string> = {
-  queued: '排队中', parsing: '解析正文、表格与图片', images: '图片描述',
-  chunking: '生成切片', indexing: '生成向量索引', complete: '处理完成',
+  queued: '等待处理', parsing: '正在读取内容', images: '正在理解图片',
+  chunking: '正在整理段落', indexing: '正在建立检索', complete: '处理完成',
 };
 
 /** 在独立页面管理长期资料，处理进度直接读取服务端事实。 */
@@ -24,6 +24,8 @@ export function KnowledgePanel() {
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
   const [upload, setUpload] = useState<{ loaded: number; total: number | null } | null>(null);
+  const [editingName, setEditingName] = useState(false);
+  const [notice, setNotice] = useState('');
   const current = useRef(active);
   const mounted = useRef(true);
   const request = useRef<XMLHttpRequest | null>(null);
@@ -114,18 +116,41 @@ export function KnowledgePanel() {
       /** 只接受当前账号已加载的知识库身份。 */
       (item) => item.id === id,
     );
-    if (base) { setActive(base.id); setRename(base.name); setError(''); }
+    if (base) {
+      setActive(base.id);
+      setRename(base.name);
+      setEditingName(false);
+      setError('');
+      setNotice('');
+    }
   }
 
   /** 更新创建知识库的名称草稿。 */
   function changeName(event: ChangeEvent<HTMLInputElement>) { setName(event.target.value); }
   /** 更新当前知识库的重命名草稿。 */
   function changeRename(event: ChangeEvent<HTMLInputElement>) { setRename(event.target.value); }
+  /** 进入名称编辑状态，并清理上一次操作的提示。 */
+  function startEditingName() {
+    setEditingName(true);
+    setNotice('');
+    setError('');
+  }
+  /** 取消名称编辑并恢复当前知识库名称。 */
+  function cancelEditingName() {
+    const current = bases.find(
+      /** 只读取当前仍存在的知识库名称。 */
+      (item) => item.id === active,
+    );
+    setRename(current?.name ?? '');
+    setEditingName(false);
+  }
   /** 创建后进入新知识库，失败保留名称供用户重试。 */
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!name.trim() || busy) return;
+    const form = event.currentTarget;
     setBusy(true); setError('');
+    setNotice('');
     try {
       const base = await api<KnowledgeBase>('/knowledge-bases', { method: 'POST', body: JSON.stringify({ name }) });
       if (!mounted.current) return;
@@ -134,6 +159,8 @@ export function KnowledgePanel() {
         (rows) => [...rows, base],
       );
       setActive(base.id); setRename(base.name); setName('');
+      setNotice('知识库已创建。');
+      form.closest('details')?.removeAttribute('open');
     } catch (failure) { if (mounted.current) setError(errorMessage(failure)); }
     finally { if (mounted.current) setBusy(false); }
   }
@@ -153,6 +180,10 @@ export function KnowledgePanel() {
           (row) => row.id === target ? { ...row, name: saved.name } : row,
         ),
       );
+      if (mounted.current) {
+        setEditingName(false);
+        setNotice('名称已更新。');
+      }
     } catch (failure) { if (mounted.current) setError(errorMessage(failure)); }
     finally { if (mounted.current) setBusy(false); }
   }
@@ -172,6 +203,8 @@ export function KnowledgePanel() {
         (row) => !row.deleting,
       );
       setBases(rows); setActive(next?.id ?? null); setRename(next?.name ?? '');
+      setEditingName(false);
+      setNotice('知识库已删除。');
     } catch (failure) { if (mounted.current) setError(errorMessage(failure)); }
     finally { if (mounted.current) setBusy(false); }
   }
@@ -181,6 +214,7 @@ export function KnowledgePanel() {
     const id = event.currentTarget.dataset.id;
     if (!id || busy) return;
     setBusy(true); setError('');
+    setNotice('');
     try { await api(`/knowledge-bases/${id}`, { method: 'DELETE' }); }
     catch (failure) { if (mounted.current) setError(errorMessage(failure)); }
     finally { if (mounted.current) setBusy(false); }
@@ -203,6 +237,7 @@ export function KnowledgePanel() {
     xhr.open('POST', `/api/knowledge-bases/${target}/documents`);
     xhr.setRequestHeader('X-Operation-ID', crypto.randomUUID());
     setError(''); setUpload({ loaded: 0, total: null });
+    setNotice('');
     /** 记录浏览器实际发送字节，未知总大小时保持不确定状态。 */
     xhr.upload.onprogress = function showProgress(progress) {
       if (mounted.current) setUpload({ loaded: progress.loaded, total: progress.lengthComputable ? progress.total : null });
@@ -220,6 +255,7 @@ export function KnowledgePanel() {
         /** 读取本次新登记文档及后台实际阶段。 */
         (value) => value + 1,
       );
+      if (xhr.status >= 200 && xhr.status < 300) setNotice('文件已添加，正在处理。');
     };
     /** 网络错误不伪装成已经入库。 */
     xhr.onerror = function uploadFailed() {
@@ -236,6 +272,7 @@ export function KnowledgePanel() {
     if (action === 'delete' && !window.confirm('删除这份文档及其切片和图片？')) return;
     const target = active;
     setBusy(true); setError('');
+    setNotice('');
     try {
       await api(`/knowledge-bases/${target}/documents/${id}${action === 'retry' ? '/retry' : ''}`,
         { method: action === 'retry' ? 'POST' : 'DELETE' });
@@ -243,6 +280,9 @@ export function KnowledgePanel() {
         /** 重新查询文档进度，不在界面自行推测处理是否成功。 */
         (value) => value + 1,
       );
+      if (mounted.current && current.current === target) {
+        setNotice(action === 'delete' ? '文档已删除。' : '已重新开始处理。');
+      }
     } catch (failure) { if (mounted.current) setError(errorMessage(failure)); }
     finally { if (mounted.current) setBusy(false); }
   }
@@ -250,7 +290,7 @@ export function KnowledgePanel() {
   /** 渲染知识库切换按钮。 */
   function renderBase(base: KnowledgeBase) {
     if (base.deleting) return <div key={base.id}><span>{base.name} · 清理中</span>
-      <button data-id={base.id} onClick={retryBaseCleanup} disabled={busy}>重试清理知识库</button></div>;
+      <button data-id={base.id} onClick={retryBaseCleanup} disabled={busy}>继续清理</button></div>;
     return <button key={base.id} type="button" data-id={base.id} onClick={choose} disabled={!!upload || busy}
       className={base.id === active ? 'selected' : ''} aria-pressed={base.id === active}>{base.name}</button>;
   }
@@ -260,42 +300,57 @@ export function KnowledgePanel() {
     const processing = document.status === 'processing';
     return <li key={document.id} className="knowledge-document">
       <div className="knowledge-document-heading"><strong>{document.filename}</strong><small>{(document.size / 1000).toFixed(1)} KB</small></div>
-      <div role="status">{document.status === 'failed' ? '处理失败' : document.status === 'deleting' ? '正在清理' :
-        document.status === 'ready' ? (document.warning ? '可检索 · 存在待重试项' : '可检索') : stages[document.stage] || document.stage}
+      <div role="status">{document.status === 'failed' ? '处理没有完成' : document.status === 'deleting' ? '正在清理' :
+        document.status === 'ready' ? (document.warning ? '可以使用，但有内容未处理完成' : '可以使用') : stages[document.stage] || document.stage}
         {processing && document.total !== null && document.total > 0 && ` ${document.completed}/${document.total}`}</div>
       {processing && <progress aria-label={`${document.filename}处理进度`} max={document.total || undefined}
         value={document.total ? document.completed : undefined} />}
-      {document.warning && <p className="knowledge-warning">{document.warning}</p>}
+      {document.warning && <details className="knowledge-warning"><summary>部分处理没有完成</summary><p>基础搜索仍可使用。{document.warning}</p></details>}
       {document.error && <p role="alert">{document.error}</p>}
       <div className="knowledge-actions">
         {document.status !== 'deleting' && <a href={`/api/knowledge-bases/${active}/documents/${document.id}/file`} download>下载原件</a>}
-        {(document.status === 'failed' || !!document.warning) && <button data-id={document.id} data-action="retry" onClick={documentAction} disabled={busy || processing}>重试处理</button>}
-        <button data-id={document.id} data-action="delete" onClick={documentAction} disabled={busy}>{document.status === 'deleting' ? '重试清理' : '删除文档'}</button>
+        {(document.status === 'failed' || !!document.warning) && <button data-id={document.id} data-action="retry" onClick={documentAction} disabled={busy || processing}>重新处理</button>}
+        <button data-id={document.id} data-action="delete" onClick={documentAction} disabled={busy}>{document.status === 'deleting' ? '继续清理' : '删除这份文档'}</button>
       </div>
     </li>;
   }
 
   return <section className="knowledge-page" aria-label="知识库管理">
-    <header><h2>知识库</h2><p>把资料放在这里长期保存，在会话中选择后即可提问。</p></header>
+    <header><h2>知识库</h2><p>把常用资料放在这里，对话时按需使用，不必每次重新上传。</p></header>
     {error && <p role="alert" className="knowledge-error">{error}</p>}
+    {notice && <p role="status" className="knowledge-notice">{notice}</p>}
     <div className="knowledge-workspace">
       <aside className="knowledge-library-list"><h3>我的知识库</h3>
-        <form onSubmit={create}><input aria-label="知识库名称" placeholder="新知识库名称" maxLength={120} value={name} onChange={changeName} />
-          <button disabled={busy || !!upload || !name.trim()}>创建知识库</button></form>
+        <details className="knowledge-create-panel">
+          <summary>＋ 新建知识库</summary>
+          <form onSubmit={create}>
+            <label>知识库名称<input aria-label="知识库名称" placeholder="例如：工作资料" maxLength={120} value={name} onChange={changeName} /></label>
+            <button disabled={busy || !!upload || !name.trim()}>创建</button>
+          </form>
+        </details>
         {loading ? <p role="status">正在加载…</p> : bases.map(renderBase)}
       </aside>
       <div className="knowledge-documents">
-        {active ? <><form className="knowledge-title-form" onSubmit={saveName}>
-          <input aria-label="当前知识库名称" maxLength={120} value={rename} onChange={changeRename} />
-          <button disabled={busy || !!upload || !rename.trim()}>保存名称</button>
-          <button type="button" className="danger" onClick={deleteBase} disabled={busy || !!upload}>删除知识库</button></form>
-          <label className="knowledge-upload">上传文档<input type="file" multiple accept=".pdf,.docx,.txt,.md,.markdown" aria-label="上传知识库文档" onChange={uploadFiles} disabled={!!upload || busy} /></label>
-          <p className="knowledge-help">PDF、Word、TXT、Markdown · 每次最多 5 份 · 每份最多 20 MB</p>
-          {upload && <div role="status">正在上传文件{upload.total ? ` ${Math.round(upload.loaded * 100 / upload.total)}%` : '…'}
+        {active ? <>
+          {editingName ? <form className="knowledge-title-form" onSubmit={saveName}>
+            <label>知识库名称<input aria-label="当前知识库名称" maxLength={120} value={rename} onChange={changeRename} autoFocus /></label>
+            <button disabled={busy || !!upload || !rename.trim()}>保存修改</button>
+            <button type="button" className="secondary-action" onClick={cancelEditingName} disabled={busy || !!upload}>取消</button>
+          </form> : <div className="knowledge-title-display">
+            <div><span>当前知识库</span><h3>{rename || '未命名知识库'}</h3></div>
+            <button type="button" className="secondary-action" onClick={startEditingName} disabled={busy || !!upload}>重命名</button>
+            <details className="knowledge-more">
+              <summary aria-label="知识库更多操作">⋯</summary>
+              <div><button type="button" className="danger" onClick={deleteBase} disabled={busy || !!upload}>删除知识库</button></div>
+            </details>
+          </div>}
+          <label className="knowledge-upload">添加文档<input type="file" multiple accept=".pdf,.docx,.txt,.md,.markdown" aria-label="上传知识库文档" onChange={uploadFiles} disabled={!!upload || busy} /></label>
+          <p className="knowledge-help">支持 PDF、Word、TXT、Markdown · 最多 5 份，每份不超过 20 MB</p>
+          {upload && <div className="knowledge-upload-status" role="status">正在上传{upload.total ? ` ${Math.round(upload.loaded * 100 / upload.total)}%` : '…'}
             <progress aria-label="文档上传进度" max={upload.total || undefined} value={upload.total ? upload.loaded : undefined} /></div>}
           <ul className="knowledge-document-list">{documents.map(renderDocument)}</ul>
-          {!documents.length && !upload && <p className="knowledge-empty">上传第一份文档后，这里会显示处理进度。</p>}
-        </> : <p className="knowledge-empty">创建一个知识库，开始整理资料。</p>}
+          {!documents.length && !upload && <div className="knowledge-empty"><strong>这里还没有文档</strong><p>添加第一份资料后，可以在这里查看处理进度。</p></div>}
+        </> : <div className="knowledge-empty"><strong>还没有知识库</strong><p>新建一个知识库，把常用资料集中放在这里。</p></div>}
       </div>
     </div>
   </section>;
@@ -352,7 +407,12 @@ export function KnowledgeSelector({ conversationId, disabled }: { conversationId
   function renderOption(base: KnowledgeBase) {
     return <label key={base.id}><input type="checkbox" value={base.id} checked={selected.includes(base.id)} onChange={toggle} disabled={disabled || saving} />{base.name}</label>;
   }
-  return <details className="knowledge-selector"><summary>知识库 · {selected.length ? `已选 ${selected.length} 个` : '未选择'}</summary>
-    <div>{bases.map(renderOption)}{!bases.length && <p>先进入“知识库”上传资料。</p>}{error && <p role="alert">{error}</p>}</div>
+  return <details className="knowledge-selector"><summary>{saving ? '正在保存知识库选择…' : selected.length ? `本次对话使用 ${selected.length} 个知识库` : '本次对话未使用知识库'}</summary>
+    <div>
+      <p className="knowledge-selector-help">选择后，助手会按需读取这些知识库。</p>
+      {bases.map(renderOption)}
+      {!bases.length && <p>还没有知识库，可以先去“知识库”添加资料。</p>}
+      {error && <p role="alert">{error}</p>}
+    </div>
   </details>;
 }

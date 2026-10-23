@@ -33,6 +33,10 @@ def test_prompt_catalog_registers_memory_and_web_tools_without_separate_catalogs
     """工具说明与统一系统提示共处一个来源，网页与时间均为普通模型工具。"""
     assert {"add_memory", "search_memories", "update_memory", "delete_memory", "search_web", "fetch_web", "get_current_time"} == set(TOOL_DESCRIPTIONS)
     assert "直接执行" in TOOL_DESCRIPTIONS["search_web"]
+    assert "ori_question 必须填写" in TOOL_DESCRIPTIONS["search_web"]
+    assert "知识库调用结果中的 [K编号] 用于引用" in base_system_prompt()
+    assert "可以另起一段写 [[MEDIA:K编号]]" in base_system_prompt()
+    assert "标题、段落、列表和表格前后保留空行" in base_system_prompt()
 
 
 def test_material_helpers_serialize_only_raw_data() -> None:

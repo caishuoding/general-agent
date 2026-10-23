@@ -17,7 +17,7 @@ test("未登录时只显示登录页，错误密码显示统一提示", async ({
 test("管理员可以登录并退出", async ({ page }) => {
   await loginAdmin(page);
   await page.goto("/admin");
-  await expect(page.getByRole("heading", { name: "账号与只读内容" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "账号管理" })).toBeVisible();
   await page.getByRole("button", { name: "退出" }).click();
   await expect(page.getByRole("heading", { name: "管理员登录" })).toBeVisible();
 });
@@ -42,15 +42,16 @@ test("新账号首次登录显示强制改密页", async ({ page }) => {
   await page.getByLabel("当前密码").fill("browser-temp-pass");
   await page.getByLabel("新密码", { exact: true }).fill("browser-user-password");
   await page.getByLabel("再次输入新密码").fill("browser-user-password");
-  await page.getByRole("button", { name: "保存新密码" }).click();
+  await page.getByRole("button", { name: "设置新密码" }).click();
   await expect(page.getByRole("heading", { name: "个人对话空间" })).toBeVisible();
   await expect(page.getByRole("button", { name: "设置", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "管理员后台", exact: true })).toHaveCount(0);
+  await page.locator(".account-menu summary").click();
   await page.getByRole("button", { name: "修改密码" }).click();
   await expect(page.getByRole("heading", { name: "修改密码" })).toBeVisible();
   await page.getByLabel("当前密码").fill("browser-user-password");
   await page.getByLabel("新密码", { exact: true }).fill("browser-user-password-2");
   await page.getByLabel("再次输入新密码").fill("browser-user-password-2");
-  await page.getByRole("button", { name: "保存新密码" }).click();
+  await page.getByRole("button", { name: "更新密码" }).click();
   await expect(page.getByRole("heading", { name: "个人对话空间" })).toBeVisible();
 });

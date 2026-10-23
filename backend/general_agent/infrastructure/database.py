@@ -77,8 +77,9 @@ class Database:
             return row
 
     def decorate_message(self, row: dict[str, Any]) -> dict[str, Any]:
-        """补齐自动记忆、搜索、召回及消息附件展示信息，不返回附件正文。"""
+        """补齐记忆、来源、附件及子任务简要状态，不返回子任务正文或私有推理。"""
         with self.connect() as connection:
+            row['agent_tasks'] = connection.execute('SELECT DISTINCT ON (a.id) a.id AS agent_id,a.title,r.id AS run_id,r.status,r.error FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE a.answer_attempt_id=%s AND a.parent_agent_id IS NOT NULL ORDER BY a.id,r.sequence DESC', (row.get('id'),)).fetchall() if row['role'] == 'assistant' else []
             row['attachments'] = connection.execute(
                 "SELECT id,filename,size,status,error FROM attachments "
                 "WHERE user_message_id=%s ORDER BY created_at,id",
@@ -98,7 +99,7 @@ class Database:
                     'SELECT * FROM memory_updates WHERE source_message_id=%s ORDER BY created_at DESC,id DESC LIMIT 1',
                     (row['reply_to'],),
                 ).fetchone()
-            row['search_action'] = connection.execute('SELECT id,query,status,error,revision,sources,purpose,expires_at FROM search_requests WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
+            row['search_action'] = connection.execute('SELECT id,query,status,error,sources FROM search_requests WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
             row['memory_recall'] = connection.execute('SELECT status,match_count AS count,detail FROM memory_recalls WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
         return row
 

@@ -15,15 +15,19 @@ export type Conversation = { id: string; title: string; created_at: string };
 export type DocumentParseInfo = { format?: string; total_units?: number; readable_units?: number; coverage?: string; missing_units?: string[]; limitations?: string[] };
 export type Attachment = { id: string; filename: string; size: number; status: "processing" | "ready" | "failed" | "deleting"; error: string | null; parse_info?: DocumentParseInfo; image_metadata: { format: string; mime: string; width: number; height: number } | null };
 export type MessageAttachment = Pick<Attachment, "id" | "filename" | "size" | "status" | "error">;
+export type AgentTask = { agent_id: string; run_id: string; title: string; status: string; error: string | null };
+export type MessageProgress = { code: string; label: string };
 export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
   status: "generating" | "complete" | "stopped" | "failed";
   attachments: MessageAttachment[];
-  search_action: { id: string; query: string; status: string; revision: string; purpose: string; sources: { id: string; label: string }[]; error: string | null } | null;
+  agent_tasks?: AgentTask[];
+  progress?: MessageProgress | null;
+  search_action: { id: string; query: string; status: string; sources: { id: string; label: string }[]; error: string | null } | null;
   web_sources: { key: string; title: string; url: string; excerpt: string }[];
-  knowledge_sources: { key: string; knowledge_base_id: string; knowledge_base_name: string; document_id: string; filename: string; chunk_id: number; location: string; excerpt: string; image_id: string | null; kind?: "text" | "table" | "image" }[];
+  knowledge_sources: { key: string; knowledge_base_id: string; knowledge_base_name: string; document_id: string; filename: string; chunk_id: number; location: string; page?: number | null; end_page?: number | null; excerpt: string; image_id: string | null; kind?: "text" | "table" | "image"; table?: { table_id: number; title?: string | null; columns: number; rows: number; header_rows: number; cells: { row: number; column: number; text: string; rowspan?: number; colspan?: number; header?: boolean }[]; source_rows: number[]; continued: boolean; render_as_image: boolean; image_id?: string | null } | null }[];
   reply_to: string | null;
   error: string | null;
   created_at: string;
@@ -31,6 +35,9 @@ export type Message = {
 export type ConversationDetail = Conversation & { messages: Message[] };
 
 export type Usage = {
+  agent_id?: string | null;
+  agent_run_id?: string | null;
+  assistant_message_id?: string | null;
   id: string;
   model: string;
   purpose: string;

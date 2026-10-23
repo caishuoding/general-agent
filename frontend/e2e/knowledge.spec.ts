@@ -8,24 +8,28 @@ test(
     await loginUser(page);
     await page.goto('/');
     await page.getByRole('button', { name: '知识库', exact: true }).click();
+    await expect(page.getByRole('region', { name: '知识库管理' })).toBeVisible();
+    await expect(page.getByText('正在加载…', { exact: true })).toHaveCount(0);
+    await page.locator('.knowledge-create-panel summary').click();
     await page.getByLabel('知识库名称', { exact: true }).fill('产品文档');
-    await page.getByRole('button', { name: '创建知识库' }).click();
-    await expect(page.getByLabel('当前知识库名称')).toHaveValue('产品文档');
+    await page.getByRole('button', { name: '创建', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '产品文档' })).toBeVisible();
     await page.getByLabel('上传知识库文档').setInputFiles({ name: 'manual.txt', mimeType: 'text/plain', buffer: Buffer.from('alpha handbook') });
     await expect(page.getByText('manual.txt', { exact: true })).toBeVisible();
-    await expect(page.getByText('可检索 · 存在待重试项')).toBeVisible();
-    await expect(page.getByText('向量索引失败，当前使用关键词检索，可重试。')).toBeVisible();
+    await expect(page.getByText('可以使用，但有内容未处理完成')).toBeVisible();
+    await page.getByText('部分处理没有完成', { exact: true }).click();
+    await expect(page.getByText('基础搜索仍可使用。向量索引失败，当前使用关键词检索，可重试。')).toBeVisible();
     await page.getByRole('button', { name: '返回对话' }).click();
-    await page.getByRole('button', { name: '新建会话' }).click();
-    await expect(page.getByRole('button', { name: '新建会话' })).toBeEnabled();
+    await page.getByRole('button', { name: '开始新对话' }).click();
+    await expect(page.getByRole('button', { name: '开始新对话' })).toBeEnabled();
     await page.locator('.knowledge-selector summary').click();
     await page.getByRole('checkbox', { name: '产品文档' }).check();
-    await expect(page.locator('.knowledge-selector summary')).toContainText('已选 1 个');
+    await expect(page.locator('.knowledge-selector summary')).toContainText('本次对话使用 1 个知识库');
     await page.reload();
-    await expect(page.locator('.knowledge-selector summary')).toContainText('已选 1 个');
+    await expect(page.locator('.knowledge-selector summary')).toContainText('本次对话使用 1 个知识库');
     await page.locator('.knowledge-selector summary').click();
     await page.getByRole('checkbox', { name: '产品文档' }).uncheck();
-    await expect(page.locator('.knowledge-selector summary')).toContainText('未选择');
+    await expect(page.locator('.knowledge-selector summary')).toContainText('本次对话未使用知识库');
     await page.getByRole('button', { name: '知识库', exact: true }).click();
     await expect(page.getByText('manual.txt', { exact: true })).toBeVisible();
     await page.screenshot({ path: '/tmp/general-agent-knowledge.png', fullPage: true });
@@ -33,14 +37,15 @@ test(
       /** 用户点击删除后接受产品界面中的明确删除确认。 */
       (dialog) => void dialog.accept(),
     );
-    await page.getByRole('button', { name: '删除文档', exact: true }).click();
+    await page.getByRole('button', { name: '删除这份文档', exact: true }).click();
     await expect(page.getByText('manual.txt', { exact: true })).toHaveCount(0);
     page.once('dialog',
       /** 清理本测试创建的知识库。 */
       (dialog) => void dialog.accept(),
     );
+    await page.locator('.knowledge-more summary').click();
     await page.getByRole('button', { name: '删除知识库', exact: true }).click();
-    await expect(page.getByText('创建一个知识库，开始整理资料。')).toBeVisible();
+    await expect(page.getByText('还没有知识库')).toBeVisible();
   },
 );
 

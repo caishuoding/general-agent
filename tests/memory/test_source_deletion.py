@@ -60,7 +60,10 @@ def test_attachment_delete_clears_search_links_and_original_file(database_url: s
             source = json.loads(messages[-1]['content'])['results'][0]
             return reply(payload, f'附近服务。[{source["key"]}]')
         if payload.get('tools'):
-            return tool_call('search_web', {'query': '删除测试私密住址附近服务'})
+            return tool_call('search_web', {
+                'query': '删除测试私密住址附近服务',
+                'ori_question': '联网搜索：根据资料查询服务',
+            })
         return reply(payload, '普通回答。')
 
     configure_memory_settings(database_url, tmp_path)

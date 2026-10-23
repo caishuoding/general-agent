@@ -43,6 +43,9 @@ class ParsedImage(BaseModel):
     width: int
     height: int
     caption: str | None = None
+    bbox: tuple[float, float, float, float] | None = None
+    media_type: str = 'image'
+    table_ordinal: int | None = None
 
 
 @dataclass

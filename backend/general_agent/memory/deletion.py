@@ -83,7 +83,7 @@ class MemoryDeletion:
         connection.execute("UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,result=NULL,response_status=NULL WHERE id=ANY(%s)",(list(operations),))
         connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE operation_id=ANY(%s) AND status='reserved'",(list(operations),))
         connection.execute("UPDATE messages SET status='stopped',error='相关长期记忆已删除，本次操作已失效。' WHERE operation_id=ANY(%s) AND status='generating'",(list(operations),))
-        connection.execute("UPDATE search_requests SET status='expired',query='',results='[]',sources='[]',purpose='',expires_at=0,error='相关记忆已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
+        connection.execute("UPDATE search_requests SET status='expired',query='',results='[]',sources='[]',error='相关记忆已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
         connection.execute("UPDATE messages SET web_sources='[]' WHERE operation_id=ANY(%s)",(list(operations),))
         for row in recalls:
             matches=[item for item in row['matches'] if item['action_id']!=str(action_id)]

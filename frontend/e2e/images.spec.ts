@@ -14,13 +14,13 @@ test('图片上传后按消息展示并保持会话隔离', async ({ page }) => 
     'controlled-image-model',
   );
   await page.goto('/');
-  await page.getByRole('button', { name: '新建会话' }).click();
+  await page.getByRole('button', { name: '开始新对话' }).click();
   const upload = page.getByLabel('上传会话附件');
   await expect(upload).toHaveAttribute('accept', /\.png.*\.jpg.*\.jpeg/);
   await expect(upload).toBeEnabled();
   const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/Afnh+ngAAAAASUVORK5CYII=', 'base64');
   await upload.setInputFiles({ name: '图表截图.png', mimeType: 'image/png', buffer: bytes });
-  await expect(page.getByText('可用 · 图表截图.png', { exact: true })).toBeVisible();
+  await expect(page.getByText('已就绪 · 图表截图.png', { exact: true })).toBeVisible();
   await expect(page.getByText('PNG · 16 × 16 像素', { exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: '消息', exact: true }).fill('这张图是什么颜色？');
   await page.getByRole('button', { name: '发送消息' }).click();
@@ -35,11 +35,11 @@ test('图片上传后按消息展示并保持会话隔离', async ({ page }) => 
   await expect(page.getByRole('region', { name: '当前会话资料' })).toHaveCount(0);
   await expect(page.getByText('PNG · 16 × 16 像素', { exact: true })).toHaveCount(0);
   await page.screenshot({ path: '/private/tmp/general-agent-implementation/images-12.png', fullPage: true });
-  await page.getByRole('button', { name: '新建会话' }).click();
-  await expect(page.getByText('可用 · 图表截图.png', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: '开始新对话' }).click();
+  await expect(page.getByText('已就绪 · 图表截图.png', { exact: true })).toHaveCount(0);
   await expect(page.getByLabel('本次上传资料')).toHaveCount(0);
   await expect(upload).toBeEnabled();
   await upload.setInputFiles({ name: '损坏.png', mimeType: 'image/png', buffer: bytes.subarray(0, 20) });
-  await expect(page.getByText('失败 · 损坏.png', { exact: true })).toBeVisible();
+  await expect(page.getByText('读取失败 · 损坏.png', { exact: true })).toBeVisible();
   await expect(page.getByText('图片损坏、解码失败或尺寸过大', { exact: false })).toBeVisible();
 });

@@ -4,8 +4,11 @@ from threading import Lock, Thread
 from typing import Any
 from uuid import UUID, uuid4
 
+from psycopg.types.json import Jsonb
+
 from general_agent.attachments.service import AttachmentService
 from general_agent.agent.conversation import ConversationContext, ConversationGraph
+from general_agent.conversation.progress import PREPARING_PROGRESS
 from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.operations import OperationContext
 from general_agent.conversation.execution import ChatExecution
@@ -31,7 +34,7 @@ class StreamingChat:
         with self.database.connect() as connection:
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE WHERE id IN (SELECT operation_id FROM messages WHERE status='generating')")
             connection.execute("UPDATE search_requests SET status='failed',error='应用重启中断了搜索，请重新发起。' WHERE operation_id IN (SELECT operation_id FROM messages WHERE status='generating') AND status IN ('planning','approved')")
-            connection.execute("UPDATE messages SET status = 'failed', error = '应用重启中断了回答，可以重试。' WHERE status = 'generating'")
+            connection.execute("UPDATE messages SET status = 'failed', error = '应用重启中断了回答，可以重试。', progress=NULL WHERE status = 'generating'")
             connection.execute("UPDATE model_calls SET status = 'failed',finished_at=CURRENT_TIMESTAMP WHERE status = 'generating'")
             connection.execute("UPDATE model_calls SET finished_at=CURRENT_TIMESTAMP WHERE status = 'stopped' AND finished_at IS NULL")
             connection.execute("UPDATE model_calls SET status = 'cancelled',finished_at=CURRENT_TIMESTAMP WHERE status = 'reserved'")
@@ -53,7 +56,7 @@ class StreamingChat:
             user_id = uuid4()
             connection.execute("INSERT INTO messages (id, conversation_id, role, content, status) VALUES (%s, %s, 'user', %s, 'complete')", (user_id, conversation_id, content))
             self.attachments.bind_to_user_message(connection, conversation_id, user_id)
-            connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to, operation_id, model_revision, embedding_revision) VALUES (%s, %s, 'assistant', '', 'generating', %s, %s, %s, %s)", (message_id, conversation_id, user_id, operation.operation_id, settings.revision,self.execution.embedding_revision(content)))
+            connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to, operation_id, progress) VALUES (%s, %s, 'assistant', '', 'generating', %s, %s, %s)", (message_id, conversation_id, user_id, operation.operation_id, Jsonb(PREPARING_PROGRESS)))
             connection.execute("UPDATE conversations SET title = %s WHERE id = %s AND title = '新会话'", (content[:40], conversation_id))
             connection.execute("UPDATE model_calls SET assistant_message_id=%s WHERE id=%s", (message_id, call_id))
         thread = Thread(target=self.execute, args=(conversation_id, account_id, message_id, user_id, settings, operation, call_id), daemon=True)
@@ -83,7 +86,7 @@ class StreamingChat:
             source = connection.execute("SELECT content FROM messages WHERE id=%s", (user_id,)).fetchone()
             assert source is not None
             call_id = self.execution.reserve_first(source["content"], settings, operation, user_id)
-            connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to, operation_id, model_revision, embedding_revision) VALUES (%s, %s, 'assistant', '', 'generating', %s, %s, %s, %s)", (new_id, conversation_id, user_id, operation.operation_id, settings.revision,self.execution.embedding_revision(source['content'])))
+            connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to, operation_id, progress) VALUES (%s, %s, 'assistant', '', 'generating', %s, %s, %s)", (new_id, conversation_id, user_id, operation.operation_id, Jsonb(PREPARING_PROGRESS)))
             connection.execute("UPDATE model_calls SET assistant_message_id=%s WHERE id=%s", (new_id, call_id))
         thread = Thread(target=self.execute, args=(conversation_id, account_id, new_id, user_id, settings, operation, call_id), daemon=True)
         with self.lock:
@@ -111,22 +114,24 @@ class StreamingChat:
         self.graph.run(context, rows, call_id)
 
     def stop(self, conversation_id: UUID, account_id: UUID, message_id: UUID) -> None:
-        """冻结回答并取消尚未完成的搜索记录；已发出的请求仍可回传真实用量。"""
+        """冻结回答并关闭全部子任务与搜索；已发出的请求仍可回传真实用量。"""
         message=self.message(conversation_id, account_id, message_id)
         if message.get('operation_id'):
             self.execution.search.cancel(message['operation_id'])
         with self.database.connect() as connection:
-            connection.execute("UPDATE messages SET status = 'stopped' WHERE id = %s AND status='generating'", (message_id,))
+            connection.execute("UPDATE messages SET status = 'stopped', progress=NULL WHERE id = %s AND status='generating'", (message_id,))
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE WHERE id IN (SELECT operation_id FROM messages WHERE id=%s)", (message_id,))
             connection.execute("UPDATE model_calls SET status = 'stopped' WHERE assistant_message_id = %s AND status = 'generating' AND EXISTS (SELECT 1 FROM messages WHERE id = %s AND status = 'stopped')", (message_id, message_id))
 
+        self.execution.agent_runtime.repository.close(message_id)
+
     def close(self) -> None:
-        """停机时终结未完成回答并等待图线程释放，业务记录保留停止和恢复依据。"""
+        """停机时终结未完成回答并有界等待线程，网络迟到结果不再更新业务。"""
         self.recover()
         with self.lock:
             threads = tuple(self.threads)
         for thread in threads:
-            thread.join()
+            thread.join(timeout=2)
 
     def message(self, conversation_id: UUID, account_id: UUID, message_id: UUID) -> dict[str, Any]:
         """仅返回指定会话中的助手消息，不允许用其他会话标识访问。"""

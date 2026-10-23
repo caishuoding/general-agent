@@ -204,6 +204,10 @@ def test_knowledge_citation_kind_distinguishes_text_table_and_image() -> None:
     assert KnowledgeTools.source_kind({'structure': {'kind': 'paragraph'}}) == 'text'
     assert KnowledgeTools.source_kind({'structure': {'kind': 'table_row', 'table': 1}}) == 'table'
     assert KnowledgeTools.source_kind({'structure': {'kind': 'paragraph'}, 'image_id': 'image-1'}) == 'image'
+    assert KnowledgeTools.source_kind({
+        'structure': {'kind': 'table_row', 'table': {'image_id': 'table-image', 'render_as_image': True}},
+        'image_id': 'table-image',
+    }) == 'table'
 
 
 def test_image_progress_is_observable_and_original_reaches_next_model_request(database_url: str, tmp_path: Path) -> None:
@@ -235,7 +239,9 @@ def test_image_progress_is_observable_and_original_reaches_next_model_request(da
         observed_messages.append(payload['messages'])
         saw_original.append({'type': 'file', 'file_id': 'file-api-word-chart'} in parts)
         key = result['results'][0]['key']
-        return httpx.Response(200, json={'choices': [{'message': {'content': f'图表说明季度增长。[{key}]'}}]})
+        return httpx.Response(200, json={'choices': [{'message': {
+            'content': f'图表说明季度增长。\n\n[[MEDIA:{key}]]',
+        }}]})
 
     configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
@@ -254,7 +260,9 @@ def test_image_progress_is_observable_and_original_reaches_next_model_request(da
         response = client.post(f'/api/conversations/{conversation}/messages', json={'content': '图表说明什么？'})
         assert response.status_code == 200, response.text
         assert saw_original == [True], observed_messages
-        source = response.json()['messages'][-1]['knowledge_sources'][0]
+        message = response.json()['messages'][-1]
+        source = message['knowledge_sources'][0]
+        assert f'[[MEDIA:{source["key"]}]]' in message['content']
         assert source['image_id']
         assert source['kind'] == 'image'
         image = client.get(
@@ -405,3 +413,22 @@ def test_embedding_configuration_change_rebuilds_on_restart(database_url: str, t
         assert wait_document(client, base, document['id'])['warning'] is None
         assert client.get(f'/api/knowledge-bases/{base}/documents/{document["id"]}/file').content == b'original handbook'
     assert sent == ['embedding-v1', 'embedding-v2']
+
+
+def test_table_preview_citation_preserves_structure_and_image_identity() -> None:
+    """表格截图来源在引用核验中保持表格类型、结构片段和受保护图片身份。"""
+    tools = object.__new__(KnowledgeTools)
+    fragment = {'table_id': 2, 'columns': 3, 'rows': 2, 'header_rows': 1, 'cells': [],
+                'source_rows': [1], 'continued': False, 'render_as_image': True, 'image_id': 'table-image'}
+    result = {'results': [{
+        'key': 'K1', 'knowledge_base_id': 'base', 'knowledge_base_name': '资料',
+        'document_id': 'document', 'filename': 'complex.pdf', 'chunk_id': 1,
+        'content': '复杂表格', 'page': 3, 'end_page': 3, 'image_id': None,
+        'structure': {'kind': 'table_row', 'table': fragment, 'location': '第 3 页表格 2'},
+    }]}
+    answer, sources = tools.resolve_citations([{'role': 'tool', 'content': json.dumps(result)}],
+                                              '见表格 [K1] [[MEDIA:K1]]')
+    assert answer == '见表格 [K1] [[MEDIA:K1]]'
+    assert sources[0]['kind'] == 'table'
+    assert sources[0]['image_id'] == 'table-image'
+    assert sources[0]['table'] == fragment

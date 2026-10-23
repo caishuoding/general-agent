@@ -8,7 +8,7 @@
 }
 .answer-markdown > :first-child { margin-top: 0; }
 .answer-markdown > :last-child { margin-bottom: 0; }
-.answer-markdown p { margin: 0 0 1em; }
+.answer-markdown p { margin: 0 0 1.15em; }
 .answer-markdown h1,
 .answer-markdown h2,
 .answer-markdown h3,
@@ -18,10 +18,11 @@
   color: #1d4d4a;
   font-weight: 600;
   line-height: 1.45;
-  margin: 1.5em 0 .65em;
+  margin: 2em 0 .8em;
 }
 .answer-markdown h1 { font-size: 1.6em; }
 .answer-markdown h2 { font-size: 1.35em; }
+.answer-markdown h2 + p { margin-top: 0; }
 .answer-markdown h3 { font-size: 1.15em; }
 .answer-markdown h4,
 .answer-markdown h5,
@@ -103,11 +104,18 @@
 .answer-sources .file-citation { background: #eff6f3; border-left-color: #a7c9c2; }
 .answer-sources summary { cursor: pointer; overflow-wrap: anywhere; }
 .answer-sources .file-citation:focus { outline: 2px solid #73a69b; outline-offset: 3px; }
-.knowledge-citation small { display: block; margin: 6px 0; color: #647f7c; }
-.knowledge-source-image-link { display: block; margin-top: 10px; }
-.knowledge-source-image { display: block; max-width: min(100%, 760px); max-height: 520px; object-fit: contain; border: 1px solid #cfdfdc; border-radius: 8px; background: #fff; }
 .knowledge-source-table { margin-top: 10px; }
 .knowledge-source-table .answer-table { margin: 0; }
+.answer-paragraph-with-media { margin: 1em 0; }
+.answer-paragraph-with-media > p { margin-bottom: .7em; }
+.inline-knowledge-media { margin: 1.2em 0 1.5em; padding: 0; border: 0; background: transparent; }
+.inline-knowledge-media > a { display: block; }
+.inline-knowledge-media img { display: block; width: 100%; max-width: 100%; max-height: 680px; margin: 0 auto; object-fit: contain; border-radius: 8px; }
+.inline-knowledge-media > .knowledge-source-table { margin: 0; }
+.knowledge-source-link { display: block; min-width: 0; margin: 8px 0; padding: 8px 10px; border-left: 3px solid #c4d0bc; border-radius: 0 7px 7px 0; background: #f2f4ed; overflow-wrap: anywhere; }
+.knowledge-source-summary { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.knowledge-source-location { margin-left: auto; color: #687561; white-space: nowrap; }
+.knowledge-source-excerpt { margin: 6px 0 0 !important; overflow: hidden; color: #52645f; font-size: 12px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
 .answer-actions { margin-top: 4px; }
 .copy-action { display: inline-flex; align-items: center; gap: 10px; font-size: 11px; color: #6a8582; }
 .copy-action button { padding: 3px 7px; border: 1px solid transparent; border-radius: 5px; font-size: 11px; }
@@ -146,11 +154,17 @@
   text-decoration-thickness: 1px;
 }
 .answer-markdown .answer-citation {
-  border-color: #bcd7d1;
-  border-radius: 999px;
-  background: #e6f2ee;
+  display: inline;
+  border: 0;
+  background: transparent;
   color: var(--teal, #277773);
-  font-weight: 500;
+  font-size: .7em;
+  font-weight: 600;
+  line-height: 0;
+  padding: 0;
+  margin-left: .12em;
+  text-decoration: none;
+  vertical-align: super;
 }
 .answer-code {
   border-color: var(--line, #d0e0dc);
@@ -204,4 +218,14 @@
   background: var(--surface-strong, #ffffff);
   color: var(--signal-deep, #d9553b);
   box-shadow: 0 8px 24px rgba(18, 56, 59, 0.09);
+}
+.structured-source-table table { border-collapse: separate; border-spacing: 0; }
+.structured-source-table caption {
+  padding: 9px 12px;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  color: #345654;
+  background: #eef6f3;
+  border-bottom: 1px solid #d6e5e1;
 }

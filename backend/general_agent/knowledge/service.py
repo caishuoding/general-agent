@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import httpx
 from psycopg.types.json import Jsonb
 
+from general_agent.infrastructure.agent_cleanup import invalidate_agent_material
 from general_agent.attachments.service import AttachmentService
 from general_agent.attachments.knowledge import ChunkPolicy, configured_chunk_policy
 from general_agent.attachments.upload import UploadedFile
@@ -17,6 +18,7 @@ from general_agent.infrastructure.calls import CallGateway
 from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.settings import EmbeddingSettingsStore
 from general_agent.attachments.document_images import VISION_PROMPT_VERSION
+from general_agent.attachments.pdf_text import PDF_TEXT_SOURCE
 
 LOGGER = logging.getLogger(__name__)
 
@@ -52,9 +54,9 @@ class KnowledgeService:
                 "AND (COALESCE(d.parse_info->>'chunk_layout',d.chunk_policy) IS DISTINCT FROM %s OR (%s::text IS NOT NULL AND d.index_revision IS DISTINCT FROM %s) "
                 "OR (EXISTS(SELECT 1 FROM knowledge_document_images i WHERE i.document_id=d.id) AND d.parse_info->>'vision_rules' IS DISTINCT FROM %s) "
                 "OR (lower(d.filename) LIKE '%%.docx' AND d.parse_info->>'text_source' IS DISTINCT FROM 'word_native_markdown_v3') "
-                "OR (lower(d.filename) LIKE '%%.pdf' AND d.parse_info->>'text_source' IS DISTINCT FROM 'pdf_tables_v2'))",
+                "OR (lower(d.filename) LIKE '%%.pdf' AND d.parse_info->>'text_source' IS DISTINCT FROM %s))",
                 (uuid4(), policy.layout_signature, embedding.revision if embedding else None,
-                 embedding.revision if embedding else None, VISION_PROMPT_VERSION),
+                 embedding.revision if embedding else None, VISION_PROMPT_VERSION, PDF_TEXT_SOURCE),
             )
             rows = connection.execute(
                 "SELECT d.id FROM knowledge_documents d JOIN knowledge_bases b ON b.id=d.knowledge_base_id "
@@ -115,7 +117,7 @@ class KnowledgeService:
             ).fetchall()
 
     def select(self, conversation_id: UUID, account_id: UUID, identifiers: list[UUID]) -> list[dict[str, Any]]:
-        """原子替换会话选择，未授权或已删除的任一知识库使整次更新失败。"""
+        """原子替换会话选择；变更时撤销旧智能体上下文，越权时整次失败。"""
         with self.database.connect() as connection:
             conversation = connection.execute('SELECT id FROM conversations WHERE id=%s AND user_id=%s AND NOT deleting FOR UPDATE',
                                               (conversation_id, account_id)).fetchone()
@@ -123,6 +125,9 @@ class KnowledgeService:
                 raise LookupError('会话不存在。')
             for identifier in sorted(set(identifiers)):
                 self.guard(connection, identifier, account_id, lock=True)
+            old = {row['knowledge_base_id'] for row in connection.execute('SELECT knowledge_base_id FROM conversation_knowledge_bases WHERE conversation_id=%s', (conversation_id,)).fetchall()}
+            if old != set(identifiers):
+                invalidate_agent_material(connection, [conversation_id])
             connection.execute('DELETE FROM conversation_knowledge_bases WHERE conversation_id=%s', (conversation_id,))
             for identifier in set(identifiers):
                 connection.execute('INSERT INTO conversation_knowledge_bases VALUES(%s,%s)', (conversation_id, identifier))
@@ -253,11 +258,13 @@ class KnowledgeService:
         return path, str(row['metadata'].get('mime') or 'application/octet-stream')
 
     def delete(self, base_id: UUID, account_id: UUID, document_id: UUID | None = None) -> None:
-        """立即撤销对象的读取和选择范围，随后后台执行可重试的文件清理。"""
+        """立即撤销对象读取及相关智能体派生正文，后台执行可重试文件清理。"""
         with self.database.connect() as connection:
             existing = connection.execute('SELECT id FROM knowledge_bases WHERE id=%s AND user_id=%s FOR UPDATE', (base_id, account_id)).fetchone()
             if existing is None:
                 raise LookupError('知识库不存在。')
+            affected = [item['conversation_id'] for item in connection.execute('SELECT conversation_id FROM conversation_knowledge_bases WHERE knowledge_base_id=%s', (base_id,)).fetchall()]
+            invalidate_agent_material(connection, affected)
             if document_id is None:
                 connection.execute('UPDATE knowledge_bases SET deleting=TRUE WHERE id=%s', (base_id,))
                 connection.execute('DELETE FROM conversation_knowledge_bases WHERE knowledge_base_id=%s', (base_id,))

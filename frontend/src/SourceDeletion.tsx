@@ -37,11 +37,13 @@ export function SourceDeletion({ target, onClose, onChanged }: { target: DeleteT
     finally { setBusy(false); }
   }
   return <section role="dialog" aria-label="删除来源影响预览" className="source-delete-dialog">
-    <h2>删除{target.label}</h2>
-    <p>{impact?.name}。原文件和派生资料将清除。删除会话也会移除其消息；只删除附件会保留已完成的聊天正文。</p>
-    <p>与该来源关联的数据将一并清理。</p>
+    <h2>确认删除{target.label}？</h2>
+    <p>{impact?.name} 会被删除，原文件和关联资料也会一并清理。删除附件时，已经完成的聊天正文会保留。</p>
     {error && <p role="alert">{error}</p>}
-    <button onClick={remove} disabled={busy || !impact}>{busy ? '正在清理…' : '确认删除来源'}</button><button onClick={onClose} disabled={busy}>取消</button>
+    <div className="source-delete-actions">
+      <button className="danger-button" onClick={remove} disabled={busy || !impact}>{busy ? '正在删除…' : '删除'}</button>
+      <button onClick={onClose} disabled={busy}>取消</button>
+    </div>
   </section>;
 }
 
@@ -75,7 +77,7 @@ export function SourceDeletionPending({ revision, onChanged }: { revision: numbe
   }
   // 无正文的阶段提示让停用与物理清理完成保持区别。
   function renderResult(row: Result) {
-    return <p key={row.id}>{row.kind === 'conversation' ? '会话' : '附件'}已停用，清理尚未完成。{row.error}<button data-id={row.id} onClick={retry} disabled={!!busy}>重试来源清理</button></p>;
+    return <p key={row.id}>{row.kind === 'conversation' ? '会话' : '附件'}已停用，但清理还没完成。{row.error}<button data-id={row.id} onClick={retry} disabled={!!busy}>继续清理</button></p>;
   }
   return <div className="source-delete-pending" role="status">{rows.map(renderResult)}{error && <p role="alert">{error}</p>}</div>;
 }

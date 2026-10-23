@@ -134,9 +134,22 @@ def test_search_is_a_model_tool_without_confirmation_and_keeps_sources(database_
             searches.append(payload)
             assert payload["query"] == "杭州天气"
             assert request.url.path == "/v1/tools/search"
-            assert payload == {"query": "杭州天气", "count": 5, "need_content": False}
+            assert payload == {
+                "query": "杭州天气",
+                "ori_question": "杭州天气怎么样",
+                "count": 15,
+                "need_content": False,
+            }
             return httpx.Response(200, json={"results": [
-                {"title": "官方天气", "url": "https://weather.example/hangzhou", "summary": "晴，18 度。"},
+                {
+                    "title": "官方天气",
+                    "url": "https://weather.example/hangzhou",
+                    "summary": "晴，18 度。",
+                    "site_name": "官方天气",
+                    "date": "2026-10-23T08:00:00+00:00",
+                    "authority": 4,
+                    "rerank_score": 2.7,
+                },
                 {"title": "不安全", "url": "javascript:alert(1)", "summary": "恶意"},
             ]})
         messages = tool_messages(payload)
@@ -147,9 +160,13 @@ def test_search_is_a_model_tool_without_confirmation_and_keeps_sources(database_
             result = json.loads(str(messages[-1]["content"]))
             assert "results" in result
             key = result["results"][0]["key"]
+            assert result["results"][0]["rerank_score"] == 2.7
+            assert result["results"][0]["authority"] == 4
+            assert result["results"][0]["site_name"] == "官方天气"
+            assert result["results"][0]["date"] == "2026-10-23T08:00:00+00:00"
             return structured_text(f"杭州晴，18 度。[{key}] [W99999]")
         if last_user_content(payload) == "杭州天气怎么样":
-            return tool_call("search_web", {"query": "杭州天气"})
+            return tool_call("search_web", {"query": "杭州天气", "ori_question": "杭州天气怎么样"})
         return structured_text("普通回答。")
 
     configure_search_settings(database_url, tmp_path, "https://search.example", "test-key")
@@ -171,6 +188,50 @@ def test_search_is_a_model_tool_without_confirmation_and_keeps_sources(database_
         assert Decimal(search_call["credits"]) == 1
 
 
+def test_search_results_use_quality_signals_and_domain_diversity() -> None:
+    """高质量候选足够时过滤低分结果，并限制同一域名最多保留两条。"""
+    from general_agent.search.service import rank_search_results
+
+    candidates = [
+        ('a.example', 3.0), ('a.example', 2.9), ('a.example', 2.8), ('a.example', 2.7),
+        ('b.example', 2.6), ('c.example', 2.5), ('d.example', 2.4),
+        ('e.example', 2.3), ('f.example', 2.2), ('g.example', 2.1),
+    ]
+    results = [
+        {
+            'url': f'https://{domain}/{index}',
+            'title': domain,
+            'excerpt': '',
+            'site_name': domain,
+            'date': None,
+            'authority': 3,
+            'rerank_score': score,
+            '_order': index,
+        }
+        for index, (domain, score) in enumerate(candidates)
+    ]
+    results.append({
+        'url': 'https://low.example/low',
+        'title': '低质量结果',
+        'excerpt': '',
+        'site_name': 'low.example',
+        'date': None,
+        'authority': 0,
+        'rerank_score': 0.5,
+        '_order': len(results),
+    })
+
+    ranked = rank_search_results(results)
+
+    assert len(ranked) == 8
+    assert all(item['rerank_score'] >= 1.5 for item in ranked)
+    assert [item['rerank_score'] for item in ranked] == sorted(
+        [item['rerank_score'] for item in ranked], reverse=True,
+    )
+    assert sum(item['site_name'] == 'a.example' for item in ranked) == 2
+    assert all('_order' not in item for item in ranked)
+
+
 def test_unconfigured_search_returns_tool_error_without_leaking_provider_details(database_url: str, tmp_path: Path) -> None:
     """缺少搜索配置时工具返回可解释错误，聊天继续完成且不发送搜索请求。"""
     calls = 0
@@ -184,7 +245,7 @@ def test_unconfigured_search_returns_tool_error_without_leaking_provider_details
         if tool_messages(payload):
             assert "尚未配置 DeepSeek Search / Fetch" in str(payload["messages"])
             return structured_text("请先在设置中配置DeepSeek 搜索密钥。")
-        return tool_call("search_web", {"query": "杭州天气"})
+        return tool_call("search_web", {"query": "杭州天气", "ori_question": "联网查杭州天气"})
 
     configure_search_settings(database_url, tmp_path)
 
@@ -217,7 +278,10 @@ def test_attachment_and_memory_pii_are_sent_by_search_tool_without_extra_confirm
         if raw_messages:
             result = json.loads(str(raw_messages[-1]["content"]))
             if "memories" in result:
-                return tool_call("search_web", {"query": "青松路 88 号附近咖啡店"}, "call-search")
+                return tool_call("search_web", {
+                    "query": "青松路 88 号附近咖啡店",
+                    "ori_question": "查附近咖啡店",
+                }, "call-search")
             return structured_text("已记住。")
         content = last_user_content(payload)
         assert "青松路 88 号" not in payload["messages"][0]["content"]
@@ -225,7 +289,10 @@ def test_attachment_and_memory_pii_are_sent_by_search_tool_without_extra_confirm
             return tool_call("add_memory", {}, "call-memory-add")
         if "根据长期记忆" in content:
             return tool_call("search_memories", {"query": "住址"}, "call-memory-search")
-        return tool_call("search_web", {"query": "青松路 88 号附近咖啡店"})
+        return tool_call("search_web", {
+            "query": "青松路 88 号附近咖啡店",
+            "ori_question": "查附近咖啡店",
+        })
 
     configure_search_settings(database_url, tmp_path, "https://search.example", "test-key")
 
@@ -268,7 +335,7 @@ def test_failed_search_preserves_actual_usage_and_truthful_terminal_state(databa
         if messages:
             assert "HTTP 429" in str(messages[-1]["content"])
             return structured_text("联网搜索未完成，请稍后重试。")
-        return tool_call("search_web", {"query": "杭州天气"})
+        return tool_call("search_web", {"query": "杭州天气", "ori_question": "联网查杭州天气"})
 
     configure_search_settings(database_url, tmp_path, "https://search.example", "test-key")
 
@@ -327,7 +394,10 @@ def test_search_then_fetch_keeps_markdown_sources_and_reuses_page(database_url: 
             return httpx.Response(200, json={'title': '正式公告', 'content': markdown})
         messages = tool_messages(payload)
         if not messages:
-            return tool_call('search_web', {'query': '公告 site:news.example'})
+            return tool_call('search_web', {
+                'query': '公告 site:news.example',
+                'ori_question': '查找公告并阅读全文',
+            })
         if len(messages) < 3:
             return tool_call('fetch_web', {'url': 'https://news.example/article'}, f'fetch-{len(messages)}')
         page = json.loads(messages[-1]['content'])['results'][0]
@@ -378,7 +448,7 @@ def test_empty_search_is_not_billable(database_url: str, tmp_path: Path) -> None
             return httpx.Response(200, json={'results': []})
         if tool_messages(payload):
             return structured_text('未找到结果。')
-        return tool_call('search_web', {'query': '罕见主题'})
+        return tool_call('search_web', {'query': '罕见主题', 'ori_question': '联网查询罕见主题'})
 
     configure_search_settings(database_url, tmp_path, 'https://search.example')
     with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
@@ -414,7 +484,7 @@ def test_failed_fetch_preserves_search_sources(database_url: str, tmp_path: Path
             return httpx.Response(403, json={'error': {'message': 'private-provider-detail'}})
         messages = tool_messages(payload)
         if not messages:
-            return tool_call('search_web', {'query': '新闻'})
+            return tool_call('search_web', {'query': '新闻', 'ori_question': '搜索新闻并读取正文'})
         if len(messages) == 1:
             return tool_call('fetch_web', {'url': 'https://news.example'}, 'fetch-news')
         assert 'HTTP 403' in messages[-1]['content'] and 'private-provider-detail' not in messages[-1]['content']
@@ -435,10 +505,17 @@ def test_web_tool_argument_boundaries() -> None:
     """对齐官方查询字符上限与抓取 URL 规则，拒绝多余参数及带凭据地址。"""
     import pytest
     from pydantic import ValidationError
-    from general_agent.search.service import FetchWebInput, SearchWebInput
+    from general_agent.search.service import FetchWebInput, SearchWebInput, search_web_tool
 
-    assert len(SearchWebInput(query='字' * 128).query) == 128
-    for arguments in ({'query': '字' * 129}, {'query': '   '}, {'query': '主题', 'extra': True}):
+    assert len(SearchWebInput(query='字' * 128, ori_question='题' * 128).query) == 128
+    assert set(search_web_tool()['function']['parameters']['required']) == {'query', 'ori_question'}
+    for arguments in (
+        {'query': '字' * 129, 'ori_question': '意图'},
+        {'query': '   ', 'ori_question': '意图'},
+        {'query': '主题', 'ori_question': '   '},
+        {'query': '主题', 'ori_question': '题' * 129},
+        {'query': '主题', 'ori_question': '意图', 'extra': True},
+    ):
         with pytest.raises(ValidationError):
             SearchWebInput.model_validate(arguments)
     assert FetchWebInput(url='https://example.com/article?q=1').url.endswith('?q=1')
@@ -465,11 +542,14 @@ def test_fetch_success_does_not_cache_a_failed_search(database_url: str, tmp_pat
             return httpx.Response(200, json={'results': [{'url': 'https://result.example', 'title': '搜索结果', 'summary': '有效摘要'}]})
         messages = tool_messages(payload)
         if not messages:
-            return tool_call('search_web', {'query': '测试主题'})
+            return tool_call('search_web', {'query': '测试主题', 'ori_question': '查询主题并读取已知页面'})
         if len(messages) == 1:
             return tool_call('fetch_web', {'url': 'https://known.example'}, 'known-page')
         if len(messages) == 2:
-            return tool_call('search_web', {'query': '测试主题'}, 'retry-search')
+            return tool_call('search_web', {
+                'query': '测试主题',
+                'ori_question': '查询主题并读取已知页面',
+            }, 'retry-search')
         result = json.loads(messages[-1]['content'])['results'][0]
         assert result['url'] == 'https://result.example'
         return structured_text(f'取得有效结果。[{result["key"]}]')
@@ -495,7 +575,10 @@ def test_failed_search_is_disabled_after_five_retries_and_answer_continues(datab
         messages = tool_messages(payload)
         if len(messages) < 6:
             assert 'search_web' in {tool['function']['name'] for tool in payload['tools']}
-            return tool_call('search_web', {'query': '杭州天气'}, f'search-{len(messages)}')
+            return tool_call('search_web', {
+                'query': '杭州天气',
+                'ori_question': '查询杭州天气',
+            }, f'search-{len(messages)}')
         result = json.loads(messages[-1]['content'])
         assert result['retry_exhausted'] is True and result['retry_count'] == 5
         assert '本次回答中已禁用' in result['message']
@@ -551,7 +634,10 @@ def test_multiple_queries_keep_independent_results_and_retry_failures(
             if index == 2:
                 assert result == json.loads(messages[0]['content'])
         if len(messages) < len(queries):
-            return tool_call('search_web', {'query': queries[len(messages)]}, f'query-{len(messages)}')
+            return tool_call('search_web', {
+                'query': queries[len(messages)],
+                'ori_question': '搜索并比较多个城市的天气',
+            }, f'query-{len(messages)}')
         keys = [json.loads(messages[index]['content'])['results'][0]['key'] for index in (0, 1, 6, 7)]
         return structured_text('已完成比较。' + ''.join(f'[{key}]' for key in keys))
 

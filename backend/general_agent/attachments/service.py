@@ -17,6 +17,7 @@ from general_agent.attachments.images import validate_image
 from general_agent.attachments.files import DeepSeekFiles, file_api_base
 from general_agent.infrastructure.database import Database
 from general_agent.attachments.documents import parse_document
+from general_agent.attachments.pdf_text import PDF_TEXT_SOURCE
 from general_agent.attachments.document_images import DocumentVision, ParsedImage, VISION_PROMPT_VERSION
 from general_agent.attachments.knowledge import (
     ChunkPolicy,
@@ -105,12 +106,12 @@ class AttachmentService:
                 "OR COALESCE(parse_info->>'chunk_layout',parse_info->>'chunk_policy') IS DISTINCT FROM %s "
                 "OR (COALESCE((parse_info->>'image_count')::int,0)>0 "
                 "AND parse_info->>'vision_rules' IS DISTINCT FROM %s))) "
-                "OR (lower(filename) LIKE '%%.pdf' AND (parse_info->>'text_source' IS DISTINCT FROM 'pdf_tables_v2' "
+                "OR (lower(filename) LIKE '%%.pdf' AND (parse_info->>'text_source' IS DISTINCT FROM %s "
                 "OR COALESCE(parse_info->>'chunk_layout',parse_info->>'chunk_policy') IS DISTINCT FROM %s "
                 "OR (COALESCE((parse_info->>'image_count')::int,0)>0 "
                 "AND parse_info->>'vision_rules' IS DISTINCT FROM %s)))) "
                 "AND expires_at>CURRENT_TIMESTAMP RETURNING id",
-                (policy.layout_signature, VISION_PROMPT_VERSION, policy.layout_signature, VISION_PROMPT_VERSION),
+                (policy.layout_signature, VISION_PROMPT_VERSION, PDF_TEXT_SOURCE, policy.layout_signature, VISION_PROMPT_VERSION),
             ).fetchall()
         for row in legacy:
             self.process(row['id'])
@@ -237,7 +238,7 @@ class AttachmentService:
                 with self.database.connect() as connection:
                     if not connection.execute("SELECT id FROM attachments WHERE id=%s AND status='processing' AND expires_at>CURRENT_TIMESTAMP FOR UPDATE", (attachment_id,)).fetchone():
                         return
-                    store_chunks(connection, attachment_id, units, policy)
+                    store_chunks(connection, attachment_id, units, policy, images=images)
                     if extension in {'.pdf', '.docx'}:
                         store_document_images(connection, attachment_id, images)
                         store_image_chunks(connection, attachment_id, images, policy)
@@ -261,6 +262,11 @@ class AttachmentService:
         cache: dict[str, dict[str, Any]] = {}
         for image in images:
             item = image.model_dump()
+            if image.media_type == 'table_preview':
+                item.update(description='表格原区域预览', vision_status='complete', vision_model='table-preview',
+                            vision_revision='table-preview-v1', vision_error=None)
+                results.append(item)
+                continue
             if image.sha256 in cache:
                 item.update(cache[image.sha256])
                 results.append(item)

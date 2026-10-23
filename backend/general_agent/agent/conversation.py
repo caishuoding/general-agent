@@ -7,10 +7,10 @@ from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
-from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from general_agent.conversation.execution import ChatExecution
+from general_agent.conversation.progress import DRAFTING_PROGRESS, MessageProgress, update_message_progress
 from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.operations import OperationContext
 from general_agent.infrastructure.provider import ModelFailure, ModelMessage
@@ -68,19 +68,6 @@ class ConversationGraph:
         builder.add_edge('agent', 'finalize')
         builder.add_edge('finalize', END)
         self.compiled = builder.compile(name='conversation')
-
-    def delete_threads(self, thread_ids: list[UUID]) -> None:
-        """删除旧版本遗留的会话检查点；当前图不创建检查点表或写入正文快照。"""
-        if not thread_ids:
-            return
-        with self.database.connect() as connection:
-            for table in ('checkpoints', 'checkpoint_blobs', 'checkpoint_writes'):
-                exists = connection.execute('SELECT to_regclass(%s) AS relation', (f'langgraph.{table}',)).fetchone()
-                if exists is not None and exists['relation'] is not None:
-                    connection.execute(
-                        sql.SQL('DELETE FROM langgraph.{} WHERE thread_id=ANY(%s)').format(sql.Identifier(table)),
-                        ([str(identifier) for identifier in thread_ids],),
-                    )
 
     def run(self, context: ConversationContext, rows: list[dict[str, Any]], reserved_call_id: UUID | None = None) -> ConversationResult:
         """把历史及当前用户消息作为初始 State，固定配置通过 context 注入。"""
@@ -151,13 +138,23 @@ class ConversationGraph:
             return {}
         context = runtime.context
         chunks: list[str] = []
+        progress_started = False
+
+        def on_progress(progress: MessageProgress) -> None:
+            """只在流式入口写入最新工具状态，同步调用不需要临时进度。"""
+            if context.delivery == 'stream':
+                update_message_progress(self.database, context.assistant_message_id, progress)
 
         def on_content(text: str) -> None:
             """缓冲本节点文字并更新流式 UI，节点完成后再把回答作为 State 更新返回。"""
+            nonlocal progress_started
             if not text:
                 return
             chunks.append(text)
             if context.delivery == 'stream':
+                if not progress_started:
+                    on_progress(DRAFTING_PROGRESS)
+                    progress_started = True
                 with self.database.connect() as connection:
                     connection.execute(
                         "UPDATE messages SET content=content || %s WHERE id=%s AND status='generating'",
@@ -176,6 +173,7 @@ class ConversationGraph:
                 messages=cast(list[ModelMessage], state['messages']),
                 assistant_message_id=context.assistant_message_id,
                 on_content=on_content,
+                on_progress=on_progress,
                 source_attachment_ids=[UUID(identifier) for identifier in state['source_attachment_ids']],
             )
             answer = outcome.answer or ''.join(chunks)
@@ -200,7 +198,7 @@ class ConversationGraph:
         answer, knowledge_sources = self.execution.resolve_knowledge_citations(state['messages'], answer)
         with self.database.connect() as connection:
             connection.execute(
-                "UPDATE messages SET content=%s,status=%s,error=%s,web_sources=%s,knowledge_sources=%s "
+                "UPDATE messages SET content=%s,status=%s,error=%s,web_sources=%s,knowledge_sources=%s,progress=NULL "
                 "WHERE id=%s AND status='generating'",
                 (answer, 'failed' if failure else 'complete', failure, Jsonb(web_sources),
                  Jsonb(knowledge_sources), context.assistant_message_id),

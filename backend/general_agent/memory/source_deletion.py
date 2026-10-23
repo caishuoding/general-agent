@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID, uuid4
 
+from general_agent.infrastructure.agent_cleanup import invalidate_agent_material
 from general_agent.memory.deletion import MemoryDeletion
 from general_agent.memory.service import MemoryService
 
@@ -13,13 +14,12 @@ from general_agent.memory.service import MemoryService
 class SourceDeletion:
     """来源删除先撤回使用许可，再复用正式记忆删除与本机物理清理。"""
 
-    def __init__(self, memory: MemoryDeletion, memories: MemoryService, delete_graph_threads: Callable[[list[UUID]], None] | None = None, delete_attachment_file: Callable[[UUID], None] | None = None) -> None:
-        """绑定记忆、图与附件清理接口，图片远端删除由附件模块负责。"""
+    def __init__(self, memory: MemoryDeletion, memories: MemoryService, delete_attachment_file: Callable[[UUID], None] | None = None) -> None:
+        """绑定记忆与附件清理接口，图片远端删除由附件模块负责。"""
         self.memory=memory
         self.memories=memories
         self.database=memories.database
         self.directory=memories.directory/'attachments'
-        self.delete_graph_threads = delete_graph_threads
         self.delete_attachment_file = delete_attachment_file
 
     def impact(self, connection: Any, kind: str, conversation_id: UUID, source_id: UUID, account_id: UUID) -> dict[str,Any]:
@@ -80,7 +80,7 @@ class SourceDeletion:
         return self.resume(identifier, account_id)
 
     def invalidate(self, connection: Any, identifier: UUID) -> None:
-        """撤回来源关联的旧调用并清空所有搜索词和缓存，保留单附件会话的已完成正文。"""
+        """撤回旧调用并清空搜索、主从任务与缓存，保留已完成聊天正文。"""
         row=connection.execute('SELECT * FROM source_deletions WHERE id=%s',(identifier,)).fetchone()
         message_ids=row['message_ids']
         connection.execute('DELETE FROM memory_native_steps WHERE message_id=ANY(%s)',(message_ids,))
@@ -99,10 +99,12 @@ class SourceDeletion:
         operations.update(item['operation_id'] for item in connection.execute("SELECT operation_id FROM search_requests s WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(s.sources) item WHERE item->>'kind'='memory' AND (item->>'id')::uuid=ANY(%s))",(defaults,)).fetchall())
         operations.update(row['operation_ids'])
         connection.execute('UPDATE source_deletions SET operation_ids=%s WHERE id=%s',(list(operations),identifier))
+        # 先收集旧搜索与消息操作，再清空 Agent 证据；否则来源列表被删除后无法定位网页引用。
+        invalidate_agent_material(connection, [row['conversation_id']])
         connection.execute('UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,result=NULL,response_status=NULL WHERE id=ANY(%s)',(list(operations),))
         connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE operation_id=ANY(%s) AND status='reserved'",(list(operations),))
         connection.execute("UPDATE messages SET status='stopped',content='',error='来源已删除，本次生成已失效。' WHERE operation_id=ANY(%s) AND status='generating'",(list(operations),))
-        connection.execute("UPDATE search_requests SET status='expired',query='',completed_queries='{}',results='[]',sources='[]',purpose='',expires_at=0,error='来源已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
+        connection.execute("UPDATE search_requests SET status='expired',query='',completed_queries='{}',results='[]',sources='[]',error='来源已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
         connection.execute("UPDATE messages SET web_sources='[]' WHERE operation_id=ANY(%s)",(list(operations),))
         for message_id in message_ids:
             connection.execute('INSERT INTO memory_source_suppressions(message_id) VALUES(%s) ON CONFLICT DO NOTHING',(message_id,))
@@ -132,9 +134,6 @@ class SourceDeletion:
                 with lock.transaction():
                     self.invalidate(lock,identifier)
                     self.cleanup(lock,row)
-                    if row['kind'] == 'conversation' and self.delete_graph_threads is not None:
-                        # 当前图不写检查点；会话删除仍清理旧版本按回答标识保存的元数据。
-                        self.delete_graph_threads(row['message_ids'])
                     lock.execute("UPDATE source_deletions SET status='complete',phase='complete',error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s",(identifier,))
             except Exception:
                 lock.execute("UPDATE source_deletions SET status='failed',error='来源已停用，但清理尚未完成；请重试同一删除操作。',updated_at=CURRENT_TIMESTAMP WHERE id=%s",(identifier,))

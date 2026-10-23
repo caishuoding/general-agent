@@ -10,6 +10,7 @@ from tempfile import TemporaryFile
 from time import monotonic, sleep
 from pathlib import Path
 from typing import NamedTuple
+from types import SimpleNamespace
 from zipfile import ZipFile
 from xml.etree import ElementTree
 
@@ -27,6 +28,8 @@ from general_agent.attachments.limits import (
 from general_agent.attachments.knowledge import DocumentUnit, text_units, MAX_DOCUMENT_UNITS
 from general_agent.attachments.word_structure import word_units
 from general_agent.attachments.pdf_structure import page_units
+from general_agent.attachments.pdf_tables import annotate_cross_page_tables
+from general_agent.attachments.pdf_text import PDF_TEXT_SOURCE, document_layout, merge_page_paragraphs
 from general_agent.attachments.document_images import (
     ParsedImage,
     extract_pdf_images,
@@ -160,8 +163,8 @@ def exclude_caption_units(units: list[DocumentUnit], images: list[ParsedImage]) 
 
 
 def parse_pdf(path: Path, image_directory: Path | None = None) -> ParsedDocument:
-    """提取 PDF 文字、表格和图片，图片由后续视觉阶段生成描述。"""
-    info = DocumentInfo(format='pdf', text_source='pdf_tables_v2', limitations=['SmartArt、EMF、WMF 和复杂矢量图表暂不解析。', '表格首行作为列头；无框表格仅接受稳定对齐和明显列间隙，复杂跨页或多级表头不保证还原。'])
+    """按单栏版面还原 PDF 标题、自然段与表格位置，图片由后续视觉阶段生成描述。"""
+    info = DocumentInfo(format='pdf', text_source=PDF_TEXT_SOURCE, limitations=['面向单栏文字型 PDF；标题和段落按版面启发式还原，复杂矢量图保留原图供视觉理解但不还原编辑结构。', '表格保留真实表头、合并单元格与续表；无法可靠识别的数据矩阵使用原区域截图。'])
     try:
         filters.ZLIB_MAX_OUTPUT_LENGTH = 10_000_000
         reader = PdfReader(path, strict=True)
@@ -170,16 +173,16 @@ def parse_pdf(path: Path, image_directory: Path | None = None) -> ParsedDocument
         info.total_units = len(reader.pages)
         if info.total_units > 200:
             return ParsedDocument(info=info, error='单份 PDF 最多 200 页，请拆分后上传。')
-        try:
-            skipped_images: list[str] = []
-            images = extract_pdf_images(reader, image_directory, skipped_images)
-            info.missing_units.extend(skipped_images)
-        except ValueError as error:
-            return ParsedDocument(info=info, error=str(error))
-        info.image_count = len(images)
+        images: list[ParsedImage] = []
         units: list[DocumentUnit] = []
         text_size, table_count = 0, 0
         with pdfplumber.open(path) as layout:
+            try:
+                text_layout = document_layout(layout, reader)
+            except ValueError as error:
+                return ParsedDocument(info=info, error=str(error))
+            info.missing_units.extend(f'第 {number} 页版面统计未完成，已保留逐页文字回退'
+                                      for number in sorted(text_layout.incomplete_pages))
             for number, page in enumerate(reader.pages, 1):
                 try:
                     text = page.extract_text()
@@ -193,13 +196,21 @@ def parse_pdf(path: Path, image_directory: Path | None = None) -> ParsedDocument
                 structure = None
                 try:
                     structure = layout.pages[number - 1]
-                    page_content, count = page_units(structure, number, table_count, text)
+                    page_content, count, page_pictures = page_units(structure, number, table_count, text_layout,
+                                                                    image_directory, len(images))
                     table_count += count
+                    images.extend(page_pictures)
                 except Exception as error:
                     if isinstance(error, ValueError) and '资源限制' in str(error):
                         return ParsedDocument(info=info, error=str(error))
                     info.missing_units.append(f'第 {number} 页表格识别失败，已回退纯文字提取')
                     page_content = text_units(text, number)
+                    fallback = extract_pdf_images(SimpleNamespace(pages=[page]), image_directory)
+                    for image in fallback:
+                        image.ordinal = len(images) + 1
+                        image.page = image.end_page = image.paragraph = number
+                        image.location = f'第 {number} 页内嵌图片 {image.ordinal}'
+                        images.append(image)
                 finally:
                     if structure is not None:
                         structure.close()
@@ -212,9 +223,12 @@ def parse_pdf(path: Path, image_directory: Path | None = None) -> ParsedDocument
                     info.readable_units += 1
         if sum(len(unit.content) for unit in units) > MAX_TEXT_CHARACTERS:
             return ParsedDocument(info=info, error='文档提取文字超过 2,000,000 字符资源限制，请拆分后上传。')
-        images = attach_pdf_captions(units, images)
+        annotate_cross_page_tables(units, text_layout.page_sizes)
+        units = merge_page_paragraphs(units, text_layout)
+        info.image_count = len(images)
         exclude_caption_units(units, images)
-        info.readable_units = sum(bool(unit.content.strip()) for unit in units)
+        info.readable_units = len({page for unit in units if unit.content.strip()
+                                   for page in range(unit.page or 1, (unit.end_page or unit.page or 1) + 1)})
         info.coverage = 'partial' if info.missing_units else 'complete'
         if not info.readable_units:
             if not images:

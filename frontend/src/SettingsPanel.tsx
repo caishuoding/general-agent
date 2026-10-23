@@ -43,7 +43,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
       onSaved(next);
       const keyInput = form.elements.namedItem("api_key") as HTMLInputElement;
       keyInput.value = "";
-      setNotice("配置已保存，后续调用会使用新连接。");
+      setNotice("模型设置已保存，下一条消息会使用新配置。");
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -80,7 +80,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
       <div className="eyebrow">让助手适合你</div>
       <h2>设置</h2>
       <p className="page-description">
-        连接你选择的模型，聊天记录保存在这台电脑上。
+        连接你要使用的模型。对话和资料保存在你的账号空间中。
       </p>
       <div className="settings-card">
         <div className="card-heading">
@@ -88,7 +88,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
           <span className="small-label">文字对话</span>
         </div>
         <form onSubmit={save}>
-          <label htmlFor="base-url">API 地址</label>
+          <label htmlFor="base-url">服务地址</label>
           <input
             id="base-url"
             name="base_url"
@@ -110,7 +110,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
             required
             maxLength={200}
           />
-          <label htmlFor="api-key">API 密钥</label>
+          <label htmlFor="api-key">访问密钥</label>
           <input
             id="api-key"
             name="api_key"
@@ -118,18 +118,21 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
             autoComplete="off"
             placeholder={
               settings.api_key_configured
-                ? "已配置 · 留空保留现有密钥"
-                : "填写 API 密钥"
+                ? "已保存，留空则不修改"
+                : "填写访问密钥"
             }
           />
           <p className="field-help">
-            密钥仅由本机后端保存。更换 API 地址时，请重新填写密钥。
+            密钥只保存在服务端。更换服务地址时，请重新填写密钥。
           </p>
-          <label htmlFor="context-window">模型上下文窗口（Token）</label>
-          <input id="context-window" name="context_window_tokens" type="number" min={1024} max={10000000} required defaultValue={settings.context_window_tokens ?? 32768} />
-          <label htmlFor="output-reserve">回答预留（Token）</label>
-          <input id="output-reserve" name="output_reserve_tokens" type="number" min={1} max={1000000} required defaultValue={settings.output_reserve_tokens ?? 4096} />
-          <p className="field-help">按模型实际能力填写，用于限制文档原文读取量。</p>
+          <details className="advanced-settings">
+            <summary>高级设置</summary>
+            <label htmlFor="context-window">模型上下文窗口（Token）</label>
+            <input id="context-window" name="context_window_tokens" type="number" min={1024} max={10000000} required defaultValue={settings.context_window_tokens ?? 32768} />
+            <label htmlFor="output-reserve">回答预留（Token）</label>
+            <input id="output-reserve" name="output_reserve_tokens" type="number" min={1} max={1000000} required defaultValue={settings.output_reserve_tokens ?? 4096} />
+            <p className="field-help">按模型实际能力填写，用于限制文档原文读取量。</p>
+          </details>
           {error && (
             <p className="notice error" role="alert">
               {error}
@@ -141,9 +144,9 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
             </p>
           )}
           <div className="form-footer">
-            <span>调用按服务商规则计费</span>
+            <span>保存后，下一条消息生效</span>
             <button className="primary-button" disabled={saving}>
-              {saving ? "正在保存…" : "保存配置"}
+              {saving ? "正在保存…" : "保存模型设置"}
             </button>
           </div>
         </form>

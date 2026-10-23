@@ -37,7 +37,10 @@ def test_public_memory_topics_do_not_read_private_long_term_memory(database_url:
             if content.startswith('请记住'):
                 return tool_call('add_memory', {})
             if content.startswith('联网搜索：'):
-                return tool_call('search_web', {'query': content.removeprefix('联网搜索：')})
+                return tool_call('search_web', {
+                    'query': content.removeprefix('联网搜索：'),
+                    'ori_question': content,
+                })
             return reply(payload, '公开主题回答。')
         return reply(payload, '公开主题回答。')
 
