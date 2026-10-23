@@ -1,6 +1,6 @@
 Status: ready-for-agent
 
-Implementation: not-started
+Implementation: complete（2026-10-23）
 
 # 智能体身份、执行轮次与独立记录
 
@@ -19,3 +19,4 @@ Implementation: not-started
 ## Comments
 
 - 2026-10-23：文档阶段建立任务，尚未实施。
+- 2026-10-23：迁移 053 与 `AgentRepository` 已实现身份、执行轮次、独立消息、来源、工具幂等及调用关联；受控接口测试通过。

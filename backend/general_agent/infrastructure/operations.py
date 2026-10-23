@@ -13,6 +13,7 @@ from psycopg.errors import ForeignKeyViolation
 from psycopg.types.json import Jsonb
 
 from general_agent.infrastructure.database import Database
+from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.infrastructure.provider import TokenUsage
 from general_agent.infrastructure.settings import StoredSettings
 
@@ -81,8 +82,26 @@ class OperationService:
         return call_id
 
     def begin(self, context: OperationContext, call_id: UUID, settings: StoredSettings, assistant_message_id: UUID | None = None) -> None:
-        """在真正外发前核对取消状态，并保证预留记录只启动一次。"""
+        """外发前原子检查根回答、执行时限和共享预算，并关联智能体用量。"""
         with self.database.connect() as connection:
+            run = connection.execute('SELECT r.id,r.agent_id,r.deadline,r.status,a.answer_attempt_id,a.parent_agent_id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE r.operation_id=%s', (context.operation_id,)).fetchone()
+            if run:
+                root = connection.execute("SELECT a.* FROM agents a JOIN messages m ON m.id=a.answer_attempt_id JOIN conversations c ON c.id=a.conversation_id WHERE a.answer_attempt_id=%s AND a.parent_agent_id IS NULL AND m.status='generating' AND NOT c.deleting FOR UPDATE OF a", (run['answer_attempt_id'],)).fetchone()
+                latest = connection.execute('SELECT status,deadline FROM agent_runs WHERE id=%s', (run['id'],)).fetchone()
+                if latest:
+                    run.update(latest)
+                from datetime import datetime, timezone
+                if not root or root['closed'] or run['status'] not in ('queued','running') or min(root['deadline'],run['deadline']) <= datetime.now(timezone.utc):
+                    raise ValueError('回答或智能体执行已停止或超时。')
+                unit_row = connection.execute('SELECT unit FROM model_calls WHERE id=%s', (call_id,)).fetchone()
+                assert unit_row is not None
+                field = 'search_count' if unit_row['unit'] == 'credits' else 'model_count'
+                limit = LIMITS.search_calls if field == 'search_count' else LIMITS.model_calls
+                if root[field] >= limit:
+                    raise ValueError('本次回答已达到共享调用预算。')
+                connection.execute(f'UPDATE agents SET {field}={field}+1 WHERE id=%s', (root['id'],))
+                connection.execute('UPDATE model_calls SET agent_id=%s,agent_run_id=%s,assistant_message_id=%s WHERE id=%s', (run['agent_id'],run['id'],run['answer_attempt_id'],call_id))
+                assistant_message_id = run['answer_attempt_id']
             row = connection.execute("SELECT cancelled FROM cloud_operations WHERE id=%s FOR UPDATE", (context.operation_id,)).fetchone()
             if not row or row["cancelled"]:
                 connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE id=%s AND status='reserved'", (call_id,))

@@ -1,6 +1,6 @@
 Status: ready-for-agent
 
-Implementation: not-started
+Implementation: complete（2026-10-23）
 
 # 子任务证据交付与主回答引用核验
 
@@ -19,3 +19,4 @@ Implementation: not-started
 ## Comments
 
 - 2026-10-23：文档阶段建立任务，尚未实施。
+- 2026-10-23：真实工具来源按 run 登记，只有等待实际交付后才进入主回答允许清单；撤销与缓存重放重新鉴权测试通过。

@@ -254,14 +254,19 @@ class SearchService:
             return results
 
     def resolve(self, operation: OperationContext, answer: str) -> tuple[str, list[dict[str, Any]]]:
-        """核对搜索和抓取来源编号；保留失败前取得的来源，空搜索不得伪称已查证。"""
+        """核对主执行及已交付子任务的真实网页来源，拒绝未知编号。"""
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT results,status FROM search_requests WHERE operation_id=%s AND status IN ('complete','failed')",
                 (operation.operation_id,),
             ).fetchone()
+            delivered = connection.execute("SELECT s.payload FROM agent_sources s JOIN agent_runs r ON r.id=s.run_id JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id IN (SELECT root.answer_attempt_id FROM agents root JOIN agent_runs main ON main.agent_id=root.id WHERE main.operation_id=%s AND root.parent_agent_id IS NULL) AND (a.parent_agent_id IS NULL OR s.delivered) AND s.source_key ~ '^W[0-9]+$'", (operation.operation_id,)).fetchall()
+        if delivered:
+            combined = {item['key']: item for item in (row['results'] if row else [])}
+            combined.update({item['payload']['key']: item['payload'] for item in delivered})
+            row = {'status': 'complete', 'results': list(combined.values())}
         if row is None or (row['status'] == 'failed' and not row['results']):
-            return answer, []
+            return re.sub(r'\[(W\d+)\]', '[网页出处未核验]', answer), []
         if not row['results']:
             return ('本次搜索未找到可核验的网页结果，无法基于网络来源回答。请调整关键词后重试。' if answer else answer), []
         allowed = {item['key']: item for item in row['results']}
@@ -279,5 +284,4 @@ class SearchService:
         cleaned = re.sub(r'\[(W\d+)\]', replace, answer)
         if answer and allowed and not used:
             cleaned += '\n\n联网提示：此回答缺少可核验的网页引用，请核对搜索来源。'
-            used = list(allowed.values())
         return cleaned, used

@@ -1,6 +1,6 @@
 Status: ready-for-agent
 
-Implementation: not-started
+Implementation: complete（2026-10-23）
 
 # 主从模型循环、上下文与工具权限
 
@@ -20,3 +20,4 @@ Implementation: not-started
 ## Comments
 
 - 2026-10-23：文档阶段建立任务，尚未实施。
+- 2026-10-23：主从复用 `AgentToolGraph`，子智能体使用独立上下文和受限工具集；聊天 HTTP 到受控模型 HTTP 的调用顺序与隔离测试通过。

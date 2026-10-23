@@ -1,0 +1,155 @@
+"""复用工具图执行主从智能体，隔离消息、证据和生命周期。"""
+
+import json
+import httpx
+from typing import Any, TYPE_CHECKING, cast
+from collections.abc import Callable
+from uuid import UUID
+
+from general_agent.infrastructure.agent_limits import LIMITS
+from general_agent.agent.graph import AgentToolGraph
+from general_agent.agent.orchestration import AgentOrchestrator
+from general_agent.agent.repository import AgentRepository, RunCheckpoint
+from general_agent.agent.tools import ORCHESTRATION, WORKER_TOOLS, orchestration_tools
+from general_agent.infrastructure.operations import OperationContext
+from general_agent.infrastructure.provider import ModelMessage, ModelFailure
+from general_agent.infrastructure.settings import StoredSettings
+from general_agent.infrastructure.tokens import TokenCounter
+from general_agent.memory.automatic import MemoryCheckpoint
+from general_agent.prompts.agents import MAIN_AGENT_PROMPT, SUBAGENT_PROMPT
+
+if TYPE_CHECKING:
+    from general_agent.memory.tools import MemoryTools, ToolOutcome
+
+
+class AgentRuntime:
+    """将一次回答的主从运行集中在同一模块，调用者只需提供固定身份和材料。"""
+
+    def __init__(self, tools: 'MemoryTools') -> None:
+        """复用真实业务工具与调用网关，为应用绑定统一后台调度。"""
+        self.tools = tools
+        self.repository = AgentRepository(tools.memory.database)
+        self.orchestrator = AgentOrchestrator(self.repository)
+
+    def run(self, conversation_id: UUID, account_id: UUID, user_id: UUID, answer_id: UUID,
+            settings: StoredSettings, operation: OperationContext, messages: list[ModelMessage],
+            on_content: Callable[[str], None] | None, attachment_ids: list[UUID] | None) -> 'ToolOutcome':
+        """执行主工具图并在任何出口关闭剩余子任务，子任务不写用户回答。"""
+        from general_agent.memory.tools import ToolOutcome
+        root = self.repository.start(answer_id, account_id, conversation_id, operation)
+        try:
+            result = self.execute(root['id'], user_id, answer_id, settings, cast(list[dict[str, Any]], messages), on_content, attachment_ids)
+            self.repository.guard(root['id'])
+            sources = self.repository.sources(root['id'])
+            # 收尾只读取可信登记；这条本地证据快照不再发给模型。
+            final_messages = result['messages']
+            if sources:
+                final_messages = [*final_messages[:-1], {'role': 'tool', 'content': json.dumps({'results': sources}, ensure_ascii=False)}, final_messages[-1]]
+            self.repository.transition(root['id'], 'completed', result['answer'], final_messages)
+            return ToolOutcome(result['answer'], bool(result['used_tools']), final_messages)
+        finally:
+            self.repository.close(answer_id)
+
+    def execute(self, run_id: UUID, user_id: UUID, answer_id: UUID, settings: StoredSettings,
+                messages: list[dict[str, Any]], on_content: Callable[[str], None] | None,
+                attachment_ids: list[UUID] | None) -> dict[str, Any]:
+        """为单次执行组装权限、上下文和图片预算，主从状态不共享可变容器。"""
+        from general_agent.memory.tools import agent_tools
+        row = self.repository.info(run_id)
+        worker = row['parent_agent_id'] is not None
+        checkpoint = RunCheckpoint(self.repository, run_id, user_id)
+        counter = TokenCounter.for_settings(settings, self.tools.memory.directory)
+        tools = agent_tools(self.tools.knowledge is not None)
+        tools = [tool for tool in tools if tool['function']['name'] in WORKER_TOOLS] if worker else [*tools, *orchestration_tools()]
+        injected: set[UUID] = set()
+        document_budget = 0
+
+        def before_model(current: list[dict[str, Any]], definitions: list[dict[str, Any]]) -> None:
+            """外发前重验资料版本并拒绝超上下文，不静默截断消息。"""
+            checkpoint.guard()
+            if counter.available(settings, current, definitions) <= 0:
+                raise ValueError('智能体上下文超过可用预算，请缩小任务范围。')
+
+        def before_tool(index: int, call_id: str, name: str) -> None:
+            """将工具幂等身份绑定模型轮次和原调用标识。"""
+            checkpoint.guard()
+            checkpoint.current_call = f'{index}:{call_id}'
+            checkpoint.current_tool = name
+
+        def budget(current: list[dict[str, Any]], definitions: list[dict[str, Any]]) -> None:
+            """按本执行的实际消息核算读取预算，不借用其他子智能体用量。"""
+            nonlocal document_budget
+            document_budget = max(0, counter.available(settings, current, definitions) - 256)
+            with self.repository.database.connect() as connection:
+                usage = connection.execute("SELECT prompt_tokens,completion_tokens FROM model_calls WHERE agent_run_id=%s AND unit='chat_tokens' ORDER BY created_at DESC,id DESC LIMIT 1", (run_id,)).fetchone()
+            if usage is not None and usage['prompt_tokens'] is not None:
+                last_assistant = max((index for index, message in enumerate(current) if message['role'] == 'assistant'), default=len(current))
+                appended = counter.count(json.dumps(current[last_assistant:], ensure_ascii=False))
+                observed = settings.context_window_tokens - settings.output_reserve_tokens - usage['prompt_tokens'] - (usage['completion_tokens'] or 0) - appended - 768
+                document_budget = max(0, min(document_budget, observed))
+            elif any(isinstance(item.get('content'), list) for item in current):
+                document_budget = 0
+
+        def child(child_run: UUID) -> None:
+            """执行子任务及补充轮次，沿用子上下文且保存脱除推理的结果。"""
+            child_info = self.repository.info(child_run)
+            history = [*child_info['messages'], {'role': 'user', 'content': child_info['task']}]
+            if not child_info['messages']:
+                material = self.tools.attachments.prepare(conversation_id=row['conversation_id'], account_id=row['account_id']) if self.tools.attachments else None
+                history = [{'role': 'system', 'content': SUBAGENT_PROMPT}, *cast(list[dict[str, Any]], material.messages if material else []), *history]
+            try:
+                output = self.execute(child_run, user_id, answer_id, settings, history, None, attachment_ids)
+                self.repository.guard(child_run)
+                clean = [{key: value for key, value in item.items() if key != 'reasoning_content'} for item in output['messages']]
+                self.repository.transition(child_run, 'completed', output['answer'], clean)
+            except Exception:
+                self.repository.transition(child_run, 'failed', error='子任务未完成，已保留真实调用用量。')
+                raise
+
+        def execute_tool(current: MemoryCheckpoint, name: str, arguments: dict[str, Any], configured: StoredSettings) -> dict[str, Any]:
+            """双重执行角色权限检查，编排工具与业务工具使用各自可信入口。"""
+            checkpoint.guard()
+            if name in ORCHESTRATION:
+                if worker:
+                    raise ValueError('子智能体没有编排权限。')
+                return self.orchestrator.execute(checkpoint, name, arguments, child)
+            if worker and name not in WORKER_TOOLS:
+                raise ValueError('子智能体不能执行该工具。')
+            result = self.tools.execute(current, name, arguments, configured, attachment_ids, document_budget, counter)
+            checkpoint.guard()
+            self.repository.record_sources(run_id, [result])
+            return result
+
+        def images(results: list[dict[str, Any]]) -> list[ModelMessage]:
+            """加载本执行真实结果及已交付证据的原图，按批次去重并核验访问。"""
+            actual = [*results]
+            for result in results:
+                for agent in result.get('agents', []):
+                    actual.append({'results': agent.get('sources', [])})
+            knowledge = [result for result in actual if any('knowledge_base_id' in item for item in result.get('results', []))]
+            attachments = [result for result in actual if result not in knowledge]
+            output: list[ModelMessage] = []
+            selected: list[UUID] = []
+            try:
+                if self.tools.attachments:
+                    message, selected = self.tools.attachments.document_image_message(row['conversation_id'], row['account_id'], attachments, injected)
+                    if message:
+                        output.append(message)
+                if self.tools.knowledge and len(selected) < 5:
+                    message, added = self.tools.knowledge.image_message(row['conversation_id'], row['account_id'], knowledge, injected | set(selected), limit=5-len(selected))
+                    selected.extend(added)
+                    if message:
+                        output.append(message)
+            except (ValueError, LookupError, OSError, ModelFailure, httpx.HTTPError):
+                output.append({'role': 'user', 'content': '部分原图无法加载，请明确尚未核对原图，仅根据文字描述回答。'})
+            injected.update(selected)
+            checkpoint.guard()
+            return output
+
+        fragments = [SUBAGENT_PROMPT if worker else MAIN_AGENT_PROMPT]
+        graph = AgentToolGraph(maximum_rounds=LIMITS.child_rounds if worker else LIMITS.main_rounds)
+        output = graph.run(messages=messages, settings=settings, calls=self.tools.memory.calls.bind(checkpoint.operation),
+            checkpoint=cast(MemoryCheckpoint, checkpoint), tools=tools, execute_tool=execute_tool,
+            context_fragments=fragments, assistant_message_id=answer_id, on_content=on_content,
+            on_tool_context=budget, on_tool_results=images, before_model=before_model, before_tool=before_tool)
+        return dict(output)

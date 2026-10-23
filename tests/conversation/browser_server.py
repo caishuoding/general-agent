@@ -27,7 +27,7 @@ class ControlledModel(BaseHTTPRequestHandler):
     attempts: dict[str, int] = {}
 
     def do_POST(self) -> None:
-        """支持 Files、纯文字图片描述及文档按需读取，保留慢速和断流验收。"""
+        """支持 Files、资料读取与主从受控工具流，保留慢速和断流验收。"""
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         if self.path == '/files':
             self.send_json({'id': 'file-api-document-browser', 'created_at': int(time()), 'expires_at': int(time()) + 2592000})
@@ -38,6 +38,18 @@ class ControlledModel(BaseHTTPRequestHandler):
             return
         prompt = next((message['content'] for message in reversed(payload['messages'])
                        if message['role'] == 'user' and isinstance(message.get('content'), str)), '')
+        if prompt == '__multi_agent_browser__':
+            results = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
+            if not results:
+                self.send_agent_reply({'tool_calls': [{'id': 'browser-create', 'type': 'function', 'function': {'name': 'spawn_agent', 'arguments': json.dumps({'title': '研究子任务', 'task': 'browser-sub 调查', 'expected_output': '给出结论'})}}]})
+            elif 'agent_id' in results[-1]:
+                self.send_agent_reply({'tool_calls': [{'id': 'browser-wait', 'type': 'function', 'function': {'name': 'wait_agents', 'arguments': json.dumps({'agent_ids': [results[-1]['agent_id']]})}}]})
+            else:
+                self.send_agent_reply({'content': '主智能体已经汇总子任务。'})
+            return
+        if 'browser-sub' in prompt:
+            self.send_agent_reply({'content': '子智能体公开交付结果。'})
+            return
         document_reply: str | None = None
         document_id: str | None = None
         for message in payload['messages']:
@@ -91,6 +103,24 @@ class ControlledModel(BaseHTTPRequestHandler):
             return
         self.write_event({"choices": [{"delta": {"content": second}, "finish_reason": "stop"}]})
         self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
+    def send_agent_reply(self, message: dict[str, object]) -> None:
+        """通过真实 SSE 返回受控主从工具调用或文本，供浏览器验证生命周期。"""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.end_headers()
+        if 'tool_calls' in message:
+            calls = message['tool_calls']
+            assert isinstance(calls, list)
+            for index, call in enumerate(calls):
+                self.write_event({'choices': [{'delta': {'tool_calls': [{'index': index, **call}]}}]})
+            reason = 'tool_calls'
+        else:
+            self.write_event({'choices': [{'delta': {'content': message['content']}}]})
+            reason = 'stop'
+        self.write_event({'choices': [{'delta': {}, 'finish_reason': reason}], 'usage': {'prompt_tokens': 15, 'completion_tokens': 5, 'total_tokens': 20}})
+        self.wfile.write(b'data: [DONE]\n\n')
         self.wfile.flush()
 
     def send_json(self, payload: dict[str, object]) -> None:

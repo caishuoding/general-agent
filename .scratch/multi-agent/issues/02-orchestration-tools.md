@@ -1,6 +1,6 @@
 Status: ready-for-agent
 
-Implementation: not-started
+Implementation: complete（2026-10-23）
 
 # 四个编排工具与有界并行调度
 
@@ -20,3 +20,4 @@ Implementation: not-started
 ## Comments
 
 - 2026-10-23：文档阶段建立任务，尚未实施。
+- 2026-10-23：四个编排工具、公平有界队列、游标交付、追加限制和幂等取消已实现并通过公开接口测试。

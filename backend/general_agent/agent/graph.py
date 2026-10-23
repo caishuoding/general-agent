@@ -9,6 +9,7 @@ from uuid import UUID
 from langgraph.graph import END, START, StateGraph
 
 from general_agent.agent.state import AgentState
+from general_agent.agent.tools import ORCHESTRATION
 from general_agent.infrastructure.calls import BoundCalls
 from general_agent.infrastructure.provider import ModelFailure, ModelMessage
 from general_agent.infrastructure.settings import StoredSettings
@@ -47,11 +48,15 @@ class AgentToolGraph:
         on_content: Callable[[str], None] | None = None,
         on_tool_context: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None] | None = None,
         on_tool_results: ToolResultImages | None = None,
+        before_model: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None] | None = None,
+        before_tool: Callable[[int, str, str], None] | None = None,
     ) -> AgentState:
-        """运行工具循环；文档工具每轮最多执行五次，其他工具保持失败重试合同。"""
+        """运行工具循环；模型及工具执行前可核验独立身份，编排结果不走普通缓存。"""
 
         def call_model(state: AgentState) -> dict[str, Any]:
             """组装当前消息并隐藏耗尽额度的工具，所有工具选择均由模型决定。"""
+            if before_model is not None:
+                before_model(state["messages"], tools)
             index = state["round_index"]
             if index >= self.maximum_rounds:
                 raise ValueError("工具调用达到本次执行上限；已完成的操作保留，请缩小范围后继续。")
@@ -130,6 +135,8 @@ class AgentToolGraph:
             document_calls = dict(state['document_calls'])
             known_tools = {tool["function"]["name"] for tool in tools}
             for call in state["tool_calls"]:
+                if before_tool is not None:
+                    before_tool(state["round_index"] - 1, call["id"], call["function"]["name"])
                 result: dict[str, Any] | None = None
                 function = call["function"]
                 name = function["name"]
@@ -164,7 +171,7 @@ class AgentToolGraph:
                 tool_key = checkpoint.key("tools:result", [settings.revision, state["round_index"] - 1, call])
                 attempt_key = checkpoint.key("tools:attempt", [str(assistant_message_id), tool_key])
                 # 当前时间每次执行都重新读取，不复用历史步骤中的旧时钟。
-                cacheable = name != 'get_current_time'
+                cacheable = name != 'get_current_time' and name not in ORCHESTRATION
                 result = checkpoint.get(attempt_key) if cacheable else None
                 if result is None and cacheable:
                     cached = checkpoint.get(tool_key)

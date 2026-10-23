@@ -1,6 +1,6 @@
 Status: ready-for-agent
 
-Implementation: not-started
+Implementation: complete（2026-10-23）
 
 # 根回答预算、停止传播、超时与来源清理
 
@@ -20,3 +20,4 @@ Implementation: not-started
 ## Comments
 
 - 2026-10-23：文档阶段建立任务，尚未实施。
+- 2026-10-23：根预算、停止传播、超时、重启恢复及附件／知识库失效清理已接入；并发取消和迟到结果测试通过。

@@ -1,4 +1,5 @@
 import { SourceDeletion, SourceDeletionPending, type DeleteTarget } from './SourceDeletion';
+import { AgentTasks } from "./AgentTasks";
 import { AnswerContent } from "./AnswerContent";
 import {
   useEffect,
@@ -615,6 +616,7 @@ export function App() {
   }
 
   /** 接收持久化消息并返回消息界面；助手显示 Markdown，用户保留原始输入。 */
+  // 展示主回答、子任务状态及失败重试，子任务详情按需授权加载。
   function renderMessage(message: Message) {
     return (
       <article
@@ -637,6 +639,7 @@ export function App() {
               <span>{message.content}</span>
               {!!message.attachments.length && renderMessageAttachments(message.attachments)}
             </div>}
+        {message.role === "assistant" && conversation && <AgentTasks tasks={message.agent_tasks || []} conversationId={conversation.id} answerId={message.id} />}
         {message.status === "generating" && <div className="message-progress" role="status">正在生成…</div>}
         {message.status === "failed" && (
           <div className="message-error" role="alert">回答未完成 · {message.error || "可以重试或检查设置。"}</div>

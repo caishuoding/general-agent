@@ -2493,3 +2493,8 @@ a:focus-visible {
     animation: none;
   }
 }
+
+.agent-tasks { margin-top: 16px; padding: 12px 0; border-top: 1px solid var(--border, #e2e4e7); font-size: 0.9rem; }
+.agent-task { margin-top: 8px; }
+.agent-task summary { cursor: pointer; padding: 6px 0; }
+.agent-result { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }

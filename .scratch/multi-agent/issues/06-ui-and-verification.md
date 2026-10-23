@@ -1,6 +1,6 @@
 Status: ready-for-agent
 
-Implementation: not-started
+Implementation: complete（2026-10-23）
 
 # 子任务状态界面、完整回归与交付
 
@@ -20,3 +20,4 @@ Implementation: not-started
 ## Comments
 
 - 2026-10-23：文档阶段建立任务，尚未实施。
+- 2026-10-23：折叠任务列表、按需授权详情、刷新恢复和整轮停止已完成。270 项 Python 收集结果中 266 通过、4 跳过；22 项浏览器测试、MyPy 与生产构建通过。真实模型分工质量不在受控替身验收范围内。

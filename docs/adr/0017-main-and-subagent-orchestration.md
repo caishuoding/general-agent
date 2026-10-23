@@ -1,6 +1,6 @@
 # 在回答尝试内按需编排主智能体与子智能体
 
-Status: accepted（2026-10-23，方案已确认，尚未实现）
+Status: accepted and implemented（2026-10-23）
 
 对话任务由主智能体自主判断是否分工，通过 `spawn_agent`、`wait_agents`、`send_agent_message`、`cancel_agent` 管理一层子智能体。采用独立消息上下文的异步工具循环，避免同步等待创建结果而无法并行，也避免固定角色流水线强制拆分简单问题。主从默认使用同一模型配置；独立身份与上下文决定角色，无需部署多个模型。
 

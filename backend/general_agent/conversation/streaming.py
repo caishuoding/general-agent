@@ -111,7 +111,7 @@ class StreamingChat:
         self.graph.run(context, rows, call_id)
 
     def stop(self, conversation_id: UUID, account_id: UUID, message_id: UUID) -> None:
-        """冻结回答并取消尚未完成的搜索记录；已发出的请求仍可回传真实用量。"""
+        """冻结回答并关闭全部子任务与搜索；已发出的请求仍可回传真实用量。"""
         message=self.message(conversation_id, account_id, message_id)
         if message.get('operation_id'):
             self.execution.search.cancel(message['operation_id'])
@@ -120,13 +120,15 @@ class StreamingChat:
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE WHERE id IN (SELECT operation_id FROM messages WHERE id=%s)", (message_id,))
             connection.execute("UPDATE model_calls SET status = 'stopped' WHERE assistant_message_id = %s AND status = 'generating' AND EXISTS (SELECT 1 FROM messages WHERE id = %s AND status = 'stopped')", (message_id, message_id))
 
+        self.execution.agent_runtime.repository.close(message_id)
+
     def close(self) -> None:
-        """停机时终结未完成回答并等待图线程释放，业务记录保留停止和恢复依据。"""
+        """停机时终结未完成回答并有界等待线程，网络迟到结果不再更新业务。"""
         self.recover()
         with self.lock:
             threads = tuple(self.threads)
         for thread in threads:
-            thread.join()
+            thread.join(timeout=2)
 
     def message(self, conversation_id: UUID, account_id: UUID, message_id: UUID) -> dict[str, Any]:
         """仅返回指定会话中的助手消息，不允许用其他会话标识访问。"""
