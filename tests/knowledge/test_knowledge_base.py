@@ -76,4 +76,4 @@ def test_supported_document_formats_keep_real_positions(database_url: str, tmp_p
         if extension == 'docx':
             assert document['parse_info']['text_source'] == 'word_native_markdown_v3'
         elif extension == 'pdf':
-            assert document['parse_info']['text_source'] == 'pdf_single_column_v3'
+            assert document['parse_info']['text_source'] == 'pdf_single_column_v4'

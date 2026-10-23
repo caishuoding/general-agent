@@ -20,7 +20,7 @@ test('PDF当前上传状态可见，刷新后按消息展示并继续用于回�
   await expect(page.getByText('文字可用（部分） · partial.pdf', { exact: true })).toBeVisible();
   await expect(page.getByText('文字提取：1 / 2 页', { exact: true })).toBeVisible();
   await expect(page.getByText('第 2 页没有可提取文字（可能是空白或扫描图像）', { exact: true })).toBeVisible();
-  await expect(page.getByText('SmartArt、EMF、WMF 和复杂矢量图表暂不解析。', { exact: true })).toBeVisible();
+  await expect(page.getByText('面向单栏文字型 PDF；标题和段落按版面启发式还原，复杂矢量图保留原图供视觉理解但不还原编辑结构。', { exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: '消息', exact: true }).fill('Readable report在哪一页？');
   await page.getByRole('button', { name: '发送消息' }).click();
   await expect(page.getByText('Readable report on page one.', { exact: false })).toBeVisible();

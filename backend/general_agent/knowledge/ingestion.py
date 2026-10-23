@@ -90,7 +90,7 @@ def process(service: 'KnowledgeService', row: dict[str, Any], calls: BoundCalls)
             raise LookupError('文档处理已撤销。')
         # 相同正文的向量可在失败重试时复用；切片重建事务不会留下半份正文。
         cached = connection.execute('SELECT ordinal,content,embedding,embedding_revision FROM knowledge_chunks WHERE document_id=%s', (identifier,)).fetchall()
-        store_chunks(connection, identifier, units, policy, knowledge=True)
+        store_chunks(connection, identifier, units, policy, knowledge=True, images=images)
         store_image_chunks(connection, identifier, images, policy, knowledge=True)
         for chunk in cached:
             if chunk['embedding'] is not None:
@@ -124,8 +124,12 @@ def describe_images(service: 'KnowledgeService', row: dict[str, Any], parsed: li
     service.progress(identifier, attempt, 'images', 0, len(parsed))
 
     def describe(image: ParsedImage) -> tuple[dict[str, Any], bool]:
-        """返回描述及本次是否新上传，回收时不能删除仍被持久缓存引用的远端文件。"""
+        """返回描述及本次是否新上传；表格截图直接完成本地兜底，不发送视觉模型。"""
         item = image.model_dump(mode='json')
+        if image.media_type == 'table_preview':
+            item.update(description='表格原区域预览', provider_file=None, vision_status='complete',
+                        vision_model='table-preview', vision_revision='table-preview-v1', vision_error=None)
+            return item, False
         previous = by_ordinal.get(image.ordinal)
         if previous:
             old = previous['metadata']

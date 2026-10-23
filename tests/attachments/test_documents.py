@@ -57,7 +57,7 @@ def test_pdf_question_reads_page_chunks_and_survives_restart(database_url: str, 
         assert attachment['status'] == 'ready'
         assert attachment['parse_info']['readable_units'] == 2
         assert attachment['parse_info']['image_count'] == 0
-        assert '复杂矢量图表' in str(attachment['parse_info']['limitations'])
+        assert '复杂矢量图保留原图' in str(attachment['parse_info']['limitations'])
         assert client.post(f'/api/conversations/{conversation}/runs', json={'content': 'ORBIT deadline?'}).status_code == 202
         message = wait_message(client, conversation, 'complete')
         assert message['content'] == 'Friday.'

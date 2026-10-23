@@ -13,7 +13,7 @@ from pypdf import PdfReader
 from general_agent.attachments.knowledge import DocumentRegion, DocumentUnit
 from general_agent.attachments.document_images import figure_caption
 
-PDF_TEXT_SOURCE = 'pdf_single_column_v3'
+PDF_TEXT_SOURCE = 'pdf_single_column_v4'
 
 
 @dataclass

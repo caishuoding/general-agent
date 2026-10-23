@@ -2,6 +2,7 @@
 
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pypdf import PdfWriter
@@ -151,7 +152,7 @@ def test_pdf_upload_search_read_and_legacy_recovery_share_table_chunks(database_
                                files={'files': ('table.pdf', table_pdf(rows=48))}).json()[0]
         listed = client.get(f'/api/conversations/{conversation}/attachments').json()[0]
         assert listed['status'] == 'ready', listed['error']
-        assert listed['parse_info']['text_source'] == 'pdf_single_column_v3'
+        assert listed['parse_info']['text_source'] == 'pdf_single_column_v4'
         db = Database(database_url)
         attachments = AttachmentService(db, tmp_path)
         tools = DocumentTools(db, attachments.policy)
@@ -159,11 +160,19 @@ def test_pdf_upload_search_read_and_legacy_recovery_share_table_chunks(database_
         hits = tools.search(UUID(conversation), account, {'query': 'ITEM47'})['results']
         assert any('| ITEM47 | 447.00 | 5.42 |' in hit['content'] for hit in hits)
         assert all(hit['structure']['regions'][0]['page'] == 1 for hit in hits)
-        read = tools.read(UUID(conversation), account, {'document_id': uploaded['id'], 'start_page': 1, 'end_page': 1},
-                          TokenCounter('test'), 10000)
-        assert read['complete']
-        assert [block['chunk_id'] for block in read['content']] == sorted(block['chunk_id'] for block in read['content'])
-        assert any(block['content'].startswith('| Name | Budget | CPC |') for block in read['content'])
+        blocks: list[dict[str, Any]] = []
+        cursor = None
+        while True:
+            arguments = {'document_id': uploaded['id'], 'start_page': 1, 'end_page': 1,
+                         **({'cursor': cursor} if cursor else {})}
+            read = tools.read(UUID(conversation), account, arguments, TokenCounter('test'), 10000)
+            assert 'content' in read, read
+            blocks.extend(read['content'])
+            cursor = read['next_cursor']
+            if cursor is None:
+                break
+        assert [block['chunk_id'] for block in blocks] == sorted(block['chunk_id'] for block in blocks)
+        assert any(block['content'].startswith('| Name | Budget | CPC |') for block in blocks)
         with db.connect() as connection:
             chunks = connection.execute('SELECT * FROM document_chunks WHERE attachment_id=%s ORDER BY ordinal',
                                         (UUID(uploaded['id']),)).fetchall()
@@ -172,6 +181,9 @@ def test_pdf_upload_search_read_and_legacy_recovery_share_table_chunks(database_
                 if chunk['structure'].get('table'):
                     assert chunk['page'] == chunk['end_page'] == 1
                     assert chunk['content'].startswith('| Name | Budget | CPC |\n| --- | --- | --- |\n')
+                    fragment = chunk['structure']['table']
+                    assert fragment['columns'] == 3 and fragment['header_rows'] == 1
+                    assert {cell['row'] for cell in fragment['cells']} >= {0}
             # 以虚拟旧解析版本驱动真实恢复，必须清除旧向量而保持原始到期时间。
             connection.execute("UPDATE document_chunks SET embedding=%s,embedding_revision='old' WHERE attachment_id=%s",
                                (Jsonb([1.0, 0.0]), UUID(uploaded['id'])))
@@ -180,7 +192,7 @@ def test_pdf_upload_search_read_and_legacy_recovery_share_table_chunks(database_
         recovered = client.get(f'/api/conversations/{conversation}/attachments').json()[0]
         assert recovered['status'] == 'ready', recovered['error']
         assert recovered['expires_at'] == listed['expires_at']
-        assert recovered['parse_info']['text_source'] == 'pdf_single_column_v3'
+        assert recovered['parse_info']['text_source'] == 'pdf_single_column_v4'
         with db.connect() as connection:
             cached = connection.execute('SELECT count(*) AS n FROM document_chunks WHERE attachment_id=%s AND embedding IS NOT NULL',
                                         (UUID(uploaded['id']),)).fetchone()

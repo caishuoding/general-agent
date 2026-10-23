@@ -27,13 +27,39 @@ class DocumentRegion(BaseModel):
     bbox: tuple[float, float, float, float]
 
 
+class TableCell(BaseModel):
+    """保存零起始行列的真实单元格和合并跨度，文字始终作为普通文本处理。"""
+
+    row: int = Field(ge=0, le=20000)
+    column: int = Field(ge=0, le=255)
+    text: str
+    rowspan: int = Field(default=1, ge=1, le=20000)
+    colspan: int = Field(default=1, ge=1, le=256)
+    header: bool = False
+
+
+class TableFragment(BaseModel):
+    """保存实际切片包含的表格行与重复表头，供引用展示而不扩展为整张未召回表格。"""
+
+    table_id: int
+    title: str | None = None
+    columns: int = Field(ge=1, le=256)
+    rows: int = Field(ge=1, le=20000)
+    header_rows: int = Field(default=0, ge=0, le=20000)
+    cells: list[TableCell] = Field(default_factory=list, max_length=20000)
+    source_rows: list[int] = Field(default_factory=list)
+    continued: bool = False
+    render_as_image: bool = False
+    image_id: UUID | None = None
+
+
 class DocumentUnit(BaseModel):
     """保存标题、段落、表格行及章节；PDF 额外保留各物理页的原文区域。"""
 
     page: int | None = None
     paragraph: int
     content: str
-    kind: Literal['paragraph', 'heading', 'table_row'] = 'paragraph'
+    kind: Literal['paragraph', 'heading', 'table_row', 'image'] = 'paragraph'
     heading_level: int | None = None
     table: int | None = None
     row: int | None = None
@@ -41,6 +67,12 @@ class DocumentUnit(BaseModel):
     location: str | None = None
     end_page: int | None = None
     regions: list[DocumentRegion] = Field(default_factory=list)
+    table_cells: list[TableCell] = Field(default_factory=list)
+    table_header: bool = False
+    table_columns: int | None = None
+    table_title: str | None = None
+    table_continued: bool = False
+    table_image_id: UUID | None = None
 
 
 def default_chunk_counter() -> TokenCounter:
@@ -284,7 +316,7 @@ def table_specs(group: list[DocumentUnit], offset: int, policy: ChunkPolicy) -> 
 
 
 def chunk_specs(units: list[DocumentUnit], policy: ChunkPolicy) -> list[ChunkSpec]:
-    """Word 按章节、Word／PDF 按表格分组，普通正文沿用自然切点，单独保存结构包装。"""
+    """按章节、表格和媒体位置断开正文，再沿自然切点分片并单独保存结构包装。"""
     specs: list[ChunkSpec] = []
     offset, index = 0, 0
     native = any(unit.location is not None for unit in units)
@@ -293,7 +325,8 @@ def chunk_specs(units: list[DocumentUnit], policy: ChunkPolicy) -> list[ChunkSpe
         group: list[DocumentUnit] = []
         while index < len(units):
             unit = units[index]
-            if native and group and (unit.kind == 'heading' or unit.section != first.section or unit.table != first.table):
+            if native and group and (unit.kind in ('heading', 'image') or first.kind == 'image'
+                                     or unit.section != first.section or unit.table != first.table):
                 break
             group.append(unit)
             index += 1
@@ -309,9 +342,68 @@ def chunk_specs(units: list[DocumentUnit], policy: ChunkPolicy) -> list[ChunkSpe
     return specs
 
 
+def unit_position(unit: DocumentUnit) -> tuple[int, float, float]:
+    """有坐标时按物理位置排序，否则沿用 Word 的页码和段落位置。"""
+    if unit.regions:
+        return unit.regions[0].page, unit.regions[0].bbox[1], unit.regions[0].bbox[0]
+    return unit.page or 1, float(unit.paragraph), 0
+
+
+def media_boundaries(units: list[DocumentUnit], images: list[dict[str, Any]]) -> list[DocumentUnit]:
+    """在图片所在位置插入不持久化正文的边界，防止一个正文片跨过图片。"""
+    ordered = list(units)
+    for image in images:
+        if image.get('media_type') == 'table_preview':
+            continue
+        page = image.get('page') or 1
+        regions = [DocumentRegion(page=page, bbox=image['bbox'])] if image.get('bbox') else []
+        ordered.append(DocumentUnit(page=page, end_page=page, paragraph=image['paragraph'], content='', kind='image',
+                                    section=image.get('section', []), location=image['location'], regions=regions))
+    return sorted(ordered, key=unit_position)
+
+
+def table_chunk_fragment(all_units: list[DocumentUnit], selected: list[DocumentUnit], table_image_id: UUID | None) -> dict[str, Any] | None:
+    """构造仅含表头与选中行的片段，并以片段内相对行号避免跨页覆盖。"""
+    if not selected or selected[0].table is None:
+        return None
+    table_id = selected[0].table
+    group = [unit for unit in all_units if unit.table == table_id]
+    first_page = group[0].page
+    headers = [unit for unit in group if unit.table_header and unit.page == first_page]
+    # 跨页重复表头在正文中为空；即使解析器漏标 header，也不能把它当成数据行。
+    body = [unit for unit in selected if not unit.table_header and unit.content.strip()]
+    included = headers + body
+    remapped: list[TableCell] = []
+    row_offset = 0
+    # 同一页内保留解析器的行跨度关系，跨页则连续重排为片段内唯一的行坐标。
+    for unit in included:
+        unit_rows = sorted({cell.row for cell in unit.table_cells})
+        row_map = {source_row: row_offset + index for index, source_row in enumerate(unit_rows)}
+        remapped.extend(cell.model_copy(update={'row': row_map[cell.row]}) for cell in unit.table_cells)
+        row_offset += len(unit_rows)
+    if not remapped:
+        return None
+    header_cells = [cell for cell in remapped if cell.header]
+    fragment = TableFragment(
+        table_id=table_id,
+        title=next((unit.table_title for unit in group if unit.table_title), None),
+        columns=int(selected[0].table_columns or max(cell.column + cell.colspan for cell in remapped)),
+        rows=row_offset,
+        header_rows=len({cell.row for cell in header_cells}),
+        cells=remapped,
+        source_rows=[unit.row or index for index, unit in enumerate(body, 1)],
+        continued=any(unit.table_continued for unit in group),
+        render_as_image=bool(table_image_id),
+        image_id=table_image_id,
+    )
+    return fragment.model_dump(mode='json', exclude_defaults=True)
+
+
 def store_chunks(connection: Any, identifier: UUID, units: list[DocumentUnit], policy: ChunkPolicy,
-                 *, knowledge: bool = False) -> None:
-    """向各业务独立表保存共用切片与覆盖的 PDF 原文区域；表名仅由内部白名单选择。"""
+                 *, knowledge: bool = False, images: list[dict[str, Any]] | None = None) -> None:
+    """保存正文与原文区域，媒体存在时先按位置分组；表名仅由内部白名单选择。"""
+    if images:
+        units = media_boundaries(units, images)
     table, parent = ('knowledge_chunks', 'document_id') if knowledge else ('document_chunks', 'attachment_id')
     connection.execute(sql.SQL('DELETE FROM {} WHERE {}=%s').format(sql.Identifier(table), sql.Identifier(parent)), (identifier,))
     chunks: list[tuple[Any, ...]] = []
@@ -329,14 +421,19 @@ def store_chunks(connection: Any, identifier: UUID, units: list[DocumentUnit], p
         if policy.counter.count(content) > policy.max_tokens:
             raise ValueError('切片正文和结构包装超过 Token 上限。')
         start_unit, end_unit = units[first], units[last]
-        structure = start_unit.model_dump(exclude={'page', 'paragraph', 'content'}, exclude_none=True, exclude_defaults=True)
-        regions = list(dict.fromkeys((region.page, region.bbox) for unit in units[first:last + 1] for region in unit.regions))
+        structure = start_unit.model_dump(exclude={'page', 'paragraph', 'content', 'table_image_id'}, exclude_none=True, exclude_defaults=True)
+        regions = list(dict.fromkeys((region.page, region.bbox) for unit in units[first:last + 1]
+                                     if unit.content.strip() for region in unit.regions))
         if regions:
             structure['regions'] = [DocumentRegion(page=page, bbox=bbox).model_dump() for page, bbox in regions]
+        if start_unit.table is not None:
+            fragment = table_chunk_fragment(units, units[first:last + 1], start_unit.table_image_id)
+            if fragment is not None:
+                structure['table'] = fragment
         chunks.append((identifier, len(chunks) + 1, start_unit.page, end_unit.end_page or end_unit.page,
                        start_unit.paragraph, end_unit.paragraph,
                        Jsonb(structure),
-                       Jsonb(end_unit.model_dump(exclude={'page', 'paragraph', 'content'}, exclude_none=True, exclude_defaults=True)),
+                       Jsonb(end_unit.model_dump(exclude={'page', 'paragraph', 'content', 'table_image_id'}, exclude_none=True, exclude_defaults=True)),
                        content, sorted(set(search_terms(content))), spec.prefix, spec.suffix,
                        policy.counter.count(content), policy.counter.method))
     if chunks:
@@ -362,7 +459,8 @@ def store_document_images(
             item['id'], identifier, item['ordinal'], item.get('page'), item.get('end_page'),
             item['paragraph'], Jsonb(item.get('section', [])), item['location'],
             item['storage_name'], item['sha256'], item['mime'], item['width'], item['height'],
-            item.get('description', ''), Jsonb(item['provider_file']) if item.get('provider_file') else None,
+            item.get('caption') or '', item.get('description', ''),
+            Jsonb(item['provider_file']) if item.get('provider_file') else None,
             item['vision_status'], item.get('vision_model'), item.get('vision_revision'), item.get('vision_error'),
         )
         for item in images
@@ -371,16 +469,16 @@ def store_document_images(
         cursor.executemany(
             'INSERT INTO document_images('
             'id,attachment_id,ordinal,page,end_page,paragraph,section,location,storage_name,sha256,mime,'
-            'width,height,description,provider_file,vision_status,'
+            'width,height,caption,description,provider_file,vision_status,'
             'vision_model,vision_revision,vision_error'
-            ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+            ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
             rows,
         )
 
 
 def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str, Any]], policy: ChunkPolicy,
                        *, knowledge: bool = False) -> None:
-    """直接用图片描述原文生成切片，位置和章节仅存元数据，并绑定同域原图。"""
+    """保存绑定原图的描述切片，再把所有类型切片统一恢复为原文位置顺序。"""
     table, parent = ('knowledge_chunks', 'document_id') if knowledge else ('document_chunks', 'attachment_id')
     next_ordinal = (connection.execute(
         sql.SQL('SELECT COALESCE(MAX(ordinal),0)+1 AS ordinal FROM {} WHERE {}=%s').format(sql.Identifier(table), sql.Identifier(parent)),
@@ -389,11 +487,14 @@ def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str,
     rows: list[tuple[Any, ...]] = []
     image_policy = replace(policy, overlap=0)
     for image in images:
-        if image.get('vision_status') != 'complete':
+        if image.get('vision_status') != 'complete' or image.get('media_type') == 'table_preview':
             continue
         content = image['description']
-        structure = Jsonb({'kind': 'image', 'ordinal': image['ordinal'], 'caption': image.get('caption'),
-                           'section': image.get('section', []), 'location': image['location']})
+        metadata = {'kind': 'image', 'ordinal': image['ordinal'], 'caption': image.get('caption'),
+                    'section': image.get('section', []), 'location': image['location']}
+        if image.get('bbox'):
+            metadata['regions'] = [{'page': image.get('page') or 1, 'bbox': image['bbox']}]
+        structure = Jsonb(metadata)
         for start, end in chunk_ranges(content, image_policy):
             chunk = content[start:end]
             if not chunk.strip():
@@ -414,6 +515,31 @@ def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str,
                 ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)').format(sql.Identifier(table), sql.Identifier(parent)),
                 rows,
             )
+        reorder_chunks(connection, identifier, knowledge=knowledge)
+
+
+def chunk_position(row: dict[str, Any]) -> tuple[int, float, float, int]:
+    """按保存的区域排序切片，同一图片的描述续片用旧序号保持相邻顺序。"""
+    regions = row['structure'].get('regions', [])
+    if regions:
+        return regions[0]['page'], regions[0]['bbox'][1], regions[0]['bbox'][0], row['ordinal']
+    return row['page'] or 1, float(row['paragraph']), 0, row['ordinal']
+
+
+def reorder_chunks(connection: Any, identifier: UUID, *, knowledge: bool = False) -> None:
+    """在同一入库事务内借助临时正序号避开唯一键冲突，统一正文、表格和图片顺序。"""
+    table, parent = ('knowledge_chunks', 'document_id') if knowledge else ('document_chunks', 'attachment_id')
+    rows = connection.execute(sql.SQL('SELECT ordinal,page,paragraph,structure FROM {} WHERE {}=%s ORDER BY ordinal')
+                              .format(sql.Identifier(table), sql.Identifier(parent)), (identifier,)).fetchall()
+    if not rows:
+        return
+    offset = max(row['ordinal'] for row in rows) + len(rows) + 1
+    connection.execute(sql.SQL('UPDATE {} SET ordinal=ordinal+%s WHERE {}=%s')
+                       .format(sql.Identifier(table), sql.Identifier(parent)), (offset, identifier))
+    with connection.cursor() as cursor:
+        cursor.executemany(sql.SQL('UPDATE {} SET ordinal=%s WHERE {}=%s AND ordinal=%s')
+                           .format(sql.Identifier(table), sql.Identifier(parent)),
+                           [(index, identifier, row['ordinal'] + offset) for index, row in enumerate(sorted(rows, key=chunk_position), 1)])
 
 
 def rank_chunks(rows: list[dict[str, Any]], query: str, limit: int) -> list[dict[str, Any]]:

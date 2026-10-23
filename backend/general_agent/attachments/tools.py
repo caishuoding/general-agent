@@ -150,7 +150,7 @@ class DocumentTools:
             # 列名由文件格式白名单选择；范围和游标仍使用绑定参数。
             key = 'page' if paginated else 'paragraph'
             chunks = connection.execute(
-                f'SELECT ordinal,content,image_id FROM document_chunks WHERE attachment_id=%s '
+                f'SELECT ordinal,content,image_id,structure FROM document_chunks WHERE attachment_id=%s '
                 f'AND {key}<=%s AND end_{key}>=%s AND ordinal>=%s ORDER BY ordinal',
                 (identifier, end, start, request.cursor.chunk_id if request.cursor else 1),
             ).fetchall()
@@ -175,10 +175,12 @@ class DocumentTools:
                                   'complete': True, 'next_cursor': None, 'token_count_method': counter.method}
         blocks: list[dict[str, Any]] = result['content']
         for index, chunk in enumerate(chunks):
+            structure = chunk.get('structure')
             blocks.append({
                 'chunk_id': chunk['ordinal'],
                 'content': chunk['content'],
                 **({'image_id': str(chunk['image_id'])} if chunk.get('image_id') else {}),
+                **({'structure': structure} if isinstance(structure, dict) and structure.get('table') else {}),
             })
             result['complete'] = index == len(chunks) - 1
             result['next_cursor'] = None if result['complete'] else {'chunk_id': chunks[index + 1]['ordinal']}

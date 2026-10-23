@@ -238,7 +238,7 @@ class AttachmentService:
                 with self.database.connect() as connection:
                     if not connection.execute("SELECT id FROM attachments WHERE id=%s AND status='processing' AND expires_at>CURRENT_TIMESTAMP FOR UPDATE", (attachment_id,)).fetchone():
                         return
-                    store_chunks(connection, attachment_id, units, policy)
+                    store_chunks(connection, attachment_id, units, policy, images=images)
                     if extension in {'.pdf', '.docx'}:
                         store_document_images(connection, attachment_id, images)
                         store_image_chunks(connection, attachment_id, images, policy)
@@ -262,6 +262,11 @@ class AttachmentService:
         cache: dict[str, dict[str, Any]] = {}
         for image in images:
             item = image.model_dump()
+            if image.media_type == 'table_preview':
+                item.update(description='表格原区域预览', vision_status='complete', vision_model='table-preview',
+                            vision_revision='table-preview-v1', vision_error=None)
+                results.append(item)
+                continue
             if image.sha256 in cache:
                 item.update(cache[image.sha256])
                 results.append(item)
