@@ -61,9 +61,10 @@ function sourceId(messageId: string, key: string) {
   return `answer-source-${encodeURIComponent(messageId)}-${encodeURIComponent(key)}`;
 }
 
-/** 根据服务端网页来源编号创建 Markdown 插件，仅转换正文中的真实网页引用。 */
+/** 根据服务端来源编号创建 Markdown 插件，仅转换正文中真实存在的网页或知识库引用。 */
 function citationPlugin(message: Message) {
-  const keys = new Set((message.web_sources || []).map(function getKey(source) { return source.key; }));
+  const webKeys = new Set((message.web_sources || []).map(function getKey(source) { return source.key; }));
+  const knowledge = new Map((message.knowledge_sources || []).map(function indexSource(source) { return [source.key, source]; }));
   /** 返回语法树转换器，不修改代码、已有链接或未知来源标记。 */
   return function citations() {
     /** 将普通文本中的引用拆为文字和链接，保留原有 Markdown 结构。 */
@@ -73,11 +74,15 @@ function citationPlugin(message: Message) {
         if (node.type !== "text" || index === undefined || !parent) return;
         const parts: PhrasingContent[] = [];
         let cursor = 0;
-        for (const match of node.value.matchAll(/\[(W\d+)\]/g)) {
-          if (!keys.has(match[1])) continue;
+        for (const match of node.value.matchAll(/\[([WK]\d+)\]/g)) {
+          const knowledgeSource = knowledge.get(match[1]);
+          if (!webKeys.has(match[1]) && !knowledgeSource) continue;
           const start = match.index;
           if (start > cursor) parts.push({ type: "text", value: node.value.slice(cursor, start) });
-          parts.push({ type: "link", url: `#${sourceId(message.id, match[1])}`, children: [{ type: "text", value: match[0] }] });
+          const label = knowledgeSource
+            ? `[${knowledgeSource.filename || knowledgeSource.knowledge_base_name || '知识库原文'} · ${knowledgeSource.location}]`
+            : match[0];
+          parts.push({ type: "link", url: `#${sourceId(message.id, match[1])}`, children: [{ type: "text", value: label }] });
           cursor = start + match[0].length;
         }
         if (!parts.length) return;
@@ -87,6 +92,18 @@ function citationPlugin(message: Message) {
       });
     };
   };
+}
+
+/** 返回知识库原件的受保护下载地址。 */
+function knowledgeDocumentUrl(source: Message["knowledge_sources"][number]) {
+  return `/api/knowledge-bases/${encodeURIComponent(source.knowledge_base_id)}/documents/${encodeURIComponent(source.document_id)}/file`;
+}
+
+/** 返回知识库引用所绑定原图的受保护内联地址。 */
+function knowledgeImageUrl(source: Message["knowledge_sources"][number]) {
+  return source.image_id
+    ? `/api/knowledge-bases/${encodeURIComponent(source.knowledge_base_id)}/documents/${encodeURIComponent(source.document_id)}/images/${encodeURIComponent(source.image_id)}/file`
+    : null;
 }
 
 /** 将一个可信网页来源渲染为可展开摘录。 */
@@ -100,6 +117,30 @@ function SourceDetails({ id, source }: {
   return <details className="file-citation" id={id} tabIndex={-1}>
     <summary>[{source.key}] <a href={href} target="_blank" rel="noopener noreferrer">{label}</a></summary>
     <blockquote>{source.excerpt}</blockquote>
+  </details>;
+}
+
+/** 将一个已核验的知识库引用展示为文档、原文位置、摘录及可选原图。 */
+function KnowledgeSourceDetails({ id, source }: {
+  id: string;
+  source: Message["knowledge_sources"][number];
+}) {
+  const label = source.filename || '知识库文档';
+  const image = knowledgeImageUrl(source);
+  const isImage = source.kind === 'image' || !!source.image_id;
+  const isTable = !isImage && (source.kind === 'table' || source.location.startsWith('表格')
+    || source.excerpt.trimStart().startsWith('|'));
+  /** 返回可展开的知识库来源详情，并让图片与文字引用共用同一锚点。 */
+  return <details className="file-citation knowledge-citation" id={id} tabIndex={-1} open>
+    <summary>[{source.key}] <a href={knowledgeDocumentUrl(source)} target="_blank" rel="noopener noreferrer">{label}</a> · {source.location}</summary>
+    <small>{source.knowledge_base_name}</small>
+    {!isImage && !isTable && <blockquote>{source.excerpt}</blockquote>}
+    {isTable && <div className="knowledge-source-table">
+      <Markdown skipHtml remarkPlugins={[remarkGfm]} components={components}>{source.excerpt}</Markdown>
+    </div>}
+    {isImage && image && <a className="knowledge-source-image-link" href={image} target="_blank" rel="noopener noreferrer">
+      <img className="knowledge-source-image" src={image} alt={`${label} · ${source.location}`} loading="lazy" />
+    </a>}
   </details>;
 }
 
@@ -141,7 +182,8 @@ export function AnswerContent({ message }: {
   message: Message;
 }) {
   const webSources = message.web_sources || [];
-  const sourceCount = webSources.length;
+  const knowledgeSources = message.knowledge_sources || [];
+  const sourceCount = webSources.length + knowledgeSources.length;
   return <>
     <div className="message-content answer-markdown">
       <Markdown skipHtml remarkPlugins={[remarkGfm, citationPlugin(message)]} rehypePlugins={[[rehypeHighlight, { detect: false }]]} components={components}>{message.content}</Markdown>
@@ -151,6 +193,10 @@ export function AnswerContent({ message }: {
       {webSources.map(function renderWebSource(source) {
         /** 输出网页来源详情并绑定本回答唯一定位锚点。 */
         return <SourceDetails key={source.key} id={sourceId(message.id, source.key)} source={source} />;
+      })}
+      {knowledgeSources.map(function renderKnowledgeSource(source) {
+        /** 输出知识库来源详情，并在引用切片包含图片时显示受保护原图。 */
+        return <KnowledgeSourceDetails key={source.key} id={sourceId(message.id, source.key)} source={source} />;
       })}
     </section>}
     {!!message.content && <div className="answer-actions"><CopyButton text={message.content} label="复制回答" /></div>}

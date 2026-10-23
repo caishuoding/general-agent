@@ -29,6 +29,7 @@ class ConversationState(TypedDict):
     failure: str | None
     used_tools: bool
     web_sources: list[dict[str, object]]
+    knowledge_sources: list[dict[str, object]]
 
 
 class ConversationResult(TypedDict):
@@ -91,6 +92,7 @@ class ConversationGraph:
             'failure': None,
             'used_tools': False,
             'web_sources': [],
+            'knowledge_sources': [],
         }
         return self.invoke(initial, context)
 
@@ -189,23 +191,27 @@ class ConversationGraph:
             return self.failure_update(context, self.unexpected_failure(context.delivery), ''.join(chunks))
 
     def finalize(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
-        """读取 State 核验网页来源及保存终态，把核验后的正文和来源显式返回 State。"""
+        """核验网页和知识库引用后保存终态，把正文及两类可信来源返回 State。"""
         context = runtime.context
         failure = state['failure']
         if failure:
             self.execution.search.fail(context.operation, failure)
         answer, web_sources = self.execution.search.resolve(context.operation, state['answer'])
+        answer, knowledge_sources = self.execution.resolve_knowledge_citations(state['messages'], answer)
         with self.database.connect() as connection:
             connection.execute(
-                "UPDATE messages SET content=%s,status=%s,error=%s,web_sources=%s WHERE id=%s AND status='generating'",
-                (answer, 'failed' if failure else 'complete', failure, Jsonb(web_sources), context.assistant_message_id),
+                "UPDATE messages SET content=%s,status=%s,error=%s,web_sources=%s,knowledge_sources=%s "
+                "WHERE id=%s AND status='generating'",
+                (answer, 'failed' if failure else 'complete', failure, Jsonb(web_sources),
+                 Jsonb(knowledge_sources), context.assistant_message_id),
             )
             connection.execute(
                 "UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE id=%s AND status='reserved'",
                 (state['reserved_call_id'],),
             )
         LOGGER.info('event=node finalize message_id=%s status=%s characters=%s', context.assistant_message_id, 'failed' if failure else 'complete', len(answer))
-        return {'answer': answer, 'web_sources': web_sources, 'messages': self.answered_messages(state['messages'], answer)}
+        return {'answer': answer, 'web_sources': web_sources, 'knowledge_sources': knowledge_sources,
+                'messages': self.answered_messages(state['messages'], answer)}
 
     @staticmethod
     def answered_messages(messages: list[dict[str, Any]], answer: str) -> list[dict[str, Any]]:

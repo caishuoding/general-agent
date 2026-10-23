@@ -32,10 +32,10 @@ def pdf_bytes(texts: list[str], encrypted: bool = False) -> bytes:
     return result.getvalue()
 
 
-def test_pdf_question_cites_actual_page_and_survives_restart(database_url: str, tmp_path: Path) -> None:
-    """文本PDF经真实流式入口回答，引用到实际物理页，重启仍保留范围说明。"""
+def test_pdf_question_reads_page_chunks_and_survives_restart(database_url: str, tmp_path: Path) -> None:
+    """文本 PDF 经页码定位完整切片并通过真实流式入口回答，重启仍可读取。"""
     def provider(request: httpx.Request) -> httpx.Response:
-        """通过原文工具读取第二页，核对实际页码和文字后返回答案。"""
+        """通过第二页定位跨页切片，核对完整正文后返回答案。"""
         payload = json.loads(request.content)
         document = attachment_documents(payload)[0]
         assert document['pages'] == 2
@@ -43,8 +43,7 @@ def test_pdf_question_cites_actual_page_and_survives_restart(database_url: str, 
         if tool_reply is not None:
             return tool_reply
         result = document_tool_result(payload)
-        assert result['content'][0]['page'] == 2
-        assert result['content'][0]['content'] == 'ORBIT deadline is Friday.'
+        assert result['content'] == [{'chunk_id': 1, 'content': 'Background.ORBIT deadline is Friday.'}]
         event = {'choices': [{'delta': {'content': 'Friday.'}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 30, 'completion_tokens': 5, 'total_tokens': 35}}
         return httpx.Response(200, text='data: ' + json.dumps(event) + '\n\ndata: [DONE]\n\n')
 
@@ -57,7 +56,8 @@ def test_pdf_question_cites_actual_page_and_survives_restart(database_url: str, 
         attachment = client.get(f'/api/conversations/{conversation}/attachments').json()[0]
         assert attachment['status'] == 'ready'
         assert attachment['parse_info']['readable_units'] == 2
-        assert '内嵌图片' in str(attachment['parse_info']['limitations'])
+        assert attachment['parse_info']['image_count'] == 0
+        assert '复杂矢量图表' in str(attachment['parse_info']['limitations'])
         assert client.post(f'/api/conversations/{conversation}/runs', json={'content': 'ORBIT deadline?'}).status_code == 202
         message = wait_message(client, conversation, 'complete')
         assert message['content'] == 'Friday.'
@@ -87,9 +87,9 @@ def docx_bytes() -> bytes:
 
 
 def test_docx_body_and_table_have_real_structural_locations(database_url: str, tmp_path: Path) -> None:
-    """Word 自动固定分页，正文和表格在同一页原文中可读。"""
+    """Word 自动固定分页，按页定位的切片保留正文及 Markdown 表格。"""
     def provider(request: httpx.Request) -> httpx.Response:
-        """读取固定分页后的真实文字，核对正文和表格均未丢失。"""
+        """按固定页码读取切片，核对原生正文和表格文字均未丢失且按序返回。"""
         payload = json.loads(request.content)
         tool_reply = document_tool_reply(payload, start_page=1, end_page=1)
         if tool_reply is not None:
@@ -99,7 +99,7 @@ def test_docx_body_and_table_have_real_structural_locations(database_url: str, t
         normalized = ''.join(text.split())
         assert '项目ORBIT由林女士负责。' in normalized
         assert 'CEDAR星期五交付。' in normalized
-        assert all(block['page'] == 1 for block in result['content'])
+        assert [block['chunk_id'] for block in result['content']] == sorted(block['chunk_id'] for block in result['content'])
         return httpx.Response(200, json={'choices': [{'message': {'content': '林女士负责，周五交付。'}}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 8, 'total_tokens': 28}})
 
     configure_settings(database_url, tmp_path)
@@ -206,7 +206,7 @@ def test_pdf_scans_gaps_encryption_and_corruption_are_visible(database_url: str,
     configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path) as client:
         conversation = configure(client)
-        samples = [('scan.pdf', image_pdf_bytes(), 'OCR'), ('blank.pdf', pdf_bytes(['']), '没有可提取文字'), ('encrypted.pdf', pdf_bytes(['Secret'], encrypted=True), '已加密'), ('broken.pdf', b'%PDF-1.7\ninvalid', '损坏'), ('fake.pdf', b'plain text', '有效 PDF')]
+        samples = [('scan.pdf', image_pdf_bytes(), '视觉模型'), ('blank.pdf', pdf_bytes(['']), '没有可提取文字'), ('encrypted.pdf', pdf_bytes(['Secret'], encrypted=True), '已加密'), ('broken.pdf', b'%PDF-1.7\ninvalid', '损坏'), ('fake.pdf', b'plain text', '有效 PDF')]
         for filename, content, expected in samples:
             response = client.post(f'/api/conversations/{conversation}/attachments', files={'files': (filename, content)})
             assert response.status_code == 201

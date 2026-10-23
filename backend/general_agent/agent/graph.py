@@ -17,8 +17,9 @@ from general_agent.prompts import tool_result_fragment, tool_turn_fragment
 
 
 ToolExecutor = Callable[[MemoryCheckpoint, str, dict[str, Any], StoredSettings], dict[str, Any]]
+ToolResultImages = Callable[[list[dict[str, Any]]], list[ModelMessage]]
 LOGGER = logging.getLogger(__name__)
-DOCUMENT_TOOLS = {'search_documents', 'read_document'}
+DOCUMENT_TOOLS = {'search_documents', 'read_document', 'search_knowledge'}
 
 
 class AgentToolGraph:
@@ -45,6 +46,7 @@ class AgentToolGraph:
         assistant_message_id: UUID | None = None,
         on_content: Callable[[str], None] | None = None,
         on_tool_context: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None] | None = None,
+        on_tool_results: ToolResultImages | None = None,
     ) -> AgentState:
         """运行工具循环；文档工具每轮最多执行五次，其他工具保持失败重试合同。"""
 
@@ -121,8 +123,9 @@ class AgentToolGraph:
             return "execute_tools" if state["tool_calls"] else "finish"
 
         def execute_tools(state: AgentState) -> dict[str, Any]:
-            """逐个检查文档调用限额及其他工具重试额；读取预算包含同批已产生的工具结果。"""
+            """检查调用与重试限额；时间实时执行，文档读取预算包含同批已产生的结果。"""
             tool_messages: list[dict[str, Any]] = []
+            executed_results: list[dict[str, Any]] = []
             failures = dict(state["tool_failures"])
             document_calls = dict(state['document_calls'])
             known_tools = {tool["function"]["name"] for tool in tools}
@@ -156,11 +159,14 @@ class AgentToolGraph:
                                   'call_exhausted': document_calls[name] >= 5}
                     tool_messages.append({'role': 'tool', 'tool_call_id': call['id'],
                                           'content': json.dumps(result, ensure_ascii=False)})
+                    executed_results.append(result)
                     continue
                 tool_key = checkpoint.key("tools:result", [settings.revision, state["round_index"] - 1, call])
                 attempt_key = checkpoint.key("tools:attempt", [str(assistant_message_id), tool_key])
-                result = checkpoint.get(attempt_key)
-                if result is None:
+                # 当前时间每次执行都重新读取，不复用历史步骤中的旧时钟。
+                cacheable = name != 'get_current_time'
+                result = checkpoint.get(attempt_key) if cacheable else None
+                if result is None and cacheable:
                     cached = checkpoint.get(tool_key)
                     if cached is not None and "error" not in cached and cached.get("status") != "failed":
                         result = cached
@@ -193,12 +199,16 @@ class AgentToolGraph:
                         )
                 # 失败只属于当前回答，成功步骤跨回答重试复用，避免丢失已观察的记忆目标。
                 failed = "error" in result or result.get("status") == "failed"
-                checkpoint.put(attempt_key if failed else tool_key, result)
+                if cacheable:
+                    checkpoint.put(attempt_key if failed else tool_key, result)
                 tool_messages.append({
                     "role": "tool",
                     "tool_call_id": call["id"],
                     "content": json.dumps(result, ensure_ascii=False),
                 })
+                executed_results.append(result)
+            if on_tool_results is not None and executed_results:
+                tool_messages.extend(cast(list[dict[str, Any]], on_tool_results(executed_results)))
             LOGGER.info("event=tool_execute names=%s", [call.get("function", {}).get("name") for call in state["tool_calls"]])
             return {
                 "messages": [*state["messages"], *tool_messages],

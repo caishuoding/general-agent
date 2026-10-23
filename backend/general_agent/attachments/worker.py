@@ -99,8 +99,8 @@ def main() -> None:
     logging.disable(logging.CRITICAL)
     from general_agent.attachments.documents import parse_docx, parse_pdf
 
-    path, extension = Path(sys.argv[1]), sys.argv[2]
-    result = parse_pdf(path) if extension == '.pdf' else parse_docx(path)
+    path, extension, image_directory = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+    result = parse_pdf(path, image_directory) if extension == '.pdf' else parse_docx(path, image_directory)
     payload = result.model_dump_json().encode('utf-8') + b'\n'
     if len(payload) > MAX_DOCUMENT_OUTPUT_BYTES:
         raise RuntimeError('文档解析结果超过输出资源限制。')

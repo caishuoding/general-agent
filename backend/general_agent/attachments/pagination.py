@@ -6,17 +6,30 @@ import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from uuid import uuid4
+
+from docx import Document
+from pypdf import PdfReader
+
+from general_agent.attachments.document_images import bookmark_word_images
+from general_agent.attachments.word_structure import word_units
 
 
-def paginate_word(source: Path, destination: Path) -> None:
-    """独立配置排版 DOCX，macOS 显式提供系统中文字体，转换失败时不发布副本。"""
+def paginate_word(
+    source: Path, destination: Path,
+) -> tuple[int, dict[int, tuple[int, int]], dict[int, int]]:
+    """用不可见书签映射 Word 正文块和内嵌图片页码，不修改原件。"""
     executable = os.environ.get('LIBREOFFICE_BINARY') or shutil.which('soffice')
     if not executable:
         raise ValueError('Word 自动分页需要 LibreOffice，请安装后重新处理附件。')
     with TemporaryDirectory(prefix='word-pagination-') as temporary:
         directory = Path(temporary)
         input_path = directory / 'source.docx'
-        shutil.copyfile(source, input_path)
+        document = Document(str(source))
+        prefix = 'GA' + uuid4().hex[:16]
+        units = word_units(document, bookmark_prefix=prefix)
+        image_names = bookmark_word_images(document, prefix)
+        document.save(str(input_path))
         profile = directory / 'profile'
         if sys.platform == 'darwin':
             # 部分无界面发行版只加载私有字体；缺字会破坏 PDF 的中文字符映射。
@@ -29,7 +42,8 @@ def paginate_word(source: Path, destination: Path) -> None:
         try:
             result = subprocess.run(
                 [executable, f'-env:UserInstallation={profile.as_uri()}', '--headless', '--nologo',
-                 '--nodefault', '--norestore', '--convert-to', 'pdf:writer_pdf_Export',
+                 '--nodefault', '--norestore', '--convert-to',
+                 'pdf:writer_pdf_Export:{"ExportBookmarksToPDFDestination":{"type":"boolean","value":"true"}}',
                  '--outdir', str(directory), str(input_path)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60, check=False,
             )
@@ -38,4 +52,25 @@ def paginate_word(source: Path, destination: Path) -> None:
         output = directory / 'source.pdf'
         if result.returncode != 0 or not output.is_file() or not 0 < output.stat().st_size <= 80_000_000:
             raise ValueError('Word 自动分页失败或副本超过 80 MB，请简化后重新上传。')
+        reader = PdfReader(output, strict=True)
+        if len(reader.pages) > 200:
+            raise ValueError('单份 Word 最多 200 页，请拆分后上传。')
+        pages: dict[str, int] = {}
+        for name, target in reader.named_destinations.items():
+            page = reader.get_destination_page_number(target)
+            if page is not None:
+                pages[name.lstrip('/')] = page + 1
+        positions: dict[int, tuple[int, int]] = {}
+        for ordinal in range(1, len(units) + 1):
+            start, end = pages.get(f'{prefix}S{ordinal}'), pages.get(f'{prefix}E{ordinal}')
+            if start is None or end is None or start > end:
+                raise ValueError('Word 原生块的分页定位失败，未生成不准确的页码。')
+            positions[ordinal] = (start, end)
+        image_positions: dict[int, int] = {}
+        for ordinal, name in enumerate(image_names, 1):
+            page = pages.get(name)
+            if page is None:
+                raise ValueError('Word 内嵌图片的分页定位失败，未生成不准确的页码。')
+            image_positions[ordinal] = page
         shutil.copyfile(output, destination)
+        return len(reader.pages), positions, image_positions

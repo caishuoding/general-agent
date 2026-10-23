@@ -22,10 +22,11 @@ import {
 } from "./api";
 import { AttachmentPanel } from "./AttachmentPanel";
 import { LoginScreen, PasswordChangeScreen } from "./AuthScreens";
+import { KnowledgePanel, KnowledgeSelector } from './KnowledgePanel';
 
-type Screen = "chat" | "password";
+type Screen = "chat" | "password" | "knowledge";
 
-// 展示响应式会话工作区、消息内附件与来源删除状态，并隔离过期异步响应。
+// 展示响应式会话与独立知识库入口，保持附件和知识库选择各自的业务边界。
 export function App() {
   const [mobile, setMobile] = useState(window.matchMedia("(max-width: 800px)").matches);
   const [navigationOpen, setNavigationOpen] = useState(false);
@@ -164,6 +165,9 @@ export function App() {
   // 返回聊天工作区。
   function returnToChat() { setScreen("chat"); }
 
+  /** 打开独立知识库管理页，同时关闭手机导航抽屉。 */
+  function openKnowledge() { setNavigationOpen(false); setScreen('knowledge'); }
+
   // 当前会话最多有一条正在生成的回答。
   const generating = conversation?.messages.find(
     // 从持久化消息状态确定需要订阅的回答。
@@ -230,7 +234,7 @@ export function App() {
   }
 
   useEffect(
-    // 首次进入时读取服务端登录会话，未登录时只显示登录页。
+    // 首次进入时读取登录会话；确认普通用户后先进入加载态，避免聊天区短暂可用。
     function restoreSession() {
       let mounted = true;
       // 只在组件仍有效时应用会话恢复结果。
@@ -242,6 +246,7 @@ export function App() {
             window.location.replace("/admin");
             return;
           }
+          setLoading(true);
           setUser(current);
         } catch {
           if (mounted) setUser(null);
@@ -419,19 +424,21 @@ export function App() {
     }
   }
 
-  // 登录成功后保存当前账号并触发工作区加载。
+  // 登录成功后先进入工作区加载态，再保存账号，避免暴露未初始化的聊天控件。
   function handleAuthenticated(next: AuthUser) {
     setError("");
     if (next.role === "admin") {
       window.location.replace("/admin");
       return;
     }
+    setLoading(true);
     setUser(next);
   }
 
-  // 强制改密成功后更新当前账号状态。
+  // 强制改密成功后进入加载态并更新账号，确保聊天区只在工作区就绪后开放。
   function handlePasswordChanged(next: AuthUser) {
     setError("");
+    setLoading(true);
     setUser(next);
     setScreen("chat");
   }
@@ -694,7 +701,7 @@ export function App() {
           </span>
           <div>
             <strong>对话</strong>
-            <span>留一点空间，给想法。</span>
+            <span>一处会记住你的对话空间</span>
           </div>
         </div>
         <button
@@ -704,6 +711,8 @@ export function App() {
         >
           <span aria-hidden="true">＋</span>新建会话
         </button>
+        <button className="conversation-button" onClick={openKnowledge} aria-pressed={screen === 'knowledge'}>知识库</button>
+        {screen === 'knowledge' && <button className="conversation-button" onClick={returnToChat}>返回对话</button>}
         <div className="section-label">
           你的会话 <span>{conversations.length || ""}</span>
         </div>
@@ -736,7 +745,7 @@ export function App() {
             <button ref={navigationTrigger} className="navigation-toggle" type="button" aria-label="打开会话列表" aria-expanded={navigationOpen} aria-controls="conversation-navigation" onClick={openNavigation}>☰</button>
             <h1>个人对话空间</h1>
             <span className="topbar-divider">/</span>
-            <span className="topbar-subtitle">日常、灵感与思考</span>
+            <span className="topbar-subtitle">{screen === "knowledge" ? "长期资料" : conversation?.title || "日常、灵感与思考"}</span>
           </div>
           <span className="user-pill">{user.username}</span>
         </header>
@@ -745,6 +754,7 @@ export function App() {
             {error}
           </div>
         )}
+        {screen === 'knowledge' ? <KnowledgePanel /> : <>
         <SourceDeletionPending revision={sourceRevision} onChanged={refreshSources} />
         {deleteTarget && <SourceDeletion key={deleteTarget.path} target={deleteTarget} onClose={closeDeletion} onChanged={refreshSources} />}
         {!mobile && conversation && <button className="delete-conversation" onClick={deleteConversation}>删除当前会话</button>}
@@ -760,17 +770,13 @@ export function App() {
                     <div className="hello-mark" aria-hidden="true">
                       ✳
                     </div>
-                    <div className="eyebrow">从一个问题开始</div>
-                    <h2>今天，想聊些什么？</h2>
-                    <p>
-                      整理思路、写一段文字，
-                      <br />
-                      或把脑海里还没成形的想法说出来。
-                    </p>
+                    <div className="eyebrow">开始一段对话</div>
+                    <h2>把还没想清楚的事，放在这里。</h2>
+                    <p>一句话、一份资料，或一个还没成形的念头。先说出来，再慢慢理清。</p>
                     <div className="topic-tags">
-                      <span>日常问答</span>
-                      <span>写作灵感</span>
-                      <span>梳理想法</span>
+                      <span>问一个问题</span>
+                      <span>理清一件事</span>
+                      <span>读一份资料</span>
                     </div>
                   </section>
                 ) : (
@@ -798,6 +804,7 @@ export function App() {
             <div className="composer-wrap">
               {streamNotice && <p className="stream-notice" role="status">{streamNotice}</p>}
               <form className="composer" ref={composer} onSubmit={send}>
+                {conversation && <KnowledgeSelector key={conversation.id} conversationId={conversation.id} disabled={!!pending || !!generating || changingRun} />}
                 <AttachmentPanel revision={sourceRevision} resetToken={attachmentReset} onDelete={deleteAttachment} conversationId={activeId.current} disabled={!!pending || !!generating || changingRun || creating || loading} />
                 <textarea
                   ref={draftInput}
@@ -836,6 +843,7 @@ export function App() {
               <p className="composer-note">回答可能有误，请核对重要信息。停止生成不会撤回已经发出的服务请求。</p>
             </div>
         </div>
+        </>}
       </main>
     </div>
   );

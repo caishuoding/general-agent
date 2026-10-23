@@ -20,15 +20,21 @@ certifi==2026.7.22
     #   httpx
     #   requests
 cffi==2.1.1
-    # via argon2-cffi-bindings
+    # via
+    #   argon2-cffi-bindings
+    #   cryptography
 charset-normalizer==3.5.2
-    # via requests
+    # via
+    #   pdfminer-six
+    #   requests
 click==8.5.0
     # via
     #   huggingface-hub
     #   uvicorn
 colorama==0.4.6 ; sys_platform == 'win32'
     # via tqdm
+cryptography==50.0.2
+    # via pdfminer-six
 distro==1.9.0
     # via langsmith
 fastapi==0.143.1
@@ -110,8 +116,14 @@ packaging==26.3
     #   huggingface-hub
     #   langchain-core
     #   langsmith
-pillow==12.3.0
+pdfminer-six==20251230
+    # via pdfplumber
+pdfplumber==0.11.9
     # via general-agent
+pillow==12.3.0
+    # via
+    #   general-agent
+    #   pdfplumber
 psycopg==3.3.6
     # via general-agent
 psycopg-binary==3.3.6 ; implementation_name != 'pypy'
@@ -130,6 +142,8 @@ pydantic-core==2.50.1
     # via pydantic
 pypdf==6.20.1
     # via general-agent
+pypdfium2==5.14.0
+    # via pdfplumber
 python-docx==1.2.0
     # via general-agent
 python-multipart==0.0.32

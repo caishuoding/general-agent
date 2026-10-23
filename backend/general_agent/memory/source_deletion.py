@@ -80,7 +80,7 @@ class SourceDeletion:
         return self.resume(identifier, account_id)
 
     def invalidate(self, connection: Any, identifier: UUID) -> None:
-        """撤回来源关联的旧调用和自动记忆缓存，保留单附件所属会话的已完成正文。"""
+        """撤回来源关联的旧调用并清空所有搜索词和缓存，保留单附件会话的已完成正文。"""
         row=connection.execute('SELECT * FROM source_deletions WHERE id=%s',(identifier,)).fetchone()
         message_ids=row['message_ids']
         connection.execute('DELETE FROM memory_native_steps WHERE message_id=ANY(%s)',(message_ids,))
@@ -102,7 +102,7 @@ class SourceDeletion:
         connection.execute('UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,result=NULL,response_status=NULL WHERE id=ANY(%s)',(list(operations),))
         connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE operation_id=ANY(%s) AND status='reserved'",(list(operations),))
         connection.execute("UPDATE messages SET status='stopped',content='',error='来源已删除，本次生成已失效。' WHERE operation_id=ANY(%s) AND status='generating'",(list(operations),))
-        connection.execute("UPDATE search_requests SET status='expired',query='',results='[]',sources='[]',purpose='',expires_at=0,error='来源已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
+        connection.execute("UPDATE search_requests SET status='expired',query='',completed_queries='{}',results='[]',sources='[]',purpose='',expires_at=0,error='来源已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
         connection.execute("UPDATE messages SET web_sources='[]' WHERE operation_id=ANY(%s)",(list(operations),))
         for message_id in message_ids:
             connection.execute('INSERT INTO memory_source_suppressions(message_id) VALUES(%s) ON CONFLICT DO NOTHING',(message_id,))

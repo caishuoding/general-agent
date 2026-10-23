@@ -64,7 +64,7 @@ class Mem0Client:
         return self._request("POST", "/memories", json=body)
 
     def search(self, query: str, user_id: str, limit: int = 50, filters: Mapping[str, Any] | None = None) -> Any:
-        """调用 Mem0 语义搜索并返回官方响应。"""
+        """调用 Mem0 长期记忆搜索并返回官方响应；混合排序由 Mem0 内部实现。"""
         body: dict[str, Any] = {"query": query, "user_id": user_id, "limit": limit}
         if filters:
             body["filters"] = dict(filters)

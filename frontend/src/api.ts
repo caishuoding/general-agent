@@ -23,6 +23,7 @@ export type Message = {
   attachments: MessageAttachment[];
   search_action: { id: string; query: string; status: string; revision: string; purpose: string; sources: { id: string; label: string }[]; error: string | null } | null;
   web_sources: { key: string; title: string; url: string; excerpt: string }[];
+  knowledge_sources: { key: string; knowledge_base_id: string; knowledge_base_name: string; document_id: string; filename: string; chunk_id: number; location: string; excerpt: string; image_id: string | null; kind?: "text" | "table" | "image" }[];
   reply_to: string | null;
   error: string | null;
   created_at: string;

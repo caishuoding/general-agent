@@ -14,6 +14,8 @@ from psycopg.types.json import Jsonb
 from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.provider import ModelClient
 from general_agent.infrastructure.settings import EmbeddingSettingsStore
+from general_agent.attachments.knowledge import rank_chunks
+from general_agent.infrastructure.provider import ModelFailure
 
 RERANK_URL = 'https://open.bigmodel.cn/api/paas/v4/rerank'
 
@@ -85,20 +87,7 @@ class DocumentRetrieval:
         if current is None or current.revision != settings.revision:
             raise ValueError('embedding_unavailable')
         rows = refresh(rows)
-        scored: list[tuple[float, int]] = []
-        for index, row in enumerate(rows):
-            vector = row['embedding']
-            if row['embedding_revision'] != settings.revision or not isinstance(vector, list) or len(vector) != settings.dimensions:
-                raise ValueError('embedding_unavailable')
-            if any(type(value) not in (int, float) or not math.isfinite(value) for value in vector):
-                raise ValueError('embedding_unavailable')
-            norm = math.hypot(*vector)
-            if not norm:
-                raise ValueError('embedding_unavailable')
-            similarity = sum((left / query_norm) * (right / norm) for left, right in zip(query_vector, vector))
-            scored.append((similarity, index))
-        scored.sort(key=cosine_sort_key)
-        return [rows[index] for _, index in scored[:limit]]
+        return rank_vectors(rows, query_vector, settings.dimensions, settings.revision, limit)
 
     def rerank(self, rows: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
         """按官方 rerank 协议重排完整候选，严格验证结果身份，失败不回显响应或凭据。"""
@@ -142,3 +131,57 @@ class DocumentRetrieval:
 def cosine_sort_key(item: tuple[float, int]) -> tuple[float, int]:
     """按相关性降序返回候选，同分时沿用输入次序。"""
     return -item[0], item[1]
+
+
+def rank_vectors(rows: list[dict[str, Any]], query: list[float], dimensions: int, revision: str,
+                 limit: int) -> list[dict[str, Any]]:
+    """按同一空间的有效向量执行精确余弦排序；附件和知识库复用数值校验与排序。"""
+    query_norm = math.hypot(*query)
+    if len(query) != dimensions or not query_norm:
+        raise ValueError('embedding_unavailable')
+    scored: list[tuple[float, int]] = []
+    for index, row in enumerate(rows):
+        vector = row['embedding']
+        if row['embedding_revision'] != revision or not isinstance(vector, list) or len(vector) != dimensions:
+            raise ValueError('embedding_unavailable')
+        if any(type(value) not in (int, float) or not math.isfinite(value) for value in vector):
+            raise ValueError('embedding_unavailable')
+        norm = math.hypot(*vector)
+        if not norm:
+            raise ValueError('embedding_unavailable')
+        similarity = sum((left / query_norm) * (right / norm) for left, right in zip(query, vector))
+        scored.append((similarity, index))
+    scored.sort(key=cosine_sort_key)
+    return [rows[index] for _, index in scored[:limit]]
+
+
+def hybrid_retrieve(rows: list[dict[str, Any]], query: str, limit: int,
+                    semantic_search: Callable[[list[dict[str, Any]], str, int], list[dict[str, Any]]],
+                    rerank: Callable[[list[dict[str, Any]], str], list[dict[str, Any]]],
+                    refresh: Callable[[list[dict[str, Any]]], list[dict[str, Any]]]) -> dict[str, Any]:
+    """复用 BM25、语义、RRF、重排和降级流程，来源授权与存储由各业务回调核验。"""
+    candidates = max(30, limit)
+    lexical = rank_chunks(rows, query, candidates)
+    semantic: list[dict[str, Any]] = []
+    degraded: list[str] = []
+    if rows:
+        try:
+            semantic = semantic_search(rows, query, candidates)
+        except (ValueError, OSError, ModelFailure, httpx.HTTPError):
+            degraded.append('embedding_unavailable')
+    fused = refresh(reciprocal_rank_fusion([lexical, semantic], candidates))
+    reranked = False
+    if fused:
+        try:
+            fused = rerank(fused, query)
+            reranked = True
+        except (ValueError, OSError, httpx.HTTPError) as error:
+            degraded.append('rerank_input_too_long' if str(error) == 'rerank_input_too_long' else 'rerank_unavailable')
+    results = refresh(fused)[:limit]
+    public = [{**{key: value for key, value in row.items() if key not in ('embedding', 'embedding_revision')},
+               'document_id': str(row['document_id']),
+               'image_id': str(row['image_id']) if row.get('image_id') else None} for row in results]
+    return {'results': public, 'limit': limit,
+            'retrieval': {'mode': 'hybrid' if semantic else 'bm25', 'bm25_candidates': len(lexical),
+                          'vector_candidates': len(semantic), 'fused_candidates': len(fused),
+                          'reranked': reranked, 'degraded': degraded}}

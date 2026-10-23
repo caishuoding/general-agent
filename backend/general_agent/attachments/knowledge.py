@@ -1,40 +1,99 @@
-"""保存会话文档的结构原文和独立切片索引，不接触长期记忆。"""
+"""保存会话文档共用切片及位置元数据，不另存解析正文，也不接触长期记忆。"""
 
+import os
 import re
+from pathlib import Path
 from math import log
 from bisect import bisect_left, bisect_right
 from collections import Counter
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from psycopg.types.json import Jsonb
+from psycopg import sql
+
+from general_agent.infrastructure.tokens import TokenCounter
+from general_agent.infrastructure.settings import SettingsStore
 
 MAX_DOCUMENT_UNITS = 20_000
 
 
 class DocumentUnit(BaseModel):
-    """表示一个页内段落；非分页文字使用全局段落编号，空白页仍保留位置。"""
+    """保存原文块及真实位置；Word 额外保留标题、表格行、所属章节和跨页范围。"""
 
     page: int | None = None
     paragraph: int
     content: str
+    kind: Literal['paragraph', 'heading', 'table_row'] = 'paragraph'
+    heading_level: int | None = None
+    table: int | None = None
+    row: int | None = None
+    section: list[str] = Field(default_factory=list)
+    location: str | None = None
+    end_page: int | None = None
+
+
+def default_chunk_counter() -> TokenCounter:
+    """为未绑定应用配置的调用提供显式标记的保守 Token 计数，不猜用其他模型分词器。"""
+    return TokenCounter('document-default')
 
 
 @dataclass(frozen=True)
 class ChunkPolicy:
-    """管理包含重叠的切片上限、重叠目标及检索片数，不添加 Token 预算。"""
+    """管理 Token 软上限、完整块容差和正文重叠，不再使用字符数作为切片预算。"""
 
-    characters: int = 1500
+    tokens: int = 800
     results: int = 5
-    overlap: int = 200
+    overlap: int = 160
+    overflow: int = 200
+    counter: TokenCounter = field(default_factory=default_chunk_counter, compare=False, repr=False)
 
     def __post_init__(self) -> None:
-        """校验切片、返回数量及重叠目标；实际重叠还受新内容空间限制。"""
-        if not 100 <= self.characters <= 10000 or not 1 <= self.results <= 50:
-            raise ValueError('切片字符数需为 100–10000，返回片数需为 1–50。')
-        if not 0 <= self.overlap <= 10000:
-            raise ValueError('切片重叠目标需为 0–10000 字符。')
+        """校验预算，并将正文重叠限制在目标 Token 数的百分之二十以内。"""
+        if not 100 <= self.tokens <= 10000 or not 1 <= self.results <= 50:
+            raise ValueError('切片目标需为 100–10000 Token，返回片数需为 1–50。')
+        if not 0 <= self.overlap <= 10000 or not 0 <= self.overflow <= 200:
+            raise ValueError('重叠需为 0–10000 Token，完整块容差需为 0–200 Token。')
+        object.__setattr__(self, 'overlap', min(self.overlap, self.tokens // 5))
+
+    @property
+    def max_tokens(self) -> int:
+        """返回包含重叠和表头在内的绝对 Token 上限。"""
+        return self.tokens + self.overflow
+
+    @property
+    def signature(self) -> str:
+        """标识实际切片规则与计数快照，供结果追溯，不要求随 LLM 切换重切旧文档。"""
+        return f'{self.layout_signature}:{self.counter.fingerprint}'
+
+    @property
+    def layout_signature(self) -> str:
+        """仅标识切片结构和预算规则，使 LLM 切换不会单独触发旧文档重切。"""
+        return f'markdown-token-v1:{self.tokens}:{self.overflow}:{self.overlap}'
+
+    def end(self, text: str, start: int, budget: int, stop: int) -> int:
+        """返回预算内的字符结束位置，逐步扩展窗口，避免反复分词整个长文档。"""
+        if budget <= 0:
+            return start
+        limit = min(stop, start + max(1, budget))
+        while limit < stop and self.counter.count(text[start:limit]) <= budget:
+            limit = min(stop, start + (limit - start) * 2)
+        return start + len(self.counter.prefix(text[start:limit], budget))
+
+
+def configured_chunk_policy(directory: Path) -> ChunkPolicy:
+    """按当前回答 LLM 创建独立计数快照，附件与知识库共用该选择规则。"""
+    settings = SettingsStore(directory).read()
+    override = os.environ.get('DOCUMENT_CHUNK_TOKENIZER_MODEL')
+    if settings is not None and override:
+        settings = settings.model_copy(update={'model': override})
+    counter = TokenCounter.for_settings(settings, directory)
+    return ChunkPolicy(int(os.environ.get('DOCUMENT_CHUNK_TOKENS', '800')),
+                       int(os.environ.get('DOCUMENT_SEARCH_RESULTS', '5')),
+                       int(os.environ.get('DOCUMENT_CHUNK_OVERLAP_TOKENS', '160')),
+                       int(os.environ.get('DOCUMENT_CHUNK_OVERFLOW_TOKENS', '200')), counter)
 
 
 def text_units(text: str, page: int | None = None) -> list[DocumentUnit]:
@@ -65,54 +124,66 @@ def sentence_ends(text: str) -> list[int]:
 
 
 def chunk_ranges(text: str, policy: ChunkPolicy, paragraph_ends: list[int] | None = None) -> list[tuple[int, int]]:
-    """递归选择段落、句子、分句、空白边界；重叠整句且每片必须推进原文。"""
+    """按 Token 软上限递归选择自然边界，最多使用两百容差保留完整块，重叠不超过两成。"""
     paragraphs = sorted(set(paragraph_ends if paragraph_ends is not None else
                             [match.end() for match in re.finditer(r'\n[ \t]*\n\s*', text)]))
     sentences = sentence_ends(text)
+    sentence_boundaries = set(sentences)
     clauses = [match.end() for match in re.finditer(r'[；;，,、：:]+[ \t]*', text)]
     spaces = [match.end() for match in re.finditer(r'\s+', text)]
-    # 章节边界不跨片、不重叠；分页本身不阻断连续正文。
     sections = sorted({0, len(text), *[match.start() for match in re.finditer(
         r'(?m)^[ \t]{0,3}(?:#{1,6}[ \t]+[^\n]+|第[一二三四五六七八九十百千零〇\d]+[章节篇部][^\n]*)', text)]})
     ranges: list[tuple[int, int]] = []
     for section_start, section_end in zip(sections, sections[1:]):
         start = previous_end = section_start
         while previous_end < section_end:
-            cap = min(start + policy.characters, section_end)
+            soft = policy.end(text, start, policy.tokens, section_end)
+            hard = policy.end(text, start, policy.max_tokens, section_end)
             next_sentence = sentences[bisect_right(sentences, previous_end)]
-            if cap < next_sentence <= min(previous_end + policy.characters, section_end):
-                # 重叠导致新句放不下时，先缩减重叠，避免把原本可完整容纳的句子拆碎。
+            if hard < next_sentence <= policy.end(text, previous_end, policy.max_tokens, section_end):
                 start = previous_end
-                cap = min(start + policy.characters, section_end)
-            if cap <= previous_end:
+                soft = policy.end(text, start, policy.tokens, section_end)
+                hard = policy.end(text, start, policy.max_tokens, section_end)
+            if soft <= previous_end:
                 start = previous_end
-                cap = min(start + policy.characters, section_end)
-            end = cap
-            if cap < section_end:
-                for boundaries in (paragraphs, sentences, clauses, spaces):
-                    index = bisect_right(boundaries, cap) - 1
-                    if index >= 0 and boundaries[index] > previous_end and text[previous_end:boundaries[index]].strip():
-                        end = boundaries[index]
+                soft = policy.end(text, start, policy.tokens, section_end)
+                hard = policy.end(text, start, policy.max_tokens, section_end)
+            if hard == section_end:
+                end = section_end
+            else:
+                end = soft
+                for boundaries, extend in ((paragraphs, True), (sentences, True), (clauses, False), (spaces, False)):
+                    following = bisect_left(boundaries, soft)
+                    if extend and following < len(boundaries) and previous_end < boundaries[following] <= hard:
+                        end = boundaries[following]
                         break
+                    preceding = bisect_right(boundaries, soft) - 1
+                    if preceding >= 0 and boundaries[preceding] > previous_end and text[previous_end:boundaries[preceding]].strip():
+                        end = boundaries[preceding]
+                        break
+            if end <= previous_end:
+                raise ValueError('Token 预算不足以容纳一个原文字符。')
             ranges.append((start, end))
             previous_end = end
             if not policy.overlap:
                 start = end
                 continue
-            # 尾部不足目标时也允许带上一句，但绝不让重叠占满整片。
-            lower = max(start, section_start, end - policy.characters + 1)
-            candidates = [lower] if lower == start else []
-            left = bisect_right(sentences, lower)
-            right = bisect_left(sentences, end)
-            candidates.extend(sentences[left:right])
-            fitting = [boundary for boundary in candidates if end - boundary <= policy.overlap]
+            candidates = [start, *sentences[bisect_right(sentences, start):bisect_left(sentences, end)]]
+            fitting = [boundary for boundary in candidates if policy.counter.count(text[boundary:end]) <= policy.overlap]
             if fitting:
                 start = fitting[0]
-            elif candidates:
-                start = candidates[-1]
+            elif len(candidates) > 1 or end in sentence_boundaries:
+                start = end
             else:
-                # 无完整句子可重叠时，使用递归兜底边界或字符片段。
-                start = max(lower, end - min(policy.overlap, policy.characters - 1))
+                # 超长无句末片段退到预算内尾部，再优先对齐分句或空白。
+                low, high = start, end
+                while low < high:
+                    middle = (low + high) // 2
+                    if policy.counter.count(text[middle:end]) <= policy.overlap:
+                        high = middle
+                    else:
+                        low = middle + 1
+                start = low
                 for boundaries in (clauses, spaces):
                     index = bisect_left(boundaries, start)
                     if index < len(boundaries) and boundaries[index] < end:
@@ -130,34 +201,206 @@ def search_terms(text: str) -> list[str]:
     return terms
 
 
-def store_units(connection: Any, identifier: UUID, units: list[DocumentUnit], policy: ChunkPolicy) -> None:
-    """原子替换原文与递归重叠切片，保存跨段、跨页片段两端的准确位置。"""
-    connection.execute('DELETE FROM document_units WHERE attachment_id=%s', (identifier,))
+@dataclass(frozen=True)
+class ChunkSpec:
+    """以原文范围和结构性包装描述切片；重复表头不冒充段内原文偏移。"""
+
+    start: int
+    end: int
+    prefix: str = ''
+    suffix: str = ''
+
+
+
+def markdown_cell_end(text: str, start: int, end: int, stop: int) -> int:
+    """将续片边界退到 Markdown 转义、HTML 实体和换行标记之外，避免拆坏单元格语法。"""
+    for match in re.compile(r'\\.|&(?:amp|lt|gt);|<br>').finditer(text, start, min(stop, end + 6)):
+        left, right = match.start(), match.end()
+        if left < end < right:
+            return left
+        if left >= end:
+            break
+    return end
+
+
+def table_specs(group: list[DocumentUnit], offset: int, policy: ChunkPolicy) -> list[ChunkSpec]:
+    """按完整 Markdown 行分片且重复表头；超长单行按单元格续片，包装均计入预算。"""
+    text = ''.join(unit.content for unit in group)
+    header = group[0].content
+    if policy.counter.count(text) <= policy.max_tokens:
+        return [ChunkSpec(offset, offset + len(text))]
+    if policy.counter.count(header) >= policy.max_tokens:
+        raise ValueError('表头已达到切片 Token 上限，请简化过宽的表格。')
+    specs: list[ChunkSpec] = []
+    cursor, index = len(header), 1
+    while index < len(group):
+        row = group[index].content
+        if policy.counter.count(header + row) > policy.max_tokens:
+            # 单行超限时保留列位置，每个片段只续写一列，其余列留空，不重复数据行。
+            pipes = [match.start() for match in re.finditer(r'(?<!\\)\|', row)]
+            columns = len(pipes) - 1
+            for column, (left, right) in enumerate(zip(pipes, pipes[1:])):
+                start, stop = left + 1, right
+                prefix = header + '| ' + ' | ' * column
+                suffix = ' | ' * (columns - column - 1) + ' |\n'
+                overhead = policy.counter.count(prefix + suffix)
+                if overhead >= policy.max_tokens:
+                    raise ValueError('表头和列结构已达到切片 Token 上限，请简化表格。')
+                while start < stop:
+                    end = policy.end(row, start, policy.tokens - overhead, stop)
+                    if end == start:
+                        end = policy.end(row, start, policy.max_tokens - overhead, stop)
+                    while end > start and policy.counter.count(prefix + row[start:end] + suffix) > policy.max_tokens:
+                        end -= 1
+                    end = markdown_cell_end(row, start, end, stop)
+                    if end <= start:
+                        raise ValueError('表格包装后没有足够 Token 空间容纳单元格。')
+                    specs.append(ChunkSpec(offset + cursor + start, offset + cursor + end, prefix, suffix))
+                    start = end
+            cursor += len(row)
+            index += 1
+            continue
+        end, body = cursor, ''
+        while index < len(group):
+            row = group[index].content
+            if policy.counter.count(header + body + row) > policy.max_tokens:
+                break
+            body += row
+            end += len(row)
+            index += 1
+            if policy.counter.count(header + body) >= policy.tokens:
+                break
+        specs.append(ChunkSpec(offset + cursor, offset + end, header))
+        cursor = end
+    return specs
+
+
+def chunk_specs(units: list[DocumentUnit], policy: ChunkPolicy) -> list[ChunkSpec]:
+    """Word 按章节、Word／PDF 按表格分组，普通正文沿用自然切点，单独保存结构包装。"""
+    specs: list[ChunkSpec] = []
+    offset, index = 0, 0
+    native = any(unit.location is not None for unit in units)
+    while index < len(units):
+        first = units[index]
+        group: list[DocumentUnit] = []
+        while index < len(units):
+            unit = units[index]
+            if native and group and (unit.kind == 'heading' or unit.section != first.section or unit.table != first.table):
+                break
+            group.append(unit)
+            index += 1
+        text = ''.join(unit.content for unit in group)
+        if native and first.table is not None:
+            specs.extend(table_specs(group, offset, policy))
+        else:
+            ends: list[int] = []
+            for unit in group:
+                ends.append((ends[-1] if ends else 0) + len(unit.content))
+            specs.extend(ChunkSpec(offset + start, offset + end) for start, end in chunk_ranges(text, policy, ends))
+        offset += len(text)
+    return specs
+
+
+def store_chunks(connection: Any, identifier: UUID, units: list[DocumentUnit], policy: ChunkPolicy,
+                 *, knowledge: bool = False) -> None:
+    """复用切片算法向指定业务的独立表写入正文，默认仍写附件表；表名只由内部白名单选择。"""
+    table, parent = ('knowledge_chunks', 'document_id') if knowledge else ('document_chunks', 'attachment_id')
+    connection.execute(sql.SQL('DELETE FROM {} WHERE {}=%s').format(sql.Identifier(table), sql.Identifier(parent)), (identifier,))
     chunks: list[tuple[Any, ...]] = []
     ends: list[int] = []
     total = 0
-    for ordinal, unit in enumerate(units, 1):
-        connection.execute(
-            'INSERT INTO document_units(attachment_id,ordinal,page,paragraph,content) VALUES(%s,%s,%s,%s,%s)',
-            (identifier, ordinal, unit.page, unit.paragraph, unit.content),
-        )
+    for unit in units:
         total += len(unit.content)
         ends.append(total)
     text = ''.join(unit.content for unit in units)
-    for start, end in chunk_ranges(text, policy, ends):
-        first, last = bisect_right(ends, start), bisect_left(ends, end)
-        start_offset = start - (ends[first - 1] if first else 0)
-        end_offset = end - (ends[last - 1] if last else 0)
-        content = text[start:end]
+    for spec in chunk_specs(units, policy):
+        first, last = bisect_right(ends, spec.start), bisect_left(ends, spec.end)
+        content = spec.prefix + text[spec.start:spec.end] + spec.suffix
         if not content.strip():
             continue
-        chunks.append((identifier, len(chunks) + 1, first + 1, last + 1, start_offset, end_offset,
-                       content, sorted(set(search_terms(content)))))
+        if policy.counter.count(content) > policy.max_tokens:
+            raise ValueError('切片正文和结构包装超过 Token 上限。')
+        start_unit, end_unit = units[first], units[last]
+        chunks.append((identifier, len(chunks) + 1, start_unit.page, end_unit.end_page or end_unit.page,
+                       start_unit.paragraph, end_unit.paragraph,
+                       Jsonb(start_unit.model_dump(exclude={'page', 'paragraph', 'content'}, exclude_none=True, exclude_defaults=True)),
+                       Jsonb(end_unit.model_dump(exclude={'page', 'paragraph', 'content'}, exclude_none=True, exclude_defaults=True)),
+                       content, sorted(set(search_terms(content))), spec.prefix, spec.suffix,
+                       policy.counter.count(content), policy.counter.method))
     if chunks:
         with connection.cursor() as cursor:
             cursor.executemany(
-                'INSERT INTO document_chunks(attachment_id,ordinal,unit_ordinal,end_unit_ordinal,start_offset,end_offset,content,terms) '
-                'VALUES(%s,%s,%s,%s,%s,%s,%s,%s)', chunks,
+                sql.SQL('INSERT INTO {}({},ordinal,page,end_page,paragraph,end_paragraph,structure,end_structure,'
+                'content,terms,context_prefix,context_suffix,token_count,token_count_method) '
+                'VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)').format(sql.Identifier(table), sql.Identifier(parent)), chunks,
+            )
+
+
+def store_document_images(
+    connection: Any,
+    identifier: UUID,
+    images: list[dict[str, Any]],
+) -> None:
+    """重建图片元数据并仅保存纯文字描述，旧结构化字段沿用数据库空默认值。"""
+    connection.execute('DELETE FROM document_images WHERE attachment_id=%s', (identifier,))
+    if not images:
+        return
+    rows = [
+        (
+            item['id'], identifier, item['ordinal'], item.get('page'), item.get('end_page'),
+            item['paragraph'], Jsonb(item.get('section', [])), item['location'],
+            item['storage_name'], item['sha256'], item['mime'], item['width'], item['height'],
+            item.get('description', ''), Jsonb(item['provider_file']) if item.get('provider_file') else None,
+            item['vision_status'], item.get('vision_model'), item.get('vision_revision'), item.get('vision_error'),
+        )
+        for item in images
+    ]
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            'INSERT INTO document_images('
+            'id,attachment_id,ordinal,page,end_page,paragraph,section,location,storage_name,sha256,mime,'
+            'width,height,description,provider_file,vision_status,'
+            'vision_model,vision_revision,vision_error'
+            ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+            rows,
+        )
+
+
+def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str, Any]], policy: ChunkPolicy,
+                       *, knowledge: bool = False) -> None:
+    """直接用图片描述原文生成切片，位置和章节仅存元数据，并绑定同域原图。"""
+    table, parent = ('knowledge_chunks', 'document_id') if knowledge else ('document_chunks', 'attachment_id')
+    next_ordinal = (connection.execute(
+        sql.SQL('SELECT COALESCE(MAX(ordinal),0)+1 AS ordinal FROM {} WHERE {}=%s').format(sql.Identifier(table), sql.Identifier(parent)),
+        (identifier,),
+    ).fetchone() or {'ordinal': 1})['ordinal']
+    rows: list[tuple[Any, ...]] = []
+    image_policy = replace(policy, overlap=0)
+    for image in images:
+        if image.get('vision_status') != 'complete':
+            continue
+        content = image['description']
+        structure = Jsonb({'kind': 'image', 'ordinal': image['ordinal'], 'caption': image.get('caption'),
+                           'section': image.get('section', []), 'location': image['location']})
+        for start, end in chunk_ranges(content, image_policy):
+            chunk = content[start:end]
+            if not chunk.strip():
+                continue
+            rows.append((
+                identifier, next_ordinal, image.get('page') or 1, image.get('end_page') or image.get('page') or 1,
+                image['paragraph'], image['paragraph'], structure, structure, chunk,
+                sorted(set(search_terms(chunk))), '', '', image['id'], image_policy.counter.count(chunk),
+                image_policy.counter.method,
+            ))
+            next_ordinal += 1
+    if rows:
+        with connection.cursor() as cursor:
+            cursor.executemany(
+                sql.SQL('INSERT INTO {}('
+                '{},ordinal,page,end_page,paragraph,end_paragraph,structure,end_structure,'
+                'content,terms,context_prefix,context_suffix,image_id,token_count,token_count_method'
+                ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)').format(sql.Identifier(table), sql.Identifier(parent)),
+                rows,
             )
 
 

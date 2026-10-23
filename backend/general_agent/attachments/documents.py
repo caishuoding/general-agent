@@ -14,12 +14,10 @@ from zipfile import ZipFile
 from xml.etree import ElementTree
 
 from docx import Document
-from docx.document import Document as WordDocument
-from docx.table import _Cell
-from docx.text.paragraph import Paragraph
 
 from pydantic import BaseModel, Field
 from pypdf import PdfReader, filters
+import pdfplumber
 
 from general_agent.attachments.limits import (
     MAX_DOCUMENT_CPU_SECONDS,
@@ -27,6 +25,14 @@ from general_agent.attachments.limits import (
     MAX_DOCUMENT_RSS_BYTES,
 )
 from general_agent.attachments.knowledge import DocumentUnit, text_units, MAX_DOCUMENT_UNITS
+from general_agent.attachments.word_structure import word_units
+from general_agent.attachments.pdf_structure import page_units
+from general_agent.attachments.document_images import (
+    ParsedImage,
+    extract_pdf_images,
+    extract_word_images,
+    figure_caption,
+)
 
 MAX_TEXT_CHARACTERS = 2_000_000
 
@@ -105,24 +111,57 @@ class DocumentInfo(BaseModel):
     missing_units: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     coverage: str = 'complete'
+    text_source: str | None = None
+    image_count: int = 0
 
 
 class ParsedDocument(BaseModel):
-    """可保存的文字片段、处理范围及真实失败原因。"""
-    chunks: list[tuple[str, str]] = Field(default_factory=list)
+    """传给切片器的临时解析块、处理范围及真实失败原因。"""
     info: DocumentInfo
     error: str | None = None
     units: list[DocumentUnit] = Field(default_factory=list)
+    images: list[ParsedImage] = Field(default_factory=list)
 
 
-def split_unit(location: str, text: str) -> list[tuple[str, str]]:
-    """保留整页或整段正文与位置；检索切片统一由知识库递归生成，避免重复正文。"""
-    return [(location, text)] if text.strip() else []
+def attach_pdf_captions(units: list[DocumentUnit], images: list[ParsedImage]) -> list[ParsedImage]:
+    """把同页图注与 PDF 图片按原文顺序绑定；数量不一致时只绑定可确定的部分。"""
+    captions: dict[int, list[str]] = {}
+    for unit in units:
+        if unit.page is None:
+            continue
+        caption = figure_caption(unit.content.strip())
+        if caption is not None:
+            captions.setdefault(unit.page, []).append(caption)
+    by_page: dict[int, list[int]] = {}
+    for index, image in enumerate(images):
+        if image.page is not None:
+            by_page.setdefault(image.page, []).append(index)
+    result = list(images)
+    for page, indexes in by_page.items():
+        page_captions = captions.get(page, [])
+        if len(indexes) == 1 and page_captions:
+            result[indexes[0]] = result[indexes[0]].model_copy(update={'caption': page_captions[0]})
+        elif len(indexes) == len(page_captions):
+            for index, caption in zip(indexes, page_captions):
+                result[index] = result[index].model_copy(update={'caption': caption})
+    return result
 
 
-def parse_pdf(path: Path) -> ParsedDocument:
-    """按固定物理页提取段落原文，保留空页和解析缺口，不做 OCR。"""
-    info = DocumentInfo(format='pdf', limitations=['仅提取文字；复杂图表、内嵌图片和特殊排版未被理解，需要将相关图像单独上传。'])
+def exclude_caption_units(units: list[DocumentUnit], images: list[ParsedImage]) -> None:
+    """从普通正文单位中移除已绑定图注，保留单位数量以维持分页位置映射。"""
+    captions = {image.caption.strip() for image in images if image.caption and image.caption.strip()}
+    if not captions:
+        return
+    for unit in units:
+        lines = unit.content.splitlines(keepends=True)
+        remaining = [line for line in lines if figure_caption(line.strip()) not in captions]
+        if len(remaining) != len(lines):
+            unit.content = ''.join(remaining)
+
+
+def parse_pdf(path: Path, image_directory: Path | None = None) -> ParsedDocument:
+    """提取 PDF 文字、表格和图片，图片由后续视觉阶段生成描述。"""
+    info = DocumentInfo(format='pdf', text_source='pdf_tables_v2', limitations=['SmartArt、EMF、WMF 和复杂矢量图表暂不解析。', '表格首行作为列头；无框表格仅接受稳定对齐和明显列间隙，复杂跨页或多级表头不保证还原。'])
     try:
         filters.ZLIB_MAX_OUTPUT_LENGTH = 10_000_000
         reader = PdfReader(path, strict=True)
@@ -131,65 +170,65 @@ def parse_pdf(path: Path) -> ParsedDocument:
         info.total_units = len(reader.pages)
         if info.total_units > 200:
             return ParsedDocument(info=info, error='单份 PDF 最多 200 页，请拆分后上传。')
-        chunks: list[tuple[str, str]] = []
+        try:
+            skipped_images: list[str] = []
+            images = extract_pdf_images(reader, image_directory, skipped_images)
+            info.missing_units.extend(skipped_images)
+        except ValueError as error:
+            return ParsedDocument(info=info, error=str(error))
+        info.image_count = len(images)
         units: list[DocumentUnit] = []
-        text_size = 0
-        for number, page in enumerate(reader.pages, 1):
-            try:
-                text = page.extract_text()
-            except Exception:
-                info.missing_units.append(f'第 {number} 页提取失败')
-                units.extend(text_units('', number))
-                continue
-            try:
-                units.extend(text_units(text, number))
-            except ValueError as error:
-                return ParsedDocument(info=info, error=str(error))
-            if len(units) > MAX_DOCUMENT_UNITS:
-                return ParsedDocument(info=info, error='文档段落数量超过 20,000 个资源限制，请拆分后上传。')
-            text_size += len(text)
-            if text_size > MAX_TEXT_CHARACTERS:
-                return ParsedDocument(info=info, error="文档提取文字超过 2,000,000 字符资源限制，请拆分后上传。")
-            if not text.strip():
-                info.missing_units.append(f'第 {number} 页没有可提取文字（可能是空白或扫描图像）')
-            else:
-                info.readable_units += 1
-                chunks.extend(split_unit(f'第 {number} 页', text))
+        text_size, table_count = 0, 0
+        with pdfplumber.open(path) as layout:
+            for number, page in enumerate(reader.pages, 1):
+                try:
+                    text = page.extract_text()
+                except Exception:
+                    info.missing_units.append(f'第 {number} 页提取失败')
+                    units.extend(text_units('', number))
+                    continue
+                text_size += len(text)
+                if text_size > MAX_TEXT_CHARACTERS:
+                    return ParsedDocument(info=info, error='文档提取文字超过 2,000,000 字符资源限制，请拆分后上传。')
+                structure = None
+                try:
+                    structure = layout.pages[number - 1]
+                    page_content, count = page_units(structure, number, table_count, text)
+                    table_count += count
+                except Exception as error:
+                    if isinstance(error, ValueError) and '资源限制' in str(error):
+                        return ParsedDocument(info=info, error=str(error))
+                    info.missing_units.append(f'第 {number} 页表格识别失败，已回退纯文字提取')
+                    page_content = text_units(text, number)
+                finally:
+                    if structure is not None:
+                        structure.close()
+                units.extend(page_content)
+                if len(units) > MAX_DOCUMENT_UNITS:
+                    return ParsedDocument(info=info, error='文档段落数量超过 20,000 个资源限制，请拆分后上传。')
+                if not any(unit.content.strip() for unit in page_content):
+                    info.missing_units.append(f'第 {number} 页没有可提取文字（可能是空白或扫描图像）')
+                else:
+                    info.readable_units += 1
+        if sum(len(unit.content) for unit in units) > MAX_TEXT_CHARACTERS:
+            return ParsedDocument(info=info, error='文档提取文字超过 2,000,000 字符资源限制，请拆分后上传。')
+        images = attach_pdf_captions(units, images)
+        exclude_caption_units(units, images)
+        info.readable_units = sum(bool(unit.content.strip()) for unit in units)
         info.coverage = 'partial' if info.missing_units else 'complete'
-        if not chunks:
-            return ParsedDocument(info=info, error='PDF 没有可提取文字；可能是扫描版或空白文档，本版本不提供 OCR。')
-        return ParsedDocument(chunks=chunks, info=info, units=units)
+        if not info.readable_units:
+            if not images:
+                return ParsedDocument(info=info, error='PDF 没有可提取文字或图片；可能是空白文档。')
+            info.coverage = 'partial'
+            info.missing_units.append('PDF 没有文字层，正在使用页面内嵌图片进行视觉理解')
+        return ParsedDocument(info=info, units=units, images=images)
     except Exception:
         return ParsedDocument(info=info, error='PDF 损坏或不是有效 PDF，无法读取文字。')
 
 
-def word_units(container: WordDocument | _Cell, prefix: str = '', depth: int = 0) -> list[tuple[str, str]]:
-    """按真实正文顺序展开段落和表格，保留空段落计数且不生成分页信息。"""
-    if depth > 8:
-        raise ValueError('DOCX 表格嵌套过深，请简化文档后上传。')
-    units: list[tuple[str, str]] = []
-    paragraphs, tables = 0, 0
-    for item in container.iter_inner_content():
-        if isinstance(item, Paragraph):
-            paragraphs += 1
-            location = f'{prefix}，段落 {paragraphs}' if prefix else f'正文段落 {paragraphs}'
-            units.append((location, item.text))
-        else:
-            tables += 1
-            table_prefix = f'{prefix}，嵌套表格 {tables}' if prefix else f'表格 {tables}'
-            seen: set[object] = set()
-            for row_number, row in enumerate(item.rows, 1):
-                for column_number, cell in enumerate(row.cells, 1):
-                    if cell._tc in seen:
-                        continue
-                    seen.add(cell._tc)
-                    units.extend(word_units(cell, f'{table_prefix}，第 {row_number} 行，第 {column_number} 列', depth + 1))
-    return units
-
-
-def parse_docx(path: Path) -> ParsedDocument:
-    """先限制ZIP展开与XML实体，再解析正文表格并说明修订及附属内容缺口。"""
-    info = DocumentInfo(format='docx', limitations=['仅提取正文及表格文字；复杂图表、内嵌图片和特殊排版未被理解，需要将相关图像单独上传。'])
+def parse_docx(path: Path, image_directory: Path | None = None) -> ParsedDocument:
+    """校验 ZIP 与 XML 后提取正文、表格及内嵌图片，并保留全部真实位置。"""
+    info = DocumentInfo(format='docx', text_source='word_native_markdown_v3', limitations=['SmartArt、EMF、WMF 和复杂矢量图表暂不解析。'])
     try:
         with ZipFile(path) as archive:
             entries = archive.infolist()
@@ -215,23 +254,34 @@ def parse_docx(path: Path) -> ParsedDocument:
                 info.missing_units.append('文本框文字不在当前提取范围。')
             if any(name.startswith(('word/header', 'word/footer', 'word/footnotes', 'word/endnotes', 'word/comments')) for name in names):
                 info.missing_units.append('页眉、页脚、脚注、尾注及批注不在当前提取范围。')
-        units = word_units(Document(str(path)))
-        if sum(len(text) for _, text in units) > MAX_TEXT_CHARACTERS:
+        document = Document(str(path))
+        units = word_units(document)
+        try:
+            skipped_images: list[str] = []
+            images = extract_word_images(document, image_directory, skipped_images)
+            info.missing_units.extend(skipped_images)
+        except ValueError as error:
+            return ParsedDocument(info=info, error=str(error))
+        info.image_count = len(images)
+        exclude_caption_units(units, images)
+        if sum(len(unit.content) for unit in units) > MAX_TEXT_CHARACTERS:
             raise ValueError('文档提取文字超过 2,000,000 字符资源限制，请拆分后上传。')
         info.total_units = len(units)
-        info.readable_units = sum(bool(text.strip()) for _, text in units)
+        info.readable_units = sum(bool(unit.content.strip()) for unit in units)
         info.coverage = 'partial' if info.missing_units else 'complete'
-        chunks = [chunk for location, text in units for chunk in split_unit(location, text)]
-        if not chunks:
-            return ParsedDocument(info=info, error='DOCX 没有可提取的正文或表格文字；图像和扫描内容不会自动识别。')
-        return ParsedDocument(chunks=chunks, info=info)
+        if not info.readable_units:
+            if not images:
+                return ParsedDocument(info=info, error='DOCX 没有可提取的正文、表格或图片。')
+            info.coverage = 'partial'
+            info.missing_units.append('DOCX 没有正文文字，正在使用内嵌图片进行视觉理解')
+        return ParsedDocument(info=info, units=units, images=images)
     except ValueError as error:
         return ParsedDocument(info=info, error=str(error))
     except Exception:
         return ParsedDocument(info=info, error='DOCX 损坏、受保护或不是有效 Word 文档，无法读取文字。')
 
 
-def parse_document(path: Path, extension: str) -> ParsedDocument:
+def parse_document(path: Path, extension: str, image_directory: Path) -> ParsedDocument:
     """隔离解析并监控实际内存及墙钟时间，异常子进程不能拖住应用线程或回显原始错误。"""
     info = DocumentInfo(format=extension.lstrip('.'))
     environment = {
@@ -243,7 +293,13 @@ def parse_document(path: Path, extension: str) -> ParsedDocument:
         'PYTHONUTF8': '1',
     }
     with TemporaryFile() as output:
-        process = subprocess.Popen([sys.executable, '-m', 'general_agent.attachments.worker', str(path.resolve()), extension], stdout=output, stderr=subprocess.DEVNULL, env=environment)
+        process = subprocess.Popen(
+            [sys.executable, '-m', 'general_agent.attachments.worker', str(path.resolve()), extension,
+             str(image_directory.resolve())],
+            stdout=output,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+        )
         try:
             deadline = monotonic() + 20
             while process.poll() is None:

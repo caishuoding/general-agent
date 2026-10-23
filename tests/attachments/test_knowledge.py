@@ -37,10 +37,10 @@ def owner(database_url: str, conversation: str) -> UUID:
     return cast(UUID, row['user_id'])
 
 
-def test_read_continuation_preserves_every_character_and_stays_in_budget() -> None:
-    """用小预算反复跨段、跨页续读，所有原文字符恰好返回一次。"""
+def test_read_continuation_preserves_whole_chunks_and_stays_in_budget() -> None:
+    """用小预算反复按整片续读，全部切片按序且恰好返回一次。"""
     counter = TokenCounter('no-official-tokenizer')
-    text = '付款条件："人民币"\\\n\t' * 70
+    text = '付款条件："人民币"\\\n\t' * 8
     units: list[dict[str, Any]] = [{'ordinal': 1, 'page': 1, 'paragraph': 1, 'content': text},
              {'ordinal': 2, 'page': 1, 'paragraph': 2, 'content': ''},
              {'ordinal': 3, 'page': 2, 'paragraph': 1, 'content': 'END\n' + text}]
@@ -48,7 +48,7 @@ def test_read_continuation_preserves_every_character_and_stays_in_budget() -> No
     collected: list[str] = []
     for _ in range(100):
         request = ReadDocumentInput(document_id=str(uuid4()), cursor=cursor)
-        remaining = [unit for unit in units if cursor is None or unit['ordinal'] >= cursor.unit]
+        remaining = [unit for unit in units if cursor is None or unit['ordinal'] >= cursor.chunk_id]
         result = DocumentTools.read_result(request, '报告.pdf', remaining, counter, 800)
         assert 'error' not in result
         assert counter.count(json.dumps(result, ensure_ascii=False)) <= 800
@@ -109,7 +109,8 @@ def test_invalid_document_json_consumes_call_limit() -> None:
 
 def test_document_search_is_complete_and_scoped(database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """检索只按片数返回完整切片，显式伪造其他会话或账号身份均拒绝。"""
-    monkeypatch.setenv('DOCUMENT_CHUNK_CHARACTERS', '200')
+    monkeypatch.setenv('DOCUMENT_CHUNK_TOKENS', '200')
+    monkeypatch.setenv('DOCUMENT_CHUNK_OVERFLOW_TOKENS', '0')
     monkeypatch.setenv('DOCUMENT_SEARCH_RESULTS', '2')
     configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path) as client:
@@ -119,7 +120,7 @@ def test_document_search_is_complete_and_scoped(database_url: str, tmp_path: Pat
         account = owner(database_url, first)
         result = attachments.documents.search(UUID(first), account, {'query': '交付延期'})
         assert len(result['results']) == 2
-        assert all(len(chunk['content']) == 200 for chunk in result['results'])
+        assert all(0 < TokenCounter('test').count(chunk['content']) <= 200 for chunk in result['results'])
         assert attachments.documents.search(UUID(second), account, {'query': '交付延期'})['results'] == []
         with pytest.raises(LookupError):
             attachments.documents.search(UUID(second), account, {'query': '交付', 'document_ids': [uploaded['id']]})
@@ -136,11 +137,11 @@ def test_too_many_short_paragraphs_fail_before_indexing(database_url: str, tmp_p
         listed = client.get(f'/api/conversations/{conversation}/attachments').json()[0]
         assert listed['status'] == 'failed' and '资源限制' in listed['error']
         with Database(database_url).connect() as connection:
-            assert connection.execute('SELECT * FROM document_units WHERE attachment_id=%s', (UUID(uploaded['id']),)).fetchall() == []
+            assert connection.execute('SELECT * FROM document_chunks WHERE attachment_id=%s', (UUID(uploaded['id']),)).fetchall() == []
 
 
 def test_pdf_reads_original_pages_and_honors_current_budget(database_url: str, tmp_path: Path) -> None:
-    """长页原文可跨切片连续读，按范围核验游标，并执行小于万 Token 的实际预算。"""
+    """长页按完整切片续读，按范围核验游标，并执行小于万 Token 的实际预算。"""
     configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path) as client:
         conversation = configure(client)
@@ -155,16 +156,16 @@ def test_pdf_reads_original_pages_and_honors_current_budget(database_url: str, t
         assert counter.count(json.dumps(first, ensure_ascii=False)) <= 1500
         assert first['content'][0]['content'] == text[:len(first['content'][0]['content'])]
         next_result = attachments.documents.read(UUID(conversation), account, {**request, 'cursor': first['next_cursor']}, counter, 20000)
-        assert next_result['content'][0]['start_offset'] == first['content'][0]['end_offset']
+        assert next_result['content'][0]['chunk_id'] > first['content'][-1]['chunk_id']
         assert counter.count(json.dumps(next_result, ensure_ascii=False)) <= 10000
         with pytest.raises(ValueError):
             attachments.documents.read(UUID(conversation), account, {**request, 'start_page': 2, 'end_page': 2, 'cursor': first['next_cursor']}, counter, 10000)
         second = attachments.documents.read(UUID(conversation), account, {'document_id': uploaded['id'], 'start_page': 2, 'end_page': 2}, counter, 10000)
-        assert second['content'][0]['content'] == 'PAGE_TWO'
+        assert 'PAGE_TWO' in ''.join(block['content'] for block in second['content'])
 
 
 def test_expiration_immediately_hides_and_cleans_knowledge(database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """到期先拒绝清单、下载和工具；清理失败后重试删除原文、切片及 Word 副本。"""
+    """到期先拒绝清单、下载和工具；清理失败后重试删除共用切片及 Word 副本。"""
     configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path) as client:
         conversation = configure(client)
@@ -191,14 +192,13 @@ def test_expiration_immediately_hides_and_cleans_knowledge(database_url: str, tm
         assert not (tmp_path / 'attachments' / str(identifier)).exists()
         assert not (tmp_path / 'attachments' / f'{identifier}.pdf').exists()
         with attachments.database.connect() as connection:
-            assert connection.execute('SELECT content,expired_cleaned FROM attachments WHERE id=%s', (identifier,)).fetchone() == {'content': None, 'expired_cleaned': True}
-            assert connection.execute('SELECT * FROM document_units WHERE attachment_id=%s', (identifier,)).fetchall() == []
+            assert connection.execute('SELECT expired_cleaned FROM attachments WHERE id=%s', (identifier,)).fetchone() == {'expired_cleaned': True}
             assert connection.execute('SELECT * FROM document_chunks WHERE attachment_id=%s', (identifier,)).fetchall() == []
 
 
 @pytest.mark.parametrize('version', [0, 1])
 def test_legacy_attachment_rebuild_keeps_original_ttl(database_url: str, tmp_path: Path, version: int) -> None:
-    """旧原文和固定字符索引均升级为第二版，升级重启不刷新附件有效期。"""
+    """旧附件从原件重建共用切片，升级重启不刷新附件有效期。"""
     configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path) as client:
         conversation = configure(client)
@@ -206,7 +206,7 @@ def test_legacy_attachment_rebuild_keeps_original_ttl(database_url: str, tmp_pat
         attachments = service(database_url, tmp_path)
         with attachments.database.connect() as connection:
             before = connection.execute('UPDATE attachments SET knowledge_version=%s WHERE id=%s RETURNING expires_at', (version, UUID(uploaded['id']))).fetchone()
-            connection.execute('DELETE FROM document_units WHERE attachment_id=%s', (UUID(uploaded['id']),))
+            connection.execute('DELETE FROM document_chunks WHERE attachment_id=%s', (UUID(uploaded['id']),))
         attachments.recover()
         assert attachments.documents.search(UUID(conversation), owner(database_url, conversation), {'query': 'LEGACY'})['results']
         with attachments.database.connect() as connection:
@@ -215,8 +215,8 @@ def test_legacy_attachment_rebuild_keeps_original_ttl(database_url: str, tmp_pat
             assert upgraded is not None and upgraded['knowledge_version'] == 2
 
 
-def test_search_chunk_maps_across_paragraphs_and_pages(database_url: str, tmp_path: Path) -> None:
-    """合并短段和跨物理页的切片均能按两端位置还原出完全相同的原文。"""
+def test_search_and_read_share_cross_paragraph_and_page_chunks(database_url: str, tmp_path: Path) -> None:
+    """跨段和跨页切片直接携带两端位置，按任一覆盖范围阅读均复用完整检索正文。"""
     configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path) as client:
         conversation = configure(client)
@@ -224,48 +224,16 @@ def test_search_chunk_maps_across_paragraphs_and_pages(database_url: str, tmp_pa
         for filename, content in [('multi.txt', b'FIRST paragraph.\n\nSECOND paragraph.'),
                                   ('multi.pdf', pdf_bytes(['FIRST page.', 'SECOND page.']))]:
             uploaded = client.post(f'/api/conversations/{conversation}/attachments', files={'files': (filename, content)}).json()[0]
-            result = attachments.documents.search(UUID(conversation), owner(database_url, conversation),
+            account = owner(database_url, conversation)
+            result = attachments.documents.search(UUID(conversation), account,
                                                   {'query': 'FIRST', 'document_ids': [uploaded['id']]})['results'][0]
             assert 'SECOND' in result['content']
-            with attachments.database.connect() as connection:
-                chunk = connection.execute('SELECT * FROM document_chunks WHERE attachment_id=%s ORDER BY ordinal', (UUID(uploaded['id']),)).fetchone()
-                assert chunk is not None
-                units = connection.execute('SELECT * FROM document_units WHERE attachment_id=%s AND ordinal BETWEEN %s AND %s ORDER BY ordinal',
-                                           (UUID(uploaded['id']), chunk['unit_ordinal'], chunk['end_unit_ordinal'])).fetchall()
-            assert len(units) == 2
-            restored = units[0]['content'][chunk['start_offset']:] + units[-1]['content'][:chunk['end_offset']]
-            assert restored == result['content']
             assert result['end_page'] == (2 if filename.endswith('.pdf') else None)
             assert result['end_paragraph'] == (1 if filename.endswith('.pdf') else 2)
-
-
-def test_migration_deletes_legacy_chunks_but_preserves_sources(database_url: str, tmp_path: Path) -> None:
-    """从旧版表结构升级时移除旧切片，保留原文和新切片，随后能重建旧附件。"""
-    configure_settings(database_url, tmp_path)
-    with authenticated_client(database_url, tmp_path) as client:
-        conversation = configure(client)
-        legacy = client.post(f'/api/conversations/{conversation}/attachments',
-                             files={'files': ('legacy.txt', b'LEGACY original paragraph. ' * 100)}).json()[0]
-        current = client.post(f'/api/conversations/{conversation}/attachments',
-                              files={'files': ('current.txt', b'CURRENT original paragraph.')}).json()[0]
-        attachments = service(database_url, tmp_path)
-        identifier = UUID(legacy['id'])
-        migration = Path(__file__).resolve().parents[2] / 'backend/general_agent/infrastructure/migrations/042_recursive_document_chunks.sql'
-        with attachments.database.connect() as connection:
-            before = connection.execute('UPDATE attachments SET knowledge_version=1 WHERE id=%s RETURNING expires_at', (identifier,)).fetchone()
-            original = connection.execute('SELECT content FROM document_units WHERE attachment_id=%s ORDER BY ordinal', (identifier,)).fetchall()
-            # 恢复旧表形状，执行真实迁移验证删除范围及外键行为。
-            connection.execute('ALTER TABLE document_chunks DROP COLUMN end_unit_ordinal')
-            connection.execute(migration.read_text())
-            assert connection.execute('SELECT * FROM document_chunks WHERE attachment_id=%s', (identifier,)).fetchall() == []
-            assert connection.execute('SELECT * FROM document_chunks WHERE attachment_id=%s', (UUID(current['id']),)).fetchall()
-            assert connection.execute('SELECT content FROM document_units WHERE attachment_id=%s ORDER BY ordinal', (identifier,)).fetchall() == original
-        assert (tmp_path / 'attachments' / str(identifier)).exists()
-        attachments.recover()
-        assert attachments.documents.search(UUID(conversation), owner(database_url, conversation),
-                                            {'query': 'LEGACY', 'document_ids': [legacy['id']]})['results']
-        with attachments.database.connect() as connection:
-            assert connection.execute('SELECT expires_at FROM attachments WHERE id=%s', (identifier,)).fetchone() == before
+            scope = {'start_page': 2, 'end_page': 2} if filename.endswith('.pdf') else {'start_paragraph': 2, 'end_paragraph': 2}
+            read = attachments.documents.read(UUID(conversation), account, {'document_id': uploaded['id'], **scope},
+                                              TokenCounter('test'), 10000)
+            assert [block['content'] for block in read['content']] == [result['content']]
 
 
 def test_real_prompt_usage_constrains_reading_budget(database_url: str, tmp_path: Path) -> None:

@@ -28,6 +28,9 @@ from general_agent.auth.dependencies import current_user, require_admin
 from general_agent.auth.service import AuthService, AuthenticatedUser
 from general_agent.attachments.api import attachment_router
 from general_agent.attachments.service import AttachmentService
+from general_agent.knowledge.service import KnowledgeService
+from general_agent.knowledge.api import knowledge_router
+from general_agent.knowledge.tools import KnowledgeTools
 from general_agent.infrastructure.operations import OperationContext, OperationService
 from general_agent.infrastructure.calls import CallGateway
 from general_agent.conversation.chat import ChatService
@@ -79,6 +82,7 @@ class Message(BaseModel):
     memory_recall: dict[str, Any] | None = None
     search_action: dict[str, Any] | None = None
     web_sources: list[dict[str, object]] = Field(default_factory=list)
+    knowledge_sources: list[dict[str, object]] = Field(default_factory=list)
 
 
 class ConversationDetail(Conversation):
@@ -102,7 +106,7 @@ class UsageRecord(BaseModel):
 
 
 def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None, mem0_transport: httpx.BaseTransport | None = None, secure_cookies: bool | None = None) -> FastAPI:
-    """加载本机追踪配置并创建应用，测试可指定隔离数据库、目录及模型 HTTP 替身。"""
+    """加载配置并组装会话附件与独立知识库，测试可注入隔离存储和模型 HTTP 传输。"""
     database = Database(database_url or os.environ.get(
         "DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/general_agent"
     ))
@@ -121,9 +125,10 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     model = CallGateway(operations, ModelClient(model_transport))
     memory = MemoryService(database, embedding_configuration, model, settings.directory, mem0_transport)
     attachments = AttachmentService(database, settings.directory, model_transport)
+    knowledge = KnowledgeService(database, settings.directory, attachments, model, model_transport)
     search_settings = SettingsStore(settings.directory, 'search.json')
     search = SearchService(database, model, search_settings, memory, attachments, model_transport)
-    execution = ChatExecution(model, memory, search)
+    execution = ChatExecution(model, memory, search, KnowledgeTools(knowledge))
     conversation_graph = ConversationGraph(database, execution)
     source_deletion = SourceDeletion(execution.deletion, memory, conversation_graph.delete_threads, attachments.delete_file)
     chat = ChatService(database, model, execution, attachments, conversation_graph)
@@ -131,10 +136,11 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """恢复业务并定期重试到期附件清理，停机时停止清理任务并等待工作线程。"""
+        """恢复业务及知识库任务，停机时停止清理并等待后台处理线程。"""
         database.migrate()
         streaming.recover()
         attachments.recover()
+        knowledge.recover()
         source_deletion.recover()
         stopped = asyncio.Event()
 
@@ -157,11 +163,13 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
             stopped.set()
             await expiration
             await asyncio.to_thread(streaming.close)
+            await asyncio.to_thread(knowledge.close)
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
     app.include_router(auth_router(auth, cookie_secure))
     app.include_router(admin_router(auth, database, attachments, memory))
     app.include_router(attachment_router(attachments))
+    app.include_router(knowledge_router(knowledge))
     app.include_router(source_deletion_router(source_deletion))
     app.include_router(correction_router(MemoryCorrection(memory)))
     app.include_router(native_memory_router(execution.automatic,settings))
