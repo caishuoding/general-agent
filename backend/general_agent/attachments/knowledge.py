@@ -320,7 +320,7 @@ def store_document_images(
     identifier: UUID,
     images: list[dict[str, Any]],
 ) -> None:
-    """重建附件图片元数据；删除旧图片会同步撤销其描述切片。"""
+    """重建图片元数据并仅保存纯文字描述，旧结构化字段沿用数据库空默认值。"""
     connection.execute('DELETE FROM document_images WHERE attachment_id=%s', (identifier,))
     if not images:
         return
@@ -329,8 +329,7 @@ def store_document_images(
             item['id'], identifier, item['ordinal'], item.get('page'), item.get('end_page'),
             item['paragraph'], Jsonb(item.get('section', [])), item['location'],
             item['storage_name'], item['sha256'], item['mime'], item['width'], item['height'],
-            item.get('ocr_text', ''), item.get('caption', ''), item.get('description', ''),
-            Jsonb(item.get('uncertainties', [])), Jsonb(item['provider_file']) if item.get('provider_file') else None,
+            item.get('description', ''), Jsonb(item['provider_file']) if item.get('provider_file') else None,
             item['vision_status'], item.get('vision_model'), item.get('vision_revision'), item.get('vision_error'),
         )
         for item in images
@@ -339,16 +338,16 @@ def store_document_images(
         cursor.executemany(
             'INSERT INTO document_images('
             'id,attachment_id,ordinal,page,end_page,paragraph,section,location,storage_name,sha256,mime,'
-            'width,height,ocr_text,caption,description,uncertainties,provider_file,vision_status,'
+            'width,height,description,provider_file,vision_status,'
             'vision_model,vision_revision,vision_error'
-            ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+            ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
             rows,
         )
 
 
 def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str, Any]], policy: ChunkPolicy,
                        *, knowledge: bool = False) -> None:
-    """复用图片描述切片算法，按内部白名单写附件或知识库独立表并绑定同域图片。"""
+    """直接用图片描述原文生成切片，位置和章节仅存元数据，并绑定同域原图。"""
     table, parent = ('knowledge_chunks', 'document_id') if knowledge else ('document_chunks', 'attachment_id')
     next_ordinal = (connection.execute(
         sql.SQL('SELECT COALESCE(MAX(ordinal),0)+1 AS ordinal FROM {} WHERE {}=%s').format(sql.Identifier(table), sql.Identifier(parent)),
@@ -359,21 +358,16 @@ def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str,
     for image in images:
         if image.get('vision_status') != 'complete':
             continue
-        context = '；'.join(item for item in (
-            ' > '.join(image.get('section', [])),
-            image['location'],
-            f"图注：{image['caption']}" if image.get('caption') else '',
-            f"图中文字：{image['ocr_text']}" if image.get('ocr_text') else '',
-        ) if item)
-        content = f'[文档图片]\n{context}\n视觉描述：{image["description"]}'
+        content = image['description']
+        structure = Jsonb({'kind': 'image', 'ordinal': image['ordinal'],
+                           'section': image.get('section', []), 'location': image['location']})
         for start, end in chunk_ranges(content, image_policy):
             chunk = content[start:end]
             if not chunk.strip():
                 continue
             rows.append((
                 identifier, next_ordinal, image.get('page') or 1, image.get('end_page') or image.get('page') or 1,
-                image['paragraph'], image['paragraph'], Jsonb({'kind': 'image'}),
-                Jsonb({'kind': 'image', 'ordinal': image['ordinal']}), chunk,
+                image['paragraph'], image['paragraph'], structure, structure, chunk,
                 sorted(set(search_terms(chunk))), '', '', image['id'], image_policy.counter.count(chunk),
                 image_policy.counter.method,
             ))

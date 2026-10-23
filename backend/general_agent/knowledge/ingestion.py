@@ -111,7 +111,7 @@ def process(service: 'KnowledgeService', row: dict[str, Any], calls: BoundCalls)
 
 
 def describe_images(service: 'KnowledgeService', row: dict[str, Any], parsed: list[ParsedImage], vision: DocumentVision) -> list[dict[str, Any]]:
-    """有界并发描述图片，逐张保存结果并在重试时复用同哈希、同版本的成功描述。"""
+    """有界并发保存图片纯文字描述，重试复用同哈希和同提示词版本的成功结果。"""
     identifier, attempt = row['id'], row['attempt']
     folder = service.directory / str(identifier) / 'images'
     with service.database.connect() as connection:
@@ -140,7 +140,7 @@ def describe_images(service: 'KnowledgeService', row: dict[str, Any], parsed: li
         remote: dict[str, Any] | None = None
         try:
             description, remote = vision.describe(folder / image.storage_name, image)
-            item.update(**description.model_dump(), provider_file=remote, vision_status='complete', vision_revision=vision.revision)
+            item.update(description=description, provider_file=remote, vision_status='complete', vision_revision=vision.revision)
         except Exception:
             item.update(vision_status='failed', vision_error='图片描述未完成，请重试。', vision_revision=vision.revision)
         current = service.current(identifier)

@@ -27,14 +27,14 @@ class ControlledModel(BaseHTTPRequestHandler):
     attempts: dict[str, int] = {}
 
     def do_POST(self) -> None:
-        """支持当前 Files、文档视觉及按需读取协议，保留慢速和断流验收。"""
+        """支持 Files、纯文字图片描述及文档按需读取，保留慢速和断流验收。"""
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         if self.path == '/files':
             self.send_json({'id': 'file-api-document-browser', 'created_at': int(time()), 'expires_at': int(time()) + 2592000})
             return
         payload = json.loads(raw)
         if not payload.get('stream') and any(isinstance(item.get('content'), list) for item in payload['messages']):
-            self.send_json({'choices': [{'message': {'content': json.dumps({'description': '受控扫描图片描述', 'ocr_text': '', 'caption': '', 'uncertainties': []})}}]})
+            self.send_json({'choices': [{'message': {'content': '受控扫描图片描述'}}]})
             return
         prompt = next((message['content'] for message in reversed(payload['messages'])
                        if message['role'] == 'user' and isinstance(message.get('content'), str)), '')

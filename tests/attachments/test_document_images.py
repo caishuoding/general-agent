@@ -76,12 +76,13 @@ def image_files_response() -> httpx.Response:
 def test_word_image_description_is_searchable_and_readable(
     database_url: str, tmp_path: Path,
 ) -> None:
-    """描述切片能够按视觉语义召回，并在按页读取时返回同一个图片身份。"""
+    """模型直接返回纯文字，切片原样保存描述并在搜索和阅读时绑定同一原图。"""
     requests: list[dict[str, Any]] = []
     deleted: list[str] = []
+    description = '季度销售趋势图：橙色柱状图显示季度销售额逐季增长。'
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """分别响应图片上传和视觉描述请求，不调用真实外部服务。"""
+        """返回无 JSON 包装的图片描述，并记录模型实际收到的原图请求。"""
         if request.url.path == '/files':
             return image_files_response()
         if request.method == 'DELETE':
@@ -96,14 +97,8 @@ def test_word_image_description_is_searchable_and_readable(
             and any(part.get('type') == 'file' for part in message['content'])
             for message in payload['messages']
         )
-        description = {
-            'ocr_text': '',
-            'caption': '季度销售趋势图',
-            'description': '橙色柱状图显示季度销售额逐季增长。',
-            'uncertainties': [],
-        }
         return httpx.Response(200, json={
-            'choices': [{'message': {'content': json.dumps(description, ensure_ascii=False)}}],
+            'choices': [{'message': {'content': description}}],
             'usage': {'prompt_tokens': 20, 'completion_tokens': 10, 'total_tokens': 30},
         })
 
@@ -126,7 +121,7 @@ def test_word_image_description_is_searchable_and_readable(
             UUID(conversation), account, {'query': '销售额逐季增长'},
         )['results']
         visual = next(item for item in searched if item['image_id'])
-        assert '橙色柱状图' in visual['content']
+        assert visual['content'] == description
         image_id = visual['image_id']
         assert image_id
 
@@ -171,21 +166,16 @@ def test_recalled_word_image_is_sent_back_to_the_model_once(
     image_requests = 0
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """先响应图片描述，再模拟搜索工具调用并核验后续原图注入。"""
+        """先返回纯文字描述，再模拟搜索并核验下一轮原图注入。"""
         nonlocal uploads, image_requests
         if request.url.path == '/files':
             uploads += 1
             return image_files_response()
         payload = json.loads(request.content)
         if payload['stream'] is False:
-            description = {
-                'ocr_text': '',
-                'caption': '季度销售趋势图',
-                'description': '橙色柱状图显示季度销售额逐季增长。',
-                'uncertainties': [],
-            }
+            description = '季度销售趋势图：橙色柱状图显示季度销售额逐季增长。'
             return httpx.Response(200, json={
-                'choices': [{'message': {'content': json.dumps(description, ensure_ascii=False)}}],
+                'choices': [{'message': {'content': description}}],
             })
         has_tool = any(message.get('role') == 'tool' for message in payload['messages'])
         if not has_tool:
@@ -233,23 +223,18 @@ def test_recalled_word_image_is_sent_back_to_the_model_once(
 def test_pdf_without_text_layer_uses_embedded_image_description(
     database_url: str, tmp_path: Path,
 ) -> None:
-    """扫描型 PDF 可在没有文字层时通过页面图片生成可检索的描述切片。"""
+    """扫描 PDF 的纯文字图片描述可直接召回，不依赖文字层或结构化字段。"""
     def provider(request: httpx.Request) -> httpx.Response:
-        """响应 PDF 图片上传和视觉描述，不访问真实外部服务。"""
+        """响应 PDF 图片上传，并让模型直接输出一段自然语言描述。"""
         if request.url.path == '/files':
             return httpx.Response(200, json={
                 'id': 'file-api-pdf-scan',
                 'created_at': int(time()),
                 'expires_at': int(time()) + 30 * 24 * 60 * 60,
             })
-        description = {
-            'ocr_text': '',
-            'caption': '蓝色扫描画面',
-            'description': '蓝灰色方块组成的扫描页图像。',
-            'uncertainties': [],
-        }
+        description = '蓝色扫描画面：蓝灰色方块组成的扫描页图像。'
         return httpx.Response(200, json={
-            'choices': [{'message': {'content': json.dumps(description, ensure_ascii=False)}}],
+            'choices': [{'message': {'content': description}}],
         })
 
     configure_settings(database_url, tmp_path)
@@ -313,20 +298,15 @@ def test_duplicate_word_images_reuse_one_visual_description(
     descriptions = 0
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """分别统计图片上传和视觉描述次数。"""
+        """统计图片上传及纯文字描述的真实请求次数。"""
         nonlocal uploads, descriptions
         if request.url.path == '/files':
             uploads += 1
             return image_files_response()
         descriptions += 1
-        description = {
-            'ocr_text': '',
-            'caption': '重复图表',
-            'description': '橙色图表示例。',
-            'uncertainties': [],
-        }
+        description = '重复图表：橙色图表示例。'
         return httpx.Response(200, json={
-            'choices': [{'message': {'content': json.dumps(description, ensure_ascii=False)}}],
+            'choices': [{'message': {'content': description}}],
         })
 
     configure_settings(database_url, tmp_path)

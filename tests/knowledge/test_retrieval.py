@@ -71,13 +71,13 @@ def test_agent_searches_selected_base_and_refuses_unselected_base(database_url: 
 
 
 def test_image_progress_is_observable_and_original_reaches_next_model_request(database_url: str, tmp_path: Path) -> None:
-    """上传不等待视觉处理，阶段计数可见；图片切片命中后下一轮实际携带原图。"""
+    """纯文字描述原样入库且进度可见，图片切片命中后下一轮实际携带原图。"""
     entered, release = Event(), Event()
     base_holder: dict[str, str] = {}
     saw_original: list[bool] = []
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """阻塞受控视觉响应以观察处理进度，再验证模型拿到正确文件身份。"""
+        """阻塞纯文字视觉响应以观察进度，再核验描述原文和正确的原图身份。"""
         if request.url.path == '/files':
             return image_files_response()
         if request.method == 'DELETE':
@@ -86,14 +86,15 @@ def test_image_progress_is_observable_and_original_reaches_next_model_request(da
         if not payload.get('stream'):
             entered.set()
             assert release.wait(15), '视觉测试没有释放响应'
-            description = {'ocr_text': 'ORANGE_CHART', 'caption': '橙色图表', 'description': '季度增长柱状图。', 'uncertainties': []}
-            return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps(description)}}],
+            description = 'ORANGE_CHART：橙色图表，季度增长柱状图。'
+            return httpx.Response(200, json={'choices': [{'message': {'content': description}}],
                                            'usage': {'prompt_tokens': 20, 'completion_tokens': 10, 'total_tokens': 30}})
         tools = [item for item in payload['messages'] if item['role'] == 'tool']
         if not tools:
             return tool_response(base_holder['id'], 'ORANGE_CHART')
         result = json.loads(tools[-1]['content'])
         assert result['results'][0]['image_id']
+        assert result['results'][0]['content'] == 'ORANGE_CHART：橙色图表，季度增长柱状图。'
         parts = [part for item in payload['messages'] if isinstance(item.get('content'), list) for part in item['content']]
         saw_original.append({'type': 'file', 'file_id': 'file-api-word-chart'} in parts)
         return httpx.Response(200, json={'choices': [{'message': {'content': '图表说明季度增长。'}}]})
@@ -156,7 +157,7 @@ def test_deleting_during_image_description_does_not_restore_document(database_ur
     deleted: list[str] = []
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """在视觉处理中等待删除，再记录晚到结果对应的远端回收请求。"""
+        """阻塞纯文字描述直到删除发生，再记录迟到结果的远端回收请求。"""
         if request.url.path == '/files':
             return image_files_response()
         if request.method == 'DELETE':
@@ -164,7 +165,7 @@ def test_deleting_during_image_description_does_not_restore_document(database_ur
             return httpx.Response(200)
         entered.set()
         assert release.wait(15)
-        return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps({'description': 'late image'})}}]})
+        return httpx.Response(200, json={'choices': [{'message': {'content': 'late image'}}]})
 
     configure_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:

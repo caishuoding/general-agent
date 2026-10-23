@@ -252,7 +252,7 @@ class AttachmentService:
                 connection.execute("UPDATE attachments SET status='failed', error='文件处理失败，请重新上传。' WHERE id=%s AND status='processing'", (attachment_id,))
 
     def describe_images(self, directory: Path, images: list[ParsedImage]) -> list[dict[str, Any]]:
-        """按图片哈希复用描述，保留成功结果或单图失败原因，不重复调用视觉模型。"""
+        """按图片哈希复用纯文字描述，保留成功结果或单图失败原因。"""
         results: list[dict[str, Any]] = []
         cache: dict[str, dict[str, Any]] = {}
         for image in images:
@@ -264,7 +264,7 @@ class AttachmentService:
             try:
                 description, remote = self.vision.describe(directory / image.storage_name, image)
                 item.update(
-                    **description.model_dump(),
+                    description=description,
                     provider_file=remote,
                     vision_status='complete',
                     vision_model=self.vision.name,
@@ -279,7 +279,7 @@ class AttachmentService:
                 )
             cache[image.sha256] = {
                 key: item[key] for key in (
-                    'ocr_text', 'caption', 'description', 'uncertainties', 'provider_file',
+                    'description', 'provider_file',
                     'vision_status', 'vision_model', 'vision_revision', 'vision_error',
                 ) if key in item
             }
