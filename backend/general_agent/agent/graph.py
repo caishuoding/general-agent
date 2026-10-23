@@ -10,6 +10,7 @@ from langgraph.graph import END, START, StateGraph
 
 from general_agent.agent.state import AgentState
 from general_agent.agent.tools import ORCHESTRATION
+from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.infrastructure.calls import BoundCalls
 from general_agent.infrastructure.provider import ModelFailure, ModelMessage
 from general_agent.infrastructure.settings import StoredSettings
@@ -26,8 +27,8 @@ DOCUMENT_TOOLS = {'search_documents', 'read_document', 'search_knowledge'}
 class AgentToolGraph:
     """构建并运行 LangGraph 工具循环，同时复用现有业务工具和幂等检查点。"""
 
-    def __init__(self, maximum_rounds: int = 12, maximum_tool_retries: int = 5) -> None:
-        """设置回答轮数和每个工具的重试上限；重试次数不包含首次失败调用。"""
+    def __init__(self, maximum_rounds: int = 12, maximum_tool_retries: int = LIMITS.tool_retries) -> None:
+        """设置回答轮数和项目统一的工具重试上限；重试次数不包含首次失败调用。"""
         if maximum_rounds < 1 or maximum_tool_retries < 0:
             raise ValueError("模型轮数必须为正数，工具重试次数不能为负数。")
         self.maximum_rounds = maximum_rounds

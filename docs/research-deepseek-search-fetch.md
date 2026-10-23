@@ -1,6 +1,6 @@
 # DeepSeek Search / Fetch 接入核对
 
-核对日期：2026-10-20。仅采用 DeepSeek 官方文档；本笔记记录协议事实，不代表已经调用真实接口。
+核对日期：2026-10-23。仅采用 DeepSeek 官方文档；本笔记记录协议事实，不代表已经调用真实接口。
 
 ## 接口与认证
 
@@ -43,12 +43,12 @@ HTTP 200 的对象包含必填 `results` 数组；无匹配时为空数组。每
 
 错误体为 `{"error":{"message":"…","type":"…","param":null,"code":"…"}}`。状态码：400 参数/请求非法，401 密钥，402 余额，403 Fetch 安全拒绝，404 Fetch 无可用正文，408 请求读取超时，413 请求过大，429 限速，500 内部错误，504 下游超时。408、429、5xx 可等待后重试；402 需充值；其余 4xx 应先修改请求。[官方指南](https://api-docs.deepseek.com/guides/search/)
 
-按产生有效结果的 HTTP 200 请求计量；Search 空数组、Fetch 无正文、失败和超时均不计费，count 不改变单次价格。中英文页面分别列出每千次 5 元 / 0.75 美元。两接口各自按账号限 5 QPS，与密钥及模型并发独立；Fetch 另受目标域名限速。[中文指南](https://api-docs.deepseek.com/zh-cn/guides/search/)、[英文指南](https://api-docs.deepseek.com/guides/search/)
+按产生有效结果的 HTTP 200 请求计量；Search 空数组、Fetch 无正文、失败和超时均不计费，count 不改变单次价格。中英文页面分别列出每千次 5 元 / 0.75 美元。当前官方限速为 Search 100 QPS、Fetch 25 QPS，与密钥及模型并发独立；Fetch 另受目标域名限速。[中文指南](https://api-docs.deepseek.com/zh-cn/guides/search/)、[英文指南](https://api-docs.deepseek.com/guides/search/)
 
 定价页对 Claude Code、Codex 等服务端调用另有临时免费说明；不要把这些集成优惠默认应用到本项目直接调用的 API。价格可能调整，应用不应把估算费用当成服务端账单；Search/Fetch 返回 schema 也没有 token usage 字段。[定价页](https://api-docs.deepseek.com/quick_start/pricing/)、[Search 参考](https://api-docs.deepseek.com/api/search/)、[Fetch 参考](https://api-docs.deepseek.com/api/fetch/)
 
 ## 对当前项目的直接影响
 
-这是实现推论：删除智谱端点、`search_std` 请求字段及其返回解析；查询上限更新至 128。把长摘要/正文作为模型工具数据，把 snippet 用于来源展示。新增 Fetch 工具可复用来源核验机制；抓取 URL 应按协议提前校验。分别保留“真实 HTTP 请求次数”与“成功且非空结果次数”，避免将空搜索当成收费调用。
+实现上让模型同时生成关键词化 `query` 和不超过 128 字符的 `ori_question`；请求 15 条候选以扩大召回，再依据 `rerank_score`、`authority` 和发布时间过滤、排序并限制单域名数量，最多向模型提供 8 条。摘要优先使用 `summary`，缺少时使用 `snippet`。新增 Fetch 工具可复用来源核验机制；抓取 URL 应按协议提前校验。分别保留“真实 HTTP 请求次数”与“成功且非空结果次数”，避免将空搜索当成收费调用。
 
 项目 ADR 0008 要求工具结果作为不可信原始数据进入 tool 消息，并保留记录与来源核验；更换供应商不需要改变这个边界。[ADR 0008](adr/0008-tool-driven-web-search-and-prompt-composition.md)

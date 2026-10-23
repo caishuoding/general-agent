@@ -16,7 +16,7 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "个人对话空间" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "新建会话" }).click();
+  await page.getByRole("button", { name: "开始新对话" }).click();
   await page
     .getByRole("textbox", { name: "消息", exact: true })
     .fill("帮我整理今天的计划");
@@ -28,7 +28,7 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
   await expect(
     page.getByText("这是受控模型的测试回答。", { exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "新建会话" }).click();
+  await page.getByRole("button", { name: "开始新对话" }).click();
   await expect(
     page.getByText("这是受控模型的测试回答。", { exact: true }),
   ).toHaveCount(0);

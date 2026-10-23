@@ -20,6 +20,7 @@ from general_agent.memory.automatic import AutomaticMemory
 from general_agent.memory.tools import MemoryTools, ToolOutcome
 from general_agent.knowledge.tools import KnowledgeTools
 from general_agent.agent.runner import AgentRuntime
+from general_agent.conversation.progress import MessageProgress
 from general_agent.prompts import (
     attachment_context_fragment,
     compose_system_prompt,
@@ -55,11 +56,6 @@ class ChatExecution:
         """返回当前嵌入配置版本；Agent 每轮都可能选择记忆工具，因此每轮都绑定版本。"""
         embedding = self.memory.embedding.store.read()
         return embedding.revision if embedding else None
-
-    def same_embedding_revision(self, expected: str | None) -> bool:
-        """续跑只核验原来涉及的嵌入配置，不把记忆数量变化误当配置修改。"""
-        current=self.memory.embedding.store.read()
-        return expected is None or (current is not None and current.revision==expected)
 
     def scope(self, content: str, settings: StoredSettings) -> list[str | None]:
         """返回聊天、嵌入及搜索配置版本组成的幂等范围，防止操作结果跨配置复用。"""
@@ -128,13 +124,14 @@ class ChatExecution:
         messages: list[ModelMessage],
         assistant_message_id: UUID,
         on_content: Callable[[str], None] | None = None,
+        on_progress: Callable[[MessageProgress], None] | None = None,
         source_attachment_ids: list[UUID] | None = None,
     ) -> ToolOutcome:
         """把 State 材料交给主从运行模块，返回主回答及可信证据快照。"""
         if settings is None:
             return ToolOutcome(None, False)
         return self.agent_runtime.run(conversation_id, account_id, user_id, assistant_message_id,
-            settings, operation, messages, on_content, source_attachment_ids)
+            settings, operation, messages, on_content, source_attachment_ids, on_progress)
 
     @staticmethod
     def material_attachment_ids(material: AttachmentContext | None) -> list[UUID]:

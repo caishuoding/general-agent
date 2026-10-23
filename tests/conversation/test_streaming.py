@@ -11,6 +11,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
+from general_agent.conversation.progress import tool_progress
 from tests.auth.support import authenticated_client, set_global_settings
 
 
@@ -92,6 +93,41 @@ def test_stream_is_visible_before_completion_and_survives_restart(database_url: 
         assert (call["status"], call["prompt_tokens"], call["completion_tokens"]) == ("complete", 12, 5)
     with authenticated_client(database_url, tmp_path, transport) as restarted:
         wait_message(restarted, conversation_id, "complete", "first second")
+
+
+def test_stream_progress_shows_current_stage_and_clears_on_completion(database_url: str, tmp_path: Path) -> None:
+    """模型首段返回前展示准备状态，完成后清除临时进度且不保留步骤历史。"""
+    release = Event()
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """阻塞外部模型响应，让测试稳定观察回答启动后的准备状态。"""
+        assert release.wait(10)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ControlledStream(release))
+
+    configure_global_model(database_url, tmp_path)
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
+        conversation_id = configure(client)
+        client.post(f"/api/conversations/{conversation_id}/runs", json={"content": "hello"})
+        preparing = wait_message(client, conversation_id, "generating", "")
+        assert preparing["progress"] == {"code": "preparing", "label": "正在准备回答…"}
+        release.set()
+        complete = wait_message(client, conversation_id, "complete", "first second")
+        assert complete["progress"] is None
+
+
+def test_only_key_tools_have_user_facing_progress() -> None:
+    """知识库、资料和联网工具映射为简短状态，普通工具不产生额外提示。"""
+    knowledge = tool_progress("search_knowledge")
+    documents = tool_progress("search_documents")
+    reading = tool_progress("read_document")
+    searching = tool_progress("search_web")
+    fetching = tool_progress("fetch_web")
+    assert knowledge is not None and knowledge["label"] == "正在检索知识库…"
+    assert documents is not None and documents["label"] == "正在检索资料…"
+    assert reading is not None and reading["label"] == "正在阅读资料…"
+    assert searching is not None and searching["label"] == "正在联网搜索…"
+    assert fetching is not None and fetching["label"] == "正在读取网页…"
+    assert tool_progress("get_current_time") is None
 
 
 def test_stop_freezes_partial_answer_and_keeps_late_usage(database_url: str, tmp_path: Path) -> None:

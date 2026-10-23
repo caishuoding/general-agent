@@ -1,6 +1,6 @@
 # LangGraph 重构交接文档
 
-更新日期：2026-10-21
+更新日期：2026-10-23
 
 ## 1. 当前状态
 
@@ -12,7 +12,7 @@
 
 ### 对话执行
 
-- 对话主图先准备附件和长期记忆，再进入统一的流式工具循环。
+- 对话主图先准备附件、长期记忆和会话绑定知识库，再进入统一的流式工具循环。
 - 每轮模型调用都使用 SSE；文字增量直接写入回答，`tool_calls` 分片累积完整后执行工具，再把结果追加到上下文继续模型调用。
 - 模型可自主调用记忆工具或 `search_web`；不再使用 `NO_TOOL_ACTION`、非流式规划回合或独立最终回答调用。
 - 同步与流式入口共享同一条流式执行路径，只改变即时写入还是聚合返回。
@@ -25,8 +25,8 @@
 
 ### 联网搜索
 
-- `search_web` 与记忆工具注册在同一模型工具循环中，由模型自主决定调用。
-- 查询直接发送给智谱 Web Search，不经过正则意图路由、查询编辑或用户批准。
+- `search_web`、`fetch_web` 与记忆、文档、知识库工具注册在同一模型工具循环中，由模型自主决定调用。
+- 查询直接发送给 DeepSeek Search / Fetch，不经过正则意图路由、查询编辑或用户批准。
 - 工具结果按不可信数据处理；搜索记录、实际用量和网页来源核验继续保留。
 
 ### State 与持久化
@@ -35,7 +35,7 @@
 - runtime.context 不可变，只传递固定身份、模型配置、操作身份和传输模式，不再放 preparation、answer 或历史消息。
 - 消息字段按完整快照覆盖，不使用追加 reducer 重复拼接历史；工具循环结果显式返回父图 State。
 - 外层图不配置 PostgreSQL checkpointer，也不再创建专用连接池。业务消息、流式增量、操作幂等及用量仍由既有表持久化，重启和重试语义保留。
-- 回答尝试 ID 继续用于追踪关联，删除会话仍清理旧版 langgraph schema 中的对应检查点。
+- 回答尝试 ID 继续用于追踪关联；迁移 052 已删除不再读取的旧 `langgraph` schema。
 - 当前决策与节点边界见 [ADR 0012](adr/0012-state-based-conversation-flow.md)；后文早期检查点建表记录属于历史实施证据。
 
 ### 长期记忆
@@ -111,7 +111,7 @@ bash scripts/start.sh
 | `DATABASE_URL` | 业务 PostgreSQL |
 | `MEM0_API_URL` | Mem0 REST API 地址 |
 | `MEM0_API_KEY` | 可选的 Mem0 API 认证 |
-| `MEM0_USER_ID` | Mem0 用户范围，默认 `local-person` |
+| `MEM0_USER_ID` | 仅测试兼容项；正式应用使用账号 UUID 作为 Mem0 用户范围 |
 | `APP_DATA_DIR` | 本机配置与附件目录，默认 `.local` |
 | `POSTGRES_PORT` | 业务 PostgreSQL 宿主端口 |
 
@@ -119,7 +119,7 @@ bash scripts/start.sh
 
 - `model.json`：聊天模型配置
 - `embedding.json`：嵌入配置，供 Mem0 一次性配置容器读取
-- `search.json`：智谱联网配置
+- `search.json`：DeepSeek Search / Fetch 配置
 - `attachments/`：当前会话附件原文件
 - `logs/agent.log`：智能体节点流转日志
 
@@ -151,7 +151,7 @@ bash scripts/start.sh
 - 后端与测试共 84 个文件通过严格类型检查。
 - 前端类型检查和生产构建通过。
 - 后端健康检查返回正常。
-- LangGraph 检查点表已创建在业务 PostgreSQL 的 `langgraph` schema。
+- 历史版本曾在业务 PostgreSQL 创建 `langgraph` schema；当前版本不写入，并由迁移 052 删除。
 - 附件、文档、图片、搜索、来源删除和流式浏览器流程通过。
 
 ## 9. 仍需注意

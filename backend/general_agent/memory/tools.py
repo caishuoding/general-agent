@@ -70,10 +70,20 @@ def memory_tools() -> list[dict[str, Any]]:
     return [{'type': 'function', 'function': {'name': name, 'description': description, 'parameters': model.model_json_schema()}} for name, description, model in definitions]
 
 
-def agent_tools(knowledge: bool = False) -> list[dict[str, Any]]:
-    """返回统一循环工具；已接入独立知识库时添加按库召回能力，不规定调用顺序。"""
-    return [*memory_tools(), search_web_tool(), search_web_tool("fetch_web"), *document_tools(), current_time_tool(),
+def shared_tools(knowledge: bool = False) -> list[dict[str, Any]]:
+    """返回主从都可安全使用的时间、资料与网页工具，不包含记忆和编排权限。"""
+    return [search_web_tool(), search_web_tool("fetch_web"), *document_tools(), current_time_tool(),
             *([knowledge_tool()] if knowledge else [])]
+
+
+def agent_tools(knowledge: bool = False) -> list[dict[str, Any]]:
+    """返回主智能体业务工具；记忆写入只属于主智能体，编排工具由外层另行附加。"""
+    return [*memory_tools(), *shared_tools(knowledge)]
+
+
+def worker_tools(knowledge: bool = False) -> list[dict[str, Any]]:
+    """返回子智能体可复用的公共工具集，显式排除记忆写入与编排能力。"""
+    return shared_tools(knowledge)
 
 
 class MemoryTools:
@@ -166,8 +176,8 @@ class MemoryTools:
         if name in ('search_web', 'fetch_web'):
             if self.web_search is None:
                 raise ValueError('联网搜索工具未配置。')
-            query = (SearchWebInput.model_validate(arguments).query if name == "search_web"
-                     else FetchWebInput.model_validate(arguments).url)
+            search_input = SearchWebInput.model_validate(arguments) if name == "search_web" else None
+            query = search_input.query if search_input is not None else FetchWebInput.model_validate(arguments).url
             return self.web_search.tool(
                 checkpoint.conversation_id,
                 checkpoint.message_id,
@@ -175,6 +185,7 @@ class MemoryTools:
                 checkpoint.operation,
                 source_attachment_ids,
                 kind="search" if name == "search_web" else "fetch",
+                ori_question=search_input.ori_question if search_input is not None else None,
             )
         if name not in ('update_memory', 'delete_memory'):
             raise ValueError('未知的工具。')

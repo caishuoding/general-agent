@@ -99,7 +99,7 @@ class Database:
                     'SELECT * FROM memory_updates WHERE source_message_id=%s ORDER BY created_at DESC,id DESC LIMIT 1',
                     (row['reply_to'],),
                 ).fetchone()
-            row['search_action'] = connection.execute('SELECT id,query,status,error,revision,sources,purpose,expires_at FROM search_requests WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
+            row['search_action'] = connection.execute('SELECT id,query,status,error,sources FROM search_requests WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
             row['memory_recall'] = connection.execute('SELECT status,match_count AS count,detail FROM memory_recalls WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
         return row
 

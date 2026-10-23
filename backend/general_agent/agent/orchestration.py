@@ -109,10 +109,11 @@ class AgentOrchestrator:
         if name == 'spawn_agent':
             spawn = SpawnInput.model_validate(arguments)
             task = f'任务：{spawn.task}\n背景：{spawn.context}\n预期交付：{spawn.expected_output}'
-            result = self.repository.create(checkpoint.run_id, key, task, spawn.title)
+            result = self.repository.create(checkpoint.run_id, key, task, spawn.title, instructions=spawn.instructions)
         elif name == 'send_agent_message':
             send = SendInput.model_validate(arguments)
-            result = self.repository.create(checkpoint.run_id, key, send.message, agent_id=UUID(send.agent_id))
+            result = self.repository.create(checkpoint.run_id, key, send.message, agent_id=UUID(send.agent_id),
+                                            instructions=send.instructions)
         elif name == 'cancel_agent':
             cancel = CancelInput.model_validate(arguments)
             result = self.repository.cancel(checkpoint.run_id, UUID(cancel.agent_id))

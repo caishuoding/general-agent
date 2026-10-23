@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 from general_agent.agent import AgentToolGraph
+from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.infrastructure.provider import StreamChunk, ToolCallDelta
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.memory.automatic import MemoryCheckpoint
@@ -45,6 +46,12 @@ def test_graph_streams_answer_without_tools() -> None:
     assert result["answer"] == "你好，有什么需要？"
     assert emitted == ["你好", "，有什么需要？"]
     execute.assert_not_called()
+
+
+def test_default_tool_retry_limit_is_shared_by_every_tool() -> None:
+    """默认工具图使用项目统一的五次失败重试，不允许单个工具另设默认值。"""
+    assert LIMITS.tool_retries == 5
+    assert AgentToolGraph().maximum_tool_retries == LIMITS.tool_retries
 
 
 def test_time_tool_reads_fresh_clock_when_replaying_a_tool_call(monkeypatch: Any) -> None:

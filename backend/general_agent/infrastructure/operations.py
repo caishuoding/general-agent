@@ -120,8 +120,3 @@ class OperationService:
         """取消旧操作并清除缓存结果，防止删除后的内容被重放。"""
         with self.database.connect() as connection:
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,result=NULL,response_status=NULL WHERE id=%s", (operation_id,))
-
-    def has_calls(self, context: OperationContext) -> bool:
-        """判断操作是否已经开始过外部调用，避免未知结果被重复发送。"""
-        with self.database.connect() as connection:
-            return connection.execute("SELECT id FROM model_calls WHERE operation_id=%s AND status <> 'cancelled' LIMIT 1", (context.operation_id,)).fetchone() is not None

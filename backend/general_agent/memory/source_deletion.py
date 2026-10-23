@@ -14,13 +14,12 @@ from general_agent.memory.service import MemoryService
 class SourceDeletion:
     """来源删除先撤回使用许可，再复用正式记忆删除与本机物理清理。"""
 
-    def __init__(self, memory: MemoryDeletion, memories: MemoryService, delete_graph_threads: Callable[[list[UUID]], None] | None = None, delete_attachment_file: Callable[[UUID], None] | None = None) -> None:
-        """绑定记忆、图与附件清理接口，图片远端删除由附件模块负责。"""
+    def __init__(self, memory: MemoryDeletion, memories: MemoryService, delete_attachment_file: Callable[[UUID], None] | None = None) -> None:
+        """绑定记忆与附件清理接口，图片远端删除由附件模块负责。"""
         self.memory=memory
         self.memories=memories
         self.database=memories.database
         self.directory=memories.directory/'attachments'
-        self.delete_graph_threads = delete_graph_threads
         self.delete_attachment_file = delete_attachment_file
 
     def impact(self, connection: Any, kind: str, conversation_id: UUID, source_id: UUID, account_id: UUID) -> dict[str,Any]:
@@ -105,7 +104,7 @@ class SourceDeletion:
         connection.execute('UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,result=NULL,response_status=NULL WHERE id=ANY(%s)',(list(operations),))
         connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE operation_id=ANY(%s) AND status='reserved'",(list(operations),))
         connection.execute("UPDATE messages SET status='stopped',content='',error='来源已删除，本次生成已失效。' WHERE operation_id=ANY(%s) AND status='generating'",(list(operations),))
-        connection.execute("UPDATE search_requests SET status='expired',query='',completed_queries='{}',results='[]',sources='[]',purpose='',expires_at=0,error='来源已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
+        connection.execute("UPDATE search_requests SET status='expired',query='',completed_queries='{}',results='[]',sources='[]',error='来源已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
         connection.execute("UPDATE messages SET web_sources='[]' WHERE operation_id=ANY(%s)",(list(operations),))
         for message_id in message_ids:
             connection.execute('INSERT INTO memory_source_suppressions(message_id) VALUES(%s) ON CONFLICT DO NOTHING',(message_id,))
@@ -135,9 +134,6 @@ class SourceDeletion:
                 with lock.transaction():
                     self.invalidate(lock,identifier)
                     self.cleanup(lock,row)
-                    if row['kind'] == 'conversation' and self.delete_graph_threads is not None:
-                        # 当前图不写检查点；会话删除仍清理旧版本按回答标识保存的元数据。
-                        self.delete_graph_threads(row['message_ids'])
                     lock.execute("UPDATE source_deletions SET status='complete',phase='complete',error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=%s",(identifier,))
             except Exception:
                 lock.execute("UPDATE source_deletions SET status='failed',error='来源已停用，但清理尚未完成；请重试同一删除操作。',updated_at=CURRENT_TIMESTAMP WHERE id=%s",(identifier,))

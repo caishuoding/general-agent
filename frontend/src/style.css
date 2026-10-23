@@ -115,17 +115,7 @@ button:hover:not(:disabled) {
   box-shadow: 0 24px 70px rgba(48, 56, 49, 0.09);
 }
 
-.auth-brand {
-  display: grid;
-  width: 42px;
-  height: 42px;
-  margin-bottom: 24px;
-  place-items: center;
-  border-radius: 14px;
-  background: #173638;
-  color: #f8fbfa;
-  font-size: 22px;
-}
+
 
 .auth-kicker {
   color: #277773;
@@ -190,15 +180,7 @@ button:hover:not(:disabled) {
   font-size: 13px;
 }
 
-.user-menu {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.45);
-}
+
 
 .user-name {
   overflow: hidden;
@@ -208,10 +190,7 @@ button:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-.logout-button {
-  color: #cb5f48;
-  font-size: 12px;
-}
+
 
 .user-pill {
   padding: 7px 12px;
@@ -440,11 +419,7 @@ button:hover:not(:disabled) {
   font-size: 12px;
 }
 
-.admin-detail-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 16px;
-}
+
 
 .admin-conversation {
   display: block;
@@ -469,11 +444,7 @@ button:hover:not(:disabled) {
   font-size: 12px;
 }
 
-.admin-conversation-detail {
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid #dce8e5;
-}
+
 
 .admin-message {
   max-width: 760px;
@@ -590,25 +561,9 @@ button:hover:not(:disabled) {
   border-top: 1px solid #294b4d;
   margin-top: 20px;
 }
-.nav-button {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-size: 12px;
-  color: #c0d1cf;
-  padding: 10px 14px;
-  text-align: left;
-  border-radius: 8px;
-}
-.nav-button > span {
-  font-size: 19px;
-  width: 18px;
-  text-align: center;
-}
-.nav-button.selected {
-  background: #d7e8e4;
-}
+
+
+
 .local-note {
   font-size: 10px;
   color: #91a9a7;
@@ -625,9 +580,7 @@ button:hover:not(:disabled) {
   background: #5aa895;
   border-radius: 50%;
 }
-.status-dot.configured {
-  background: #79c5ad;
-}
+
 .main-panel {
   flex: 1;
   min-width: 0;
@@ -664,24 +617,8 @@ button:hover:not(:disabled) {
   color: #7b9392;
   white-space: nowrap;
 }
-.model-pill {
-  display: flex;
-  gap: 9px;
-  align-items: center;
-  border: 1px solid #d6e4e1;
-  border-radius: 20px;
-  padding: 6px 11px;
-  font-size: 10px;
-  white-space: nowrap;
-  max-width: 240px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: #4e7272;
-}
-.model-pill > span:last-child {
-  color: #789190;
-  margin-left: 4px;
-}
+
+
 .chat-layout {
   flex: 1;
   min-height: 0;
@@ -727,16 +664,8 @@ button:hover:not(:disabled) {
   color: #708888;
   line-height: 1.95;
 }
-.setup-link {
-  color: #276f69;
-  font-size: 12px;
-  border-bottom: 1px solid #96b8b1;
-  margin-top: 24px;
-  padding: 0 0 3px;
-}
-.setup-link span {
-  margin-left: 10px;
-}
+
+
 .topic-tags {
   display: flex;
   justify-content: center;
@@ -1122,10 +1051,7 @@ td {
   .topbar h1 {
     font-size: 11px;
   }
-  .model-pill {
-    font-size: 9px;
-    max-width: 120px;
-  }
+
   .chat-content {
     padding: 10px 16px;
   }
@@ -1182,8 +1108,8 @@ td {
 .settings-card .checkbox-field { display: flex; align-items: center; gap: 10px; margin: 18px 0; }
 .settings-card .checkbox-field input { width: 16px; height: 16px; margin: 0; }
 
-.action-row { display: flex; flex-wrap: wrap; gap: 8px; }
-.action-row button { padding: 7px 12px; background: white; border: 1px solid #e2b08f; border-radius: 7px; }
+
+
 .usage-purpose { display: block; color: #5f7a78; font-size: 11px; }
 
 .attachment-composer { margin: 0 0 9px; color: #617b79; font-size: 12px; }
@@ -1212,7 +1138,7 @@ td {
 .source-delete-dialog { margin: 16px; padding: 20px; border: 1px solid #cfb8aa; border-radius: 12px; background: #fff9f5; overflow: auto; }
 .source-delete-dialog button, .source-delete-pending button { margin: 8px 12px 0 0; }
 .source-delete-pending { padding: 0 20px; color: #7d4f3f; }
-.delete-conversation { align-self: flex-end; margin: 4px 24px; }
+
 
 /* 手机和平板采用全宽聊天区；抽屉保留会话标题和账号操作。 */
 @media (max-width: 800px) {
@@ -1254,10 +1180,13 @@ td {
   .desktop-composer-hint { display: none; }
   .mobile-composer-hint { display: inline; }
   .send-button { width: 44px; height: 44px; flex: none; }
-  .conversation-button, .logout-button, .new-conversation, .retry-button, .stop-button { min-height: 44px; }
+    .conversation-button,
+  .new-conversation,
+  .retry-button,
+  .stop-button { min-height: 44px; }
   .conversation-button { font-size: 14px; }
-  .user-menu { gap: 8px; }
-  .logout-button { flex: none; }
+
+
   .user-name { min-width: 0; }
   .upload-label { min-height: 44px; display: inline-flex; align-items: center; padding: 8px 10px; font-size: 12px; }
   .upload-label:focus-within { outline: 2px solid #277773; outline-offset: 2px; }
@@ -1271,8 +1200,8 @@ td {
   .message { margin-bottom: 12px; }
   .message.user .message-content { padding: 10px 14px; }
   .message-attachment { flex-wrap: wrap; }
-  .delete-conversation { min-height: 36px; margin: 0 16px; font-size: 12px; }
-  .sidebar-delete-conversation { width: 100%; min-height: 44px; margin-bottom: 8px; border-radius: 8px; text-align: left; padding: 8px 10px; color: #cb5f48; font-size: 12px; }
+
+
   .global-error, .source-delete-pending { overflow-wrap: anywhere; }
   .source-delete-dialog { flex: 0 1 auto; min-height: 0; max-height: 50dvh; margin: 8px 12px; padding: 16px; overflow-wrap: anywhere; }
   .source-delete-dialog button, .source-delete-pending button { min-height: 44px; }
@@ -1290,7 +1219,7 @@ td {
   .admin-header { align-items: flex-start; flex-direction: column; gap: 8px; }
   .admin-card { padding: 16px; min-width: 0; overflow-wrap: anywhere; }
   .admin-create-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .admin-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
   .admin-user { flex-wrap: wrap; padding: 12px; gap: 8px; min-width: 0; }
   .admin-user > div { min-width: 0; }
   .admin-message { overflow-wrap: anywhere; }
@@ -1305,7 +1234,7 @@ td {
 }
 
 @media (max-width: 540px) {
-  .admin-create-form, .admin-detail-grid { grid-template-columns: minmax(0, 1fr); }
+    .admin-create-form { grid-template-columns: minmax(0, 1fr); }
   .form-footer { flex-wrap: wrap; }
   .hello-mark { font-size: 46px; margin-bottom: 14px; }
   .topic-tags { margin-top: 20px; flex-wrap: wrap; }
@@ -1348,7 +1277,6 @@ a:focus-visible {
 
 /* 品牌轨迹：两个相扣的圆与信号点共同表示对话、资料和记忆的延续。 */
 .brand-mark,
-.auth-brand,
 .admin-mark {
   position: relative;
   display: inline-grid;
@@ -1364,7 +1292,6 @@ a:focus-visible {
   border-radius: 50%;
 }
 .brand-mark::before,
-.auth-brand::before,
 .admin-mark::before {
   content: "";
   position: absolute;
@@ -1375,7 +1302,6 @@ a:focus-visible {
   color: #8fc3b9;
 }
 .brand-mark::after,
-.auth-brand::after,
 .admin-mark::after {
   content: "";
   position: absolute;
@@ -1387,16 +1313,8 @@ a:focus-visible {
   background: var(--signal);
   box-shadow: 0 0 0 4px rgba(242, 107, 78, 0.12);
 }
-.auth-brand {
-  width: 44px;
-  height: 44px;
-  margin-bottom: 26px;
-  border: 1px solid #a7c9c1;
-  border-radius: 50%;
-}
-.auth-brand::before {
-  color: var(--teal);
-}
+
+
 .admin-mark {
   width: 38px;
   height: 38px;
@@ -1698,8 +1616,7 @@ a:focus-visible {
   background: linear-gradient(to bottom, rgba(145, 188, 181, 0.24), transparent 92%);
   pointer-events: none;
 }
-.conversation-button,
-.nav-button {
+.conversation-button {
   position: relative;
   width: 100%;
   min-height: 42px;
@@ -1712,18 +1629,15 @@ a:focus-visible {
   text-align: left;
   transition: background 150ms ease, color 150ms ease;
 }
-.conversation-button:hover:not(:disabled),
-.nav-button:hover:not(:disabled) {
+.conversation-button:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.055);
   color: #f4fbf9;
 }
-.conversation-button.active,
-.nav-button.selected {
+.conversation-button.active {
   background: rgba(255, 255, 255, 0.09);
   color: #ffffff;
 }
-.conversation-button.active::before,
-.nav-button.selected::before {
+.conversation-button.active::before {
   content: "";
   position: absolute;
   top: 11px;
@@ -1756,25 +1670,14 @@ a:focus-visible {
   padding-top: 14px;
   border-top-color: rgba(172, 207, 202, 0.15);
 }
-.user-menu {
-  gap: 8px;
-  padding: 8px 8px 8px 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.055);
-}
+
 .user-name {
   flex: 1;
   color: #dcece8;
   font-size: 12px;
 }
-.logout-button {
-  padding: 4px 5px;
-  color: #96b5b0;
-  font-size: 11px;
-}
-.logout-button:hover:not(:disabled) {
-  color: #ffffff;
-}
+
+
 .local-note {
   margin: 16px 12px 0;
   color: #92b1ac;
@@ -1783,9 +1686,7 @@ a:focus-visible {
 .status-dot {
   background: #4f8f86;
 }
-.status-dot.configured {
-  background: #83c9b7;
-}
+
 
 /* 主工作区保持开阔，只让输入区成为视觉锚点。 */
 .main-panel {
@@ -1833,18 +1734,8 @@ a:focus-visible {
   max-width: 860px;
   padding: 30px 42px 24px;
 }
-.delete-conversation {
-  align-self: flex-end;
-  margin: 10px clamp(24px, 3vw, 46px) 0;
-  padding: 3px 0;
-  border-bottom: 1px solid #aec7c2;
-  color: var(--muted);
-  font-size: 11px;
-}
-.delete-conversation:hover:not(:disabled) {
-  color: var(--signal-deep);
-  border-color: var(--signal);
-}
+
+
 .empty-state {
   position: relative;
   max-width: 760px;
@@ -2181,11 +2072,7 @@ a:focus-visible {
   background: #fdede8;
   color: #9f5645;
 }
-.action-row button {
-  border-color: #c9dbd7;
-  border-radius: 9px;
-  background: #f9fcfa;
-}
+
 
 /* 管理端用深色页眉明确权限边界，内容区保持高密度但不拥挤。 */
 .admin-shell {
@@ -2442,9 +2329,7 @@ a:focus-visible {
   .empty-state h2 {
     font-size: clamp(30px, 8vw, 40px);
   }
-  .delete-conversation {
-    display: none;
-  }
+
   .admin-tabs {
     gap: 20px;
   }
@@ -2494,7 +2379,536 @@ a:focus-visible {
   }
 }
 
-.agent-tasks { margin-top: 16px; padding: 12px 0; border-top: 1px solid var(--border, #e2e4e7); font-size: 0.9rem; }
+/* 交互体验优化：让导航、主要操作、危险操作和上下文工具拥有清晰层级。 */
+.new-conversation {
+  border-color: rgba(242, 107, 78, 0.34);
+  background: rgba(242, 107, 78, 0.13);
+  box-shadow: none;
+}
+.new-conversation > span {
+  color: #ff9d84;
+}
+.new-conversation:hover:not(:disabled) {
+  background: rgba(242, 107, 78, 0.22);
+}
+.sidebar-tools {
+  display: grid;
+  gap: 3px;
+  margin-top: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(172, 207, 202, 0.13);
+}
+.sidebar-tool {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 13px;
+  border-radius: 10px;
+  color: #b9cfcb;
+  font-size: 12px;
+  text-align: left;
+}
+.sidebar-tool > span {
+  display: inline-grid;
+  width: 16px;
+  place-items: center;
+  color: #f08b73;
+  font-size: 14px;
+}
+.sidebar-tool:hover:not(:disabled),
+.sidebar-tool[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.075);
+  color: #ffffff;
+}
+.account-menu {
+  position: relative;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.055);
+}
+.account-menu summary {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  color: #dcece8;
+  font-size: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.account-menu summary::-webkit-details-marker,
+.conversation-menu summary::-webkit-details-marker,
+.admin-user-menu summary::-webkit-details-marker,
+.knowledge-more summary::-webkit-details-marker,
+.knowledge-create-panel summary::-webkit-details-marker,
+.advanced-settings summary::-webkit-details-marker,
+.settings-help summary::-webkit-details-marker,
+.knowledge-warning summary::-webkit-details-marker {
+  display: none;
+}
+.account-menu summary::after {
+  content: "⌄";
+  color: #89aaa5;
+  font-size: 12px;
+}
+.account-menu[open] summary::after {
+  transform: rotate(180deg);
+}
+.account-menu-actions {
+  display: grid;
+  gap: 2px;
+  padding: 4px 6px 7px;
+}
+.account-menu-actions button {
+  min-height: 36px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  color: #b9cfcb;
+  font-size: 12px;
+  text-align: left;
+}
+.account-menu-actions button:hover {
+  background: rgba(255, 255, 255, 0.075);
+  color: #ffffff;
+}
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.conversation-menu {
+  position: relative;
+}
+.conversation-menu summary {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid #c7dbd6;
+  border-radius: 50%;
+  background: rgba(248, 252, 250, 0.8);
+  color: var(--ink-soft);
+  cursor: pointer;
+  list-style: none;
+  font-size: 18px;
+  line-height: 1;
+}
+.conversation-menu > div {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 12;
+  width: max-content;
+  min-width: 150px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-strong);
+  box-shadow: 0 14px 32px rgba(18, 56, 59, 0.14);
+}
+.conversation-menu > div button {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--signal-deep);
+  font-size: 12px;
+  text-align: left;
+}
+.conversation-menu > div button:hover {
+  background: #fdece8;
+}
+.topic-tags button {
+  padding: 4px 0;
+  border: 0;
+  border-bottom: 1px solid #a9c2bd;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 11px;
+  text-align: left;
+}
+.topic-tags button:hover:not(:disabled) {
+  border-color: var(--signal);
+  color: var(--signal-deep);
+}
+.secondary-button {
+  min-height: 38px;
+  padding: 8px 14px;
+  border: 1px solid #c7d9d5;
+  border-radius: 9px;
+  background: var(--surface-strong);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.secondary-button:hover:not(:disabled) {
+  border-color: #a9c8c1;
+  background: #f3f9f7;
+}
+.danger-button {
+  min-height: 38px;
+  padding: 8px 14px;
+  border: 1px solid #e4b7ab;
+  border-radius: 9px;
+  background: #fdece8;
+  color: #a94231;
+  font-size: 12px;
+  font-weight: 600;
+}
+.danger-button:hover:not(:disabled) {
+  background: #fbdcd4;
+}
+.source-delete-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.source-delete-dialog button:not(.danger-button) {
+  padding: 7px 11px;
+  border: 1px solid #d8c7bb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+.settings-help,
+.advanced-settings {
+  margin-top: 18px;
+  padding-top: 15px;
+  border-top: 1px solid var(--line);
+}
+.settings-help summary,
+.advanced-settings summary {
+  color: var(--teal);
+  font-size: 12px;
+  cursor: pointer;
+}
+.settings-help p {
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.8;
+}
+.advanced-settings label:first-of-type {
+  margin-top: 18px;
+}
+.admin-notice {
+  width: min(100%, 1320px);
+  margin: 0 auto;
+  padding: 11px 14px;
+  border: 1px solid #c7ded7;
+  border-radius: 11px;
+  background: #eaf6f1;
+  color: #2f7066;
+  font-size: 12px;
+}
+.admin-section-heading,
+.admin-detail-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+.admin-section-heading h3,
+.admin-detail-heading h3 {
+  margin-bottom: 3px;
+}
+.admin-section-heading p,
+.admin-detail-heading p {
+  color: var(--muted);
+  font-size: 12px;
+}
+.admin-create-toggle {
+  flex: none;
+  min-height: 38px;
+  padding: 7px 13px;
+  border: 1px solid #c7d9d5;
+  border-radius: 9px;
+  background: #f8fcfa;
+  color: var(--teal);
+  font-size: 12px;
+}
+.admin-create-form {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+.admin-user-primary {
+  border-color: #a9cbc4 !important;
+  background: #eef7f4 !important;
+  color: var(--teal) !important;
+}
+.admin-user-menu {
+  position: relative;
+}
+.admin-user-menu summary {
+  display: inline-flex;
+  min-height: 31px;
+  padding: 5px 9px;
+  align-items: center;
+  border: 1px solid #cadcd8;
+  border-radius: 9px;
+  background: #fbfdfc;
+  color: var(--ink-soft);
+  font-size: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.admin-user-menu > div {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  z-index: 8;
+  min-width: 150px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-strong);
+  box-shadow: 0 12px 28px rgba(18, 56, 59, 0.13);
+}
+.admin-user-menu > div button {
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-align: left;
+}
+.admin-user-menu > div button:hover {
+  background: #f0f7f4;
+}
+.admin-detail-tabs {
+  display: flex;
+  gap: 6px;
+  margin-top: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+.admin-detail-tabs button {
+  flex: none;
+  padding: 7px 11px;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.admin-detail-tabs button.active {
+  background: var(--teal-soft);
+  color: var(--teal);
+  font-weight: 600;
+}
+.admin-conversation-layout {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.8fr) minmax(0, 1.8fr);
+  gap: 22px;
+  margin-top: 22px;
+}
+.admin-conversation-list-column {
+  min-width: 0;
+  padding-right: 20px;
+  border-right: 1px solid var(--line);
+}
+.admin-conversation-list-column h4,
+.admin-conversation-view h4 {
+  margin: 0 0 10px;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.admin-conversation-view {
+  min-width: 0;
+}
+.admin-conversation.active {
+  background: var(--teal-soft);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.admin-activity-list {
+  margin-top: 8px;
+}
+.admin-empty-state {
+  display: grid;
+  place-items: center;
+  min-height: 150px;
+  padding: 24px;
+  border: 1px dashed #c8dbd6;
+  border-radius: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+.admin-empty-state strong {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.admin-empty-state p {
+  max-width: 34ch;
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.admin-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(11, 40, 42, 0.46);
+  backdrop-filter: blur(4px);
+}
+.admin-dialog {
+  width: min(100%, 460px);
+  padding: 25px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface-strong);
+  box-shadow: 0 24px 70px rgba(8, 31, 33, 0.26);
+}
+.admin-dialog h3 {
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 23px;
+}
+.admin-dialog > p {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.admin-dialog form {
+  margin-top: 20px;
+}
+.admin-dialog label {
+  display: grid;
+  gap: 7px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.admin-dialog input {
+  min-height: 44px;
+  padding: 9px 11px;
+  border: 1px solid #c9dcd7;
+  border-radius: 10px;
+  background: #f7fbfa;
+}
+.admin-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+@media (max-width: 800px) {
+  .topbar-actions {
+    gap: 6px;
+  }
+  .conversation-menu summary {
+    width: 38px;
+    height: 38px;
+  }
+  .account-menu summary,
+  .sidebar-tool {
+    min-height: 44px;
+  }
+  .topic-tags {
+    gap: 16px;
+  }
+  .topic-tags button {
+    min-height: 36px;
+  }
+  .admin-conversation-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .admin-conversation-list-column {
+    padding: 0 0 15px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .admin-section-heading,
+  .admin-detail-heading {
+    align-items: flex-start;
+  }
+  .admin-detail-tabs {
+    margin-inline: -2px;
+  }
+  .admin-dialog {
+    padding: 22px 18px;
+  }
+}
+
+/* 移动端收口：压缩登录介绍高度，避免表单被推出首屏。 */
+@media (max-width: 800px) {
+  .auth-story {
+    min-height: 178px;
+    padding: 22px 24px 18px;
+  }
+  .auth-story-copy {
+    padding: 22px 0 0;
+  }
+  .auth-story-line {
+    max-width: none;
+    font-size: clamp(26px, 8vw, 34px);
+    line-height: 1.22;
+  }
+  .auth-card {
+    padding-top: 32px;
+  }
+}
+@media (max-width: 540px) {
+  .auth-story {
+    min-height: 162px;
+    padding: 18px 20px 16px;
+  }
+  .auth-story-brand strong {
+    font-size: 23px;
+  }
+  .auth-story-copy {
+    padding-top: 17px;
+  }
+  .auth-story-line {
+    font-size: 25px;
+  }
+}
+
+.agent-tasks { margin: 10px 0 16px; padding: 0 0 12px; border-bottom: 1px solid var(--border, #e2e4e7); font-size: 0.9rem; }
 .agent-task { margin-top: 8px; }
 .agent-task summary { cursor: pointer; padding: 6px 0; }
 .agent-result { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+
+/* 单行动态执行进度：只展示当前关键工具，不保留步骤历史。 */
+.agent-progress {
+  display: flex;
+  min-height: 22px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  color: var(--teal);
+  font-size: 11px;
+}
+.agent-progress-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--signal);
+  box-shadow: 0 0 0 5px rgba(242, 107, 78, 0.1);
+  animation: progress-breathe 1.5s ease-in-out infinite;
+}
+.agent-progress-label {
+  font-weight: 500;
+}
+.agent-progress-time {
+  color: var(--muted);
+}
+@keyframes progress-breathe {
+  50% {
+    opacity: 0.42;
+    transform: scale(0.86);
+  }
+}
+@media (max-width: 540px) {
+  .agent-progress {
+    flex-wrap: wrap;
+    gap: 5px 7px;
+  }
+}

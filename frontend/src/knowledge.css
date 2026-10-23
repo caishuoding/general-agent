@@ -319,3 +319,211 @@
     width: 100%;
   }
 }
+
+/* 知识库交互优化：创建和重命名按需展开，危险操作收进更多菜单。 */
+.knowledge-notice {
+  width: min(100%, 1240px);
+  margin: 16px auto 0;
+  padding: 10px 13px;
+  border: 1px solid #c7ded7;
+  border-radius: 10px;
+  background: #eaf6f1;
+  color: #2f7066;
+  font-size: 12px;
+}
+.knowledge-create-panel {
+  margin-bottom: 14px;
+}
+.knowledge-create-panel summary {
+  display: inline-flex;
+  min-height: 38px;
+  padding: 7px 11px;
+  align-items: center;
+  border: 1px solid #c8dbd6;
+  border-radius: 9px;
+  background: #f8fcfa;
+  color: var(--teal, #277773);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.knowledge-create-panel[open] summary {
+  border-color: #9ec4bb;
+  background: #eef7f4;
+}
+.knowledge-create-panel form {
+  display: grid;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 13px;
+  border: 1px solid var(--line, #d0e0dc);
+  border-radius: 11px;
+  background: rgba(248, 252, 250, 0.8);
+}
+.knowledge-create-panel label,
+.knowledge-title-form label {
+  display: grid;
+  gap: 7px;
+  color: var(--ink-soft, #315554);
+  font-size: 11px;
+}
+.knowledge-title-display {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 20px;
+}
+.knowledge-title-display > div {
+  flex: 1;
+  min-width: 0;
+}
+.knowledge-title-display > div > span {
+  display: block;
+  color: var(--muted, #56706e);
+  font-size: 10px;
+}
+.knowledge-title-display h3 {
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--ink, #143537);
+  font-family: var(--serif, serif);
+  font-size: 23px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.knowledge-title-display > button {
+  flex: none;
+}
+.knowledge-more {
+  position: relative;
+  flex: none;
+}
+.knowledge-more summary {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid #c8dbd6;
+  border-radius: 50%;
+  background: #f8fcfa;
+  color: var(--ink-soft, #315554);
+  cursor: pointer;
+  list-style: none;
+  font-size: 18px;
+}
+.knowledge-more > div {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 8;
+  min-width: 140px;
+  padding: 5px;
+  border: 1px solid var(--line, #d0e0dc);
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 12px 28px rgba(18, 56, 59, 0.13);
+}
+.knowledge-more > div button {
+  width: 100%;
+  min-height: 34px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+.knowledge-more > div button.danger {
+  color: #a94231;
+}
+.knowledge-more > div button:hover {
+  background: #fdece8;
+}
+.knowledge-title-form {
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  align-items: end;
+  margin-bottom: 20px;
+}
+.knowledge-title-form input {
+  font-family: var(--serif, serif);
+  font-size: 20px;
+  font-weight: 600;
+}
+.knowledge-title-form .secondary-action {
+  min-height: 40px;
+}
+.knowledge-warning {
+  padding: 9px 11px;
+  border-left: 2px solid #d9a15f;
+  border-radius: 0 8px 8px 0;
+  background: #fbf5e9;
+  color: #8a6231;
+  font-size: 11px;
+}
+.knowledge-warning summary {
+  cursor: pointer;
+}
+.knowledge-warning p {
+  margin: 7px 0 0;
+  line-height: 1.7;
+}
+.knowledge-upload-status {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+  color: var(--teal, #277773);
+  font-size: 12px;
+}
+.knowledge-empty {
+  display: grid;
+  place-items: center;
+  min-height: 170px;
+  padding: 26px;
+  border: 1px dashed #c8dbd6;
+  border-radius: 12px;
+  text-align: center;
+}
+.knowledge-empty strong {
+  color: var(--ink-soft, #315554);
+  font-family: var(--serif, serif);
+  font-size: 18px;
+}
+.knowledge-empty p {
+  max-width: 38ch;
+  margin: 5px 0 0;
+}
+.knowledge-selector-help {
+  flex-basis: 100%;
+  margin: 0 0 3px;
+  color: var(--muted, #56706e);
+  font-size: 10px;
+}
+@media (max-width: 800px) {
+  .knowledge-title-display {
+    align-items: flex-start;
+  }
+  .knowledge-title-display h3 {
+    white-space: normal;
+  }
+  .knowledge-title-form {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .knowledge-title-form label {
+    grid-column: 1 / -1;
+  }
+  .knowledge-create-panel summary,
+  .knowledge-more summary {
+    min-height: 44px;
+  }
+}
+@media (max-width: 540px) {
+  .knowledge-title-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .knowledge-title-form label {
+    grid-column: auto;
+  }
+  .knowledge-title-form button,
+  .knowledge-create-panel form button {
+    width: 100%;
+  }
+}

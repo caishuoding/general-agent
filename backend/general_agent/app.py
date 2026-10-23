@@ -67,6 +67,11 @@ class MessageInput(BaseModel):
     content: str = Field(min_length=1, max_length=32000)
 
 
+class MessageProgress(BaseModel):
+    code: str
+    label: str
+
+
 class Message(BaseModel):
     id: UUID
     role: str
@@ -84,6 +89,7 @@ class Message(BaseModel):
     web_sources: list[dict[str, object]] = Field(default_factory=list)
     knowledge_sources: list[dict[str, object]] = Field(default_factory=list)
     agent_tasks: list[dict[str, Any]] = Field(default_factory=list)
+    progress: MessageProgress | None = None
 
 
 class ConversationDetail(Conversation):
@@ -133,7 +139,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     search = SearchService(database, model, search_settings, memory, attachments, model_transport)
     execution = ChatExecution(model, memory, search, KnowledgeTools(knowledge))
     conversation_graph = ConversationGraph(database, execution)
-    source_deletion = SourceDeletion(execution.deletion, memory, conversation_graph.delete_threads, attachments.delete_file)
+    source_deletion = SourceDeletion(execution.deletion, memory, attachments.delete_file)
     chat = ChatService(database, model, execution, attachments, conversation_graph)
     streaming = StreamingChat(database, model, execution, attachments, conversation_graph)
 

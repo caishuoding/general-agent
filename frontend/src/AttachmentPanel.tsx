@@ -134,7 +134,7 @@ export function AttachmentPanel({ conversationId, disabled, revision, resetToken
     const info = file.parse_info;
     // 以当前文件的独立身份打开删除预览。
     function removeFile() { onDelete(file.id, file.filename); }
-    const label = file.status === 'ready' ? (info?.format ? (info.coverage === 'partial' ? '文字可用（部分）' : '文字可用') : '可用') : file.status === 'failed' ? '失败' : file.status === 'deleting' ? '清理未完成' : '处理中';
+    const label = file.status === 'ready' ? (info?.format ? (info.coverage === 'partial' ? '部分内容可读取' : '内容可读取') : '已就绪') : file.status === 'failed' ? '读取失败' : file.status === 'deleting' ? '正在清理' : '正在读取';
     return <li key={file.id} className={`attachment-chip ${file.status}`}>
       <span className="attachment-chip-main">
         <span>{label} · {file.filename}</span>
@@ -148,12 +148,12 @@ export function AttachmentPanel({ conversationId, disabled, revision, resetToken
     </li>;
   }
 
-  return <section className="attachment-composer" aria-label="添加资料">
+  return <section className="attachment-composer" aria-label="添加文件">
     <div className="attachment-tools">
-      <label className={`upload-label ${disabled || !conversationId ? 'disabled' : ''}`} title="TXT / Markdown / PDF / DOCX / PNG / JPEG；每次最多 5 个，每个 20 MB，PDF 最多 200 页">＋ 添加资料<input aria-label="上传会话附件" type="file" accept=".txt,.md,.markdown,.pdf,.docx,.png,.jpg,.jpeg" multiple onChange={upload} disabled={disabled || !conversationId || uploading} /></label>
-      <span className="attachment-hint">{conversationId ? '本会话按需读取 · 保留 30 天 · 每次最多 5 个' : '新建会话后可上传资料'}</span>
+      <label className={`upload-label ${disabled || !conversationId ? 'disabled' : ''}`} title="支持 TXT、Markdown、PDF、Word、PNG 和 JPEG；每次最多 5 个，每个 20 MB，PDF 最多 200 页">＋ 添加文件<input aria-label="上传会话附件" type="file" accept=".txt,.md,.markdown,.pdf,.docx,.png,.jpg,.jpeg" multiple onChange={upload} disabled={disabled || !conversationId || uploading} /></label>
+      <span className="attachment-hint">{conversationId ? 'PDF、Word、文本或图片 · 每个不超过 20 MB' : '开始新对话后可以添加文件'}</span>
     </div>
-    {uploading && <p role="status">正在上传文件…</p>}
+    {uploading && <p role="status">正在上传…</p>}
     {error && <p role="alert">{error}</p>}
     {!!files.length && <ul className="attachment-tray" aria-label="本次上传资料">{files.map(renderFile)}</ul>}
   </section>;

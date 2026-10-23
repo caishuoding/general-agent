@@ -30,12 +30,16 @@ def test_main_creates_waits_and_summarizes_without_exposing_child_text(database_
         names = {tool['function']['name'] for tool in payload.get('tools', [])}
         if 'spawn_agent' not in names:
             child_inputs.append(payload)
-            assert not names & {'add_memory', 'search_memories', 'spawn_agent'}
+            system_messages = [item for item in payload['messages'] if item.get('role') == 'system']
+            assert len(system_messages) == 1
+            assert '你是完成指定子任务的子智能体' in system_messages[0]['content']
+            assert '优先比较成本和可维护性' in system_messages[0]['content']
+            assert names == {'get_current_time', 'search_documents', 'read_document', 'search_knowledge', 'search_web', 'fetch_web'}
             return response('子任务结论：方案 A 可行。')
         tools = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
         if not tools:
             return response(name='spawn_agent', arguments={'title': '研究 A', 'task': '检查方案 A',
-                'expected_output': '给出结论'})
+                'expected_output': '给出结论', 'instructions': '优先比较成本和可维护性'})
         if 'agent_id' in tools[-1]:
             return response(name='wait_agents', arguments={'agent_ids': [tools[-1]['agent_id']]})
         assert tools[-1]['agents'][0]['result'] == '子任务结论：方案 A 可行。'
@@ -64,8 +68,11 @@ def test_completed_agent_can_continue_and_wait_does_not_repeat_results(database_
         payload = json.loads(request.content)
         if 'spawn_agent' not in {tool['function']['name'] for tool in payload.get('tools', [])}:
             child_calls.append(payload['messages'])
+            system_messages = [item for item in payload['messages'] if item.get('role') == 'system']
+            assert len(system_messages) == 1
             if len(child_calls) == 2:
                 assert any(item.get('content') == '首次研究结论' for item in payload['messages'])
+                assert '补充成本时区分一次性费用和月度费用' in system_messages[0]['content']
             return response('首次研究结论' if len(child_calls) == 1 else '已补充成本证据')
         tools = [(item['tool_call_id'], json.loads(item['content'])) for item in payload['messages'] if item['role'] == 'tool']
         if not tools:
@@ -75,7 +82,8 @@ def test_completed_agent_can_continue_and_wait_does_not_repeat_results(database_
         if name in ('spawn_agent-call', 'send_agent_message-call'):
             return response(name='wait_agents', arguments={'agent_ids': [identifier]})
         if len(child_calls) == 1:
-            return response(name='send_agent_message', arguments={'agent_id': identifier, 'message': '请补充成本'})
+            return response(name='send_agent_message', arguments={'agent_id': identifier, 'message': '请补充成本',
+                'instructions': '补充成本时区分一次性费用和月度费用'})
         assert result['agents'][0]['result'] == '已补充成本证据'
         return response('汇总两次研究')
 
@@ -100,7 +108,10 @@ def test_child_web_sources_are_verified_in_main_answer(database_url: str, tmp_pa
         tools = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
         if 'spawn_agent' not in {tool['function']['name'] for tool in payload.get('tools', [])}:
             if not tools:
-                return response(name='search_web', arguments={'query': '方案成本'})
+                return response(name='search_web', arguments={
+                    'query': '方案成本',
+                    'ori_question': '请核对成本',
+                })
             return response('每月10元[' + tools[-1]['results'][0]['key'] + ']')
         if not tools:
             return response(name='spawn_agent', arguments={'title': '核对成本', 'task': '搜索成本证据', 'expected_output': '成本和来源'})

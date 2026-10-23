@@ -14,10 +14,10 @@ test('PDF当前上传状态可见，刷新后按消息展示并继续用于回�
     'controlled',
   );
   await page.goto('/');
-  await page.getByRole('button', { name: '新建会话' }).click();
+  await page.getByRole('button', { name: '开始新对话' }).click();
   await expect(page.getByLabel('上传会话附件')).toBeEnabled();
   await page.getByLabel('上传会话附件').setInputFiles('../tests/attachments/fixtures/partial.pdf');
-  await expect(page.getByText('文字可用（部分） · partial.pdf', { exact: true })).toBeVisible();
+  await expect(page.getByText('部分内容可读取 · partial.pdf', { exact: true })).toBeVisible();
   await expect(page.getByText('文字提取：1 / 2 页', { exact: true })).toBeVisible();
   await expect(page.getByText('第 2 页没有可提取文字（可能是空白或扫描图像）', { exact: true })).toBeVisible();
   await expect(page.getByText('面向单栏文字型 PDF；标题和段落按版面启发式还原，复杂矢量图保留原图供视觉理解但不还原编辑结构。', { exact: true })).toBeVisible();

@@ -1,5 +1,6 @@
 """DeepSeek Search / Fetch 的模型工具、操作记录与来源核验。"""
 
+import math
 import re
 from decimal import Decimal
 from typing import Any, Literal
@@ -20,6 +21,14 @@ from general_agent.memory.service import MemoryService
 from general_agent.prompts import TOOL_DESCRIPTIONS
 
 
+SEARCH_CANDIDATE_COUNT = 15
+SEARCH_RESULT_LIMIT = 8
+HIGH_QUALITY_SCORE = 1.5
+LOW_QUALITY_SCORE = 1.0
+MIN_HIGH_QUALITY_RESULTS = 6
+MAX_RESULTS_PER_DOMAIN = 2
+
+
 class SearchSettingsInput(SettingsInput):
     """固定 DeepSeek 搜索与抓取身份，独立凭据与可配置端点沿用安全 URL 校验。"""
 
@@ -28,10 +37,19 @@ class SearchSettingsInput(SettingsInput):
 
 
 class SearchWebInput(BaseModel):
-    """限制模型生成的公开网页查询长度，避免无效或超限请求。"""
+    """由模型同时生成搜索表达和不超过官方限制的原始用户意图。"""
 
     model_config = ConfigDict(str_strip_whitespace=True, extra='forbid', strict=True)
-    query: str = Field(min_length=1, max_length=128)
+    query: str = Field(
+        min_length=1,
+        max_length=128,
+        description='关键词化搜索表达，可按需加入 site:、lang:、after:、before: 等操作符。',
+    )
+    ori_question: str = Field(
+        min_length=1,
+        max_length=128,
+        description='触发搜索的当前用户完整意图；原话不超过 128 字时尽量原样填写，否则在不改变意图的前提下压缩。',
+    )
 
 
 class FetchWebInput(BaseModel):
@@ -64,6 +82,65 @@ def search_web_tool(name: str = "search_web") -> dict[str, Any]:
     }
 
 
+def normalize_search_result(item: dict[str, Any], order: int) -> dict[str, Any] | None:
+    """收窄一条有效搜索结果，并保留官方质量字段供排序和模型判断。"""
+    if not isinstance(item.get('url'), str):
+        return None
+    try:
+        url = FetchWebInput(url=item['url']).url
+    except ValueError:
+        return None
+    title = item.get('title')
+    summary = item.get('summary') or item.get('snippet') or ''
+    site_name = item.get('site_name')
+    date = item.get('date')
+    score = item.get('rerank_score')
+    authority = item.get('authority')
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(float(score)):
+        normalized_score = None
+    else:
+        normalized_score = float(score)
+    normalized_authority = (authority if isinstance(authority, int) and not isinstance(authority, bool)
+                            else None)
+    return {
+        'url': url,
+        'title': str(title or '')[:500],
+        'excerpt': str(summary)[:8000],
+        'site_name': str(site_name or urlsplit(url).hostname or '')[:200],
+        'date': str(date)[:100] if isinstance(date, str) and date.strip() else None,
+        'authority': normalized_authority,
+        'rerank_score': normalized_score,
+        '_order': order,
+    }
+
+
+def rank_search_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按相关性和权威度排序，优先高质量结果并限制单一域名占满候选。"""
+    ranked = sorted(results, key=lambda item: (
+        -(item['rerank_score'] if item['rerank_score'] is not None else -1),
+        -(item['authority'] if item['authority'] is not None else -1),
+        item['_order'],
+    ))
+    high_quality = [item for item in ranked if item['rerank_score'] is not None
+                    and item['rerank_score'] >= HIGH_QUALITY_SCORE]
+    if len(high_quality) >= MIN_HIGH_QUALITY_RESULTS:
+        ranked = [item for item in ranked if item['rerank_score'] is None
+                  or item['rerank_score'] >= LOW_QUALITY_SCORE]
+    selected: list[dict[str, Any]] = []
+    domain_counts: dict[str, int] = {}
+    for item in ranked:
+        domain = (urlsplit(item['url']).hostname or '').lower().removeprefix('www.')
+        if domain and domain_counts.get(domain, 0) >= MAX_RESULTS_PER_DOMAIN:
+            continue
+        selected.append(item)
+        domain_counts[domain] = domain_counts.get(domain, 0) + 1
+        if len(selected) >= SEARCH_RESULT_LIMIT:
+            break
+    for item in selected:
+        item.pop('_order', None)
+    return selected
+
+
 class SearchService:
     """保存联网执行事实，通过统一调用网关发送请求并核验实际来源。"""
 
@@ -83,22 +160,28 @@ class SearchService:
     def tool(
         self,
         conversation_id: UUID,
-        user_id: UUID,
+        user_message_id: UUID,
         query: str,
         operation: OperationContext,
         source_attachment_ids: list[UUID] | None = None,
         *,
         kind: Literal["search", "fetch"] = "search",
+        ori_question: str | None = None,
     ) -> dict[str, Any]:
-        """允许本轮执行多个查询，按查询或 URL 复用结果并累计来源及停止状态。"""
-        query = (SearchWebInput(query=query).query if kind == "search"
-                 else FetchWebInput(url=query).url)
+        """执行一个搜索或抓取请求，校验模型给出的意图并复用本轮已有结果。"""
+        if kind == 'search':
+            if ori_question is None:
+                raise ValueError('搜索工具必须同时提供 query 和 ori_question。')
+            search_input = SearchWebInput(query=query, ori_question=ori_question)
+            query, ori_question = search_input.query, search_input.ori_question
+        else:
+            query = FetchWebInput(url=query).url
         saved = self.settings.read()
         if saved is None or saved.model != 'deepseek-search':
             raise ValueError('尚未配置 DeepSeek Search / Fetch。请在管理端填写 DeepSeek 搜索密钥。')
         account_id = self.memory.account_id_for_conversation(conversation_id)
         with self.database.connect() as connection:
-            self.memory.guard_source(connection, conversation_id, user_id, operation)
+            self.memory.guard_source(connection, conversation_id, user_message_id, operation)
             attachment_sources = connection.execute(
                 "SELECT id,filename,created_at FROM attachments "
                 "WHERE conversation_id=%s AND status='ready' ORDER BY created_at,id",
@@ -108,7 +191,7 @@ class SearchService:
                 "SELECT o.action_id,a.version FROM memory_tool_observations o "
                 "JOIN memory_actions a ON a.id=o.action_id "
                 "WHERE o.message_id=%s AND a.status='complete'",
-                (user_id,),
+                (user_message_id,),
             ).fetchall()
             sources = [
                 {
@@ -128,7 +211,7 @@ class SearchService:
             connection.execute(
                 "INSERT INTO search_requests(id,operation_id,conversation_id,user_id,message_id,query,search_revision,status,sources) "
                 "VALUES(%s,%s,%s,%s,%s,%s,%s,'approved',%s) ON CONFLICT(operation_id) DO NOTHING",
-                (uuid4(), operation.operation_id, conversation_id, account_id, user_id, query if kind == "search" else "", saved.revision, Jsonb(sources)),
+                (uuid4(), operation.operation_id, conversation_id, account_id, user_message_id, query if kind == "search" else "", saved.revision, Jsonb(sources)),
             )
             row = connection.execute('SELECT * FROM search_requests WHERE operation_id=%s', (operation.operation_id,)).fetchone()
         assert row is not None
@@ -148,7 +231,7 @@ class SearchService:
                 (kind == "search", query, row['id']),
             )
         try:
-            results = self.fetch(saved, query, operation, kind)
+            results = self.fetch(saved, query, operation, kind, ori_question)
         except Exception as error:
             detail = str(error) if isinstance(error, ModelFailure) else '联网搜索未完成，可以重试。'
             self.fail_request(operation, detail)
@@ -198,9 +281,9 @@ class SearchService:
 
     def fetch(
         self, settings: StoredSettings, query: str, operation: OperationContext,
-        kind: Literal["search", "fetch"] = "search",
+        kind: Literal["search", "fetch"] = "search", ori_question: str | None = None,
     ) -> list[dict[str, Any]]:
-        """调用 DeepSeek Search/Fetch，按成功且非空的官方规则记录 credits。"""
+        """调用 DeepSeek Search/Fetch，扩大候选并保留质量字段后返回精简结果。"""
         with self.database.connect() as connection:
             answer = connection.execute(
                 "SELECT id FROM messages WHERE operation_id=%s AND role='assistant'",
@@ -209,7 +292,17 @@ class SearchService:
         base = settings.base_url.rstrip('/')
         # 同时兼容官方根地址和常用的 /v1 地址，避免重复版本前缀。
         endpoint = base + ('/tools/' if base.endswith('/v1') else '/v1/tools/') + kind
-        body = {'query': query, 'count': 5, 'need_content': False} if kind == 'search' else {'url': query}
+        if kind == 'search':
+            if ori_question is None:
+                raise ValueError('搜索请求缺少模型生成的 ori_question。')
+            body = {
+                'query': query,
+                'ori_question': ori_question,
+                'count': SEARCH_CANDIDATE_COUNT,
+                'need_content': False,
+            }
+        else:
+            body = {'url': query}
         with self.calls.bind(operation).call(settings, 'credits', assistant_message_id=answer['id'] if answer else None) as call_id:
             try:
                 with httpx.Client(transport=self.transport, timeout=30, follow_redirects=False, trust_env=False) as client:
@@ -238,20 +331,13 @@ class SearchService:
             if not isinstance(payload.get('results'), list):
                 raise ModelFailure('DeepSeek 未返回有效结果列表，本次未完成搜索。')
             self.calls.operations.record(call_id, TokenUsage(), credits=Decimal(int(bool(payload['results']))))
-            results = []
-            for item in payload['results'][:5]:
-                if not isinstance(item, dict) or not isinstance(item.get('url'), str):
-                    continue
-                try:
-                    url = FetchWebInput(url=item['url']).url
-                except ValueError:
-                    continue
-                results.append({
-                    'url': url,
-                    'title': str(item.get('title', ''))[:500],
-                    'excerpt': str(item.get('summary') or item.get('snippet') or '')[:8000],
-                })
-            return results
+            results = [
+                normalized
+                for order, item in enumerate(payload['results'][:50])
+                if isinstance(item, dict)
+                and (normalized := normalize_search_result(item, order)) is not None
+            ]
+            return rank_search_results(results)
 
     def resolve(self, operation: OperationContext, answer: str) -> tuple[str, list[dict[str, Any]]]:
         """核对主执行及已交付子任务的真实网页来源，拒绝未知编号。"""

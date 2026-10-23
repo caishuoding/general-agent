@@ -66,8 +66,9 @@ class AgentRepository:
                 invalidate_agent_material(connection, [row['conversation_id']], [row['answer_attempt_id']])
             raise ValueError('source_invalidated：资料范围已变化，旧任务结果与上下文已清除，请重新提问。')
 
-    def create(self, parent_run: UUID, key: str, task: str, title: str = '', agent_id: UUID | None = None) -> dict[str, Any]:
-        """原子分派或补充任务，按调用身份幂等，运行中的智能体不能追加。"""
+    def create(self, parent_run: UUID, key: str, task: str, title: str = '', agent_id: UUID | None = None,
+               instructions: str | None = None) -> dict[str, Any]:
+        """原子分派或补充任务，按调用身份幂等，并保存本轮任务级指令。"""
         self.guard(parent_run)
         parent = self.info(parent_run)
         if parent['parent_agent_id'] is not None:
@@ -98,10 +99,13 @@ class AgentRepository:
                 if sequence > LIMITS.max_runs:
                     raise ValueError('子智能体最多执行三次任务。')
                 history = previous['messages']
+                if instructions is None:
+                    instructions = str(previous.get('instructions') or '')
+            instructions = instructions or ''
             operation_id, run_id = uuid4(), uuid4()
             connection.execute("INSERT INTO cloud_operations(id,scope_hash,purpose,conversation_id,user_id) VALUES(%s,%s,'agent_worker',%s,%s)", (operation_id, str(run_id), root['conversation_id'], root['account_id']))
             deadline = min(root['deadline'], datetime.now(timezone.utc) + timedelta(seconds=LIMITS.run_seconds))
-            connection.execute("INSERT INTO agent_runs(id,agent_id,sequence,operation_id,request_key,task,status,messages,deadline) VALUES(%s,%s,%s,%s,%s,%s,'queued',%s,%s)", (run_id, agent_id, sequence, operation_id, key, task, Jsonb(history), deadline))
+            connection.execute("INSERT INTO agent_runs(id,agent_id,sequence,operation_id,request_key,task,status,messages,deadline,instructions) VALUES(%s,%s,%s,%s,%s,%s,'queued',%s,%s,%s)", (run_id, agent_id, sequence, operation_id, key, task, Jsonb(history), deadline, instructions))
             if sequence > 1:
                 connection.execute('INSERT INTO agent_sources(run_id,source_key,payload,delivered) SELECT %s,s.source_key,s.payload,s.delivered FROM agent_sources s JOIN agent_runs prior ON prior.id=s.run_id WHERE prior.agent_id=%s ON CONFLICT DO NOTHING', (run_id, agent_id))
             result = {'agent_id': str(agent_id), 'run_id': str(run_id), 'status': 'queued'}

@@ -87,11 +87,6 @@ class AuthService:
                 "DELETE FROM sessions WHERE token_hash = %s", (self._token_hash(token),)
             )
 
-    def revoke_all_sessions(self, user_id: UUID) -> None:
-        """吊销指定账号的全部登录会话，用于改密、重置和停用。"""
-        with self.database.connect() as connection:
-            connection.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
-
     def change_password(
         self, user: AuthenticatedUser, current_password: str, new_password: str
     ) -> str:

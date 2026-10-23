@@ -1,4 +1,5 @@
 import { SourceDeletion, SourceDeletionPending, type DeleteTarget } from './SourceDeletion';
+import { AgentProgress } from "./AgentProgress";
 import { AgentTasks } from "./AgentTasks";
 import { AnswerContent } from "./AnswerContent";
 import {
@@ -49,6 +50,7 @@ export function App() {
   const [pending, setPending] = useState<{
     id: string;
     content: string;
+    startedAt: string;
   } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [sourceRevision, setSourceRevision] = useState(0);
@@ -206,7 +208,7 @@ export function App() {
         if (activeId.current === conversationId)
           setStreamNotice("进度连接中断，正在重新连接；后端回答状态将在连接恢复后同步。");
       };
-      // 离开会话只取消界面订阅，停止生成由明确的停止按钮触发。
+      // 离开会话只取消界面订阅，停止回答由明确的按钮触发。
       return () => source.close();
     },
     [generatingId, conversationId],
@@ -399,6 +401,23 @@ export function App() {
     void createConversation();
   }
 
+  /** 将示例问题放入输入框并聚焦，先让用户确认或补充，不自动发送。 */
+  function useExamplePrompt(event: MouseEvent<HTMLButtonElement>) {
+    const prompt = event.currentTarget.dataset.prompt;
+    if (!prompt) return;
+    setDraft(prompt);
+    // 等草稿写入后聚焦输入框，方便用户继续修改。
+    requestAnimationFrame(function focusComposer() {
+      draftInput.current?.focus();
+    });
+  }
+
+  /** 关闭会话操作菜单后再打开删除确认，避免菜单和确认层互相遮挡。 */
+  function deleteConversationFromMenu(event: MouseEvent<HTMLButtonElement>) {
+    event.currentTarget.closest("details")?.removeAttribute("open");
+    deleteConversation();
+  }
+
   // 从会话按钮的数据属性读取标识，避免为每项创建独立事件闭包。
   function openConversation(event: MouseEvent<HTMLButtonElement>) {
     const id = event.currentTarget.dataset.id;
@@ -502,7 +521,7 @@ export function App() {
     const targetId = id;
     followLatest.current = true;
     setShowLatest(false);
-    setPending({ id: targetId, content });
+    setPending({ id: targetId, content, startedAt: new Date().toISOString() });
     setDraft("");
     setError("");
     try {
@@ -588,10 +607,10 @@ export function App() {
 
   /** 根据附件处理状态返回聊天记录中的简短说明，无输入返回展示文字。 */
   function attachmentLabel(attachment: MessageAttachment) {
-    if (attachment.status === "ready") return "可用";
-    if (attachment.status === "failed") return "解析失败";
-    if (attachment.status === "deleting") return "已删除";
-    return "处理中";
+    if (attachment.status === "ready") return "已就绪";
+    if (attachment.status === "failed") return "读取失败";
+    if (attachment.status === "deleting") return "正在清理";
+    return "正在读取";
   }
 
   /** 渲染用户消息随附文件的下载入口，保留原始文件名和处理状态。 */
@@ -633,21 +652,21 @@ export function App() {
             })}
           </time>
         </div>
+        {message.role === "assistant" && conversation && <AgentTasks tasks={message.agent_tasks || []} conversationId={conversation.id} answerId={message.id} />}
         {message.role === "assistant"
           ? <AnswerContent message={message} />
           : <div className="message-content">
               <span>{message.content}</span>
               {!!message.attachments.length && renderMessageAttachments(message.attachments)}
             </div>}
-        {message.role === "assistant" && conversation && <AgentTasks tasks={message.agent_tasks || []} conversationId={conversation.id} answerId={message.id} />}
-        {message.status === "generating" && <div className="message-progress" role="status">正在生成…</div>}
+        {message.status === "generating" && <AgentProgress progress={message.progress} startedAt={message.created_at} />}
         {message.status === "failed" && (
-          <div className="message-error" role="alert">回答未完成 · {message.error || "可以重试或检查设置。"}</div>
+          <div className="message-error" role="alert">这次回答没有完成 · {message.error || "可以再试一次或检查模型设置。"}</div>
         )}
-        {message.status === "stopped" && <div className="message-progress">已停止 · 已保留部分内容</div>}
+        {message.status === "stopped" && <div className="message-progress">已停止 · 已保留这部分回答</div>}
         {(message.status === "failed" || message.status === "stopped") && conversation?.messages.at(-1)?.id === message.id && (
           <button className="retry-button" data-action="retry" data-message={message.id} onClick={changeRun} disabled={changingRun || !!pending}>
-            重试回答
+            再试一次
           </button>
         )}
       </article>
@@ -712,33 +731,41 @@ export function App() {
           onClick={newConversation}
           disabled={creating || loading}
         >
-          <span aria-hidden="true">＋</span>新建会话
+          <span aria-hidden="true">＋</span>开始新对话
         </button>
-        <button className="conversation-button" onClick={openKnowledge} aria-pressed={screen === 'knowledge'}>知识库</button>
-        {screen === 'knowledge' && <button className="conversation-button" onClick={returnToChat}>返回对话</button>}
+        <div className="sidebar-tools" aria-label="工具">
+          <button className="sidebar-tool" onClick={openKnowledge} aria-pressed={screen === 'knowledge'}>
+            <span aria-hidden="true">▤</span>知识库
+          </button>
+          {screen === 'knowledge' && (
+            <button className="sidebar-tool" onClick={returnToChat}>
+              <span aria-hidden="true">←</span>返回对话
+            </button>
+          )}
+        </div>
         <div className="section-label">
           你的会话 <span>{conversations.length || ""}</span>
         </div>
         <nav className="conversation-list" aria-label="会话列表">
           {conversations.map(renderConversation)}
           {!conversations.length && (
-            <p className="sidebar-empty">新的想法，从这里开始。</p>
+            <p className="sidebar-empty">还没有对话，开始一个吧。</p>
           )}
         </nav>
         <div className="sidebar-bottom">
-          {mobile && conversation && <button className="sidebar-delete-conversation" onClick={deleteConversation}>删除当前会话</button>}
-          <div className="user-menu">
-            <span className="user-name">{user.username}</span>
-            <button className="logout-button" onClick={openPasswordScreen}>
-              修改密码
-            </button>
-            <button className="logout-button" onClick={logout}>
-              退出
-            </button>
-          </div>
+          <details className="account-menu">
+            <summary>
+              <span className="user-name">{user.username}</span>
+              <span aria-hidden="true">账号</span>
+            </summary>
+            <div className="account-menu-actions">
+              <button onClick={openPasswordScreen}>修改密码</button>
+              <button onClick={logout}>退出登录</button>
+            </div>
+          </details>
           <div className="local-note">
             <span className="status-dot" />
-            本机保存 · 云端回答
+            内容保存在你的账号中
           </div>
         </div>
       </aside>
@@ -750,7 +777,17 @@ export function App() {
             <span className="topbar-divider">/</span>
             <span className="topbar-subtitle">{screen === "knowledge" ? "长期资料" : conversation?.title || "日常、灵感与思考"}</span>
           </div>
-          <span className="user-pill">{user.username}</span>
+          <div className="topbar-actions">
+            {screen === "chat" && conversation && (
+              <details className="conversation-menu">
+                <summary aria-label="对话选项">⋯</summary>
+                <div>
+                  <button type="button" onClick={deleteConversationFromMenu}>删除当前对话</button>
+                </div>
+              </details>
+            )}
+            <span className="user-pill" title={user.username}>{user.username}</span>
+          </div>
         </header>
         {error && (
           <div className="global-error" role="alert">
@@ -760,7 +797,6 @@ export function App() {
         {screen === 'knowledge' ? <KnowledgePanel /> : <>
         <SourceDeletionPending revision={sourceRevision} onChanged={refreshSources} />
         {deleteTarget && <SourceDeletion key={deleteTarget.path} target={deleteTarget} onClose={closeDeletion} onChanged={refreshSources} />}
-        {!mobile && conversation && <button className="delete-conversation" onClick={deleteConversation}>删除当前会话</button>}
         <div className="chat-layout">
             <div className="chat-scroll" ref={chatScroll} onScroll={trackReadingPosition}>
               <div className="chat-content">
@@ -776,10 +812,10 @@ export function App() {
                     <div className="eyebrow">开始一段对话</div>
                     <h2>把还没想清楚的事，放在这里。</h2>
                     <p>一句话、一份资料，或一个还没成形的念头。先说出来，再慢慢理清。</p>
-                    <div className="topic-tags">
-                      <span>问一个问题</span>
-                      <span>理清一件事</span>
-                      <span>读一份资料</span>
+                    <div className="topic-tags" aria-label="可以这样开始">
+                      <button type="button" data-prompt="今天最值得先做什么？" onClick={useExamplePrompt}>今天最值得先做什么？</button>
+                      <button type="button" data-prompt="帮我整理一个还没想清楚的想法。" onClick={useExamplePrompt}>整理一个想法</button>
+                      <button type="button" data-prompt="请帮我读一份资料，并总结重点。" onClick={useExamplePrompt}>读一份资料</button>
                     </div>
                   </section>
                 ) : (
@@ -793,10 +829,10 @@ export function App() {
                             <span>{currentPending.content}</span>
                           </div>
                         </article>
-                        <div className="thinking" role="status">
-                          <span className="thinking-dot" />
-                          正在等待回答…
-                        </div>
+                        <AgentProgress
+                          progress={{ code: "preparing", label: "正在准备回答…" }}
+                          startedAt={currentPending.startedAt}
+                        />
                       </>
                     )}
                   </div>
@@ -812,7 +848,7 @@ export function App() {
                 <textarea
                   ref={draftInput}
                   aria-label="消息"
-                  placeholder="把你的想法写在这里…"
+                  placeholder="写下你想聊的事…"
                   value={draft}
                   onChange={editDraft}
                   onKeyDown={composeKey}
@@ -822,12 +858,12 @@ export function App() {
                 />
                 <div className="composer-bottom" onPointerDown={preserveComposerFocus}>
                   <span>
-                    <span className="desktop-composer-hint">文字对话 <i>·</i> Shift + Enter 换行</span>
-                    <span className="mobile-composer-hint">回车换行 · 点击箭头发送</span>
+                    <span className="desktop-composer-hint">Enter 发送 <i>·</i> Shift + Enter 换行</span>
+                    <span className="mobile-composer-hint">点击发送</span>
                   </span>
                   {activeRun ? (
                     <button type="button" className="stop-button" data-action="stop" data-message={activeRun.id} onClick={changeRun} disabled={changingRun}>
-                      停止生成
+                      停止回答
                     </button>
                   ) : <button
                     className="send-button"
@@ -843,7 +879,7 @@ export function App() {
                   </button>}
                 </div>
               </form>
-              <p className="composer-note">回答可能有误，请核对重要信息。停止生成不会撤回已经发出的服务请求。</p>
+              <p className="composer-note">回答可能不准确，重要信息请核实。</p>
             </div>
         </div>
         </>}

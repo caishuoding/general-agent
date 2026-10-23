@@ -235,21 +235,3 @@ def test_graph_boundary_failure_uses_last_state() -> None:
     connection = database.connect.return_value.__enter__.return_value
     terminal = [call for call in connection.execute.call_args_list if "status='failed'" in call.args[0]]
     assert terminal[-1].args[1][0] == result['answer']
-
-
-def test_legacy_checkpoint_cleanup_is_scoped(database_url: str) -> None:
-    """保留旧检查点的删除能力，只清指定回答身份，不创建新检查点。"""
-    database = Database(database_url)
-    target, retained = uuid4(), uuid4()
-    with database.connect() as connection:
-        connection.execute('CREATE SCHEMA langgraph')
-        for table in ('checkpoints', 'checkpoint_blobs', 'checkpoint_writes'):
-            connection.execute(f'CREATE TABLE langgraph.{table}(thread_id TEXT)')
-            connection.execute(f'INSERT INTO langgraph.{table} VALUES(%s),(%s)', (str(target), str(retained)))
-    graph = ConversationGraph(database, MagicMock())
-
-    graph.delete_threads([target])
-
-    with database.connect() as connection:
-        for table in ('checkpoints', 'checkpoint_blobs', 'checkpoint_writes'):
-            assert connection.execute(f'SELECT thread_id FROM langgraph.{table}').fetchall() == [{'thread_id': str(retained)}]

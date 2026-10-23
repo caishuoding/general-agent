@@ -14,8 +14,8 @@ async function start(page: Page, content: string) {
     "controlled-model",
   );
   await page.goto("/");
-  await page.getByRole("button", { name: "新建会话" }).click();
-  await expect(page.getByRole("button", { name: "新建会话" })).toBeEnabled();
+  await page.getByRole("button", { name: "开始新对话" }).click();
+  await expect(page.getByRole("button", { name: "开始新对话" })).toBeEnabled();
   await page.getByRole("textbox", { name: "消息", exact: true }).fill(content);
   await page.getByRole("button", { name: "发送消息" }).click();
 }
@@ -24,9 +24,10 @@ async function start(page: Page, content: string) {
 test("逐步显示第一段然后完成", async ({ page }) => {
   await start(page, "验证分段回答");
   await expect(page.getByText("第一段", { exact: true })).toBeVisible();
-  await expect(page.getByText("正在生成…", { exact: true })).toBeVisible();
+  await expect(page.locator(".agent-progress")).toContainText("正在整理回答…");
+  await expect(page.locator(".agent-progress")).toContainText("已用时");
   await expect(page.getByText("第一段，第二段。", { exact: true })).toBeVisible();
-  await expect(page.getByText("正在生成…", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".agent-progress")).toHaveCount(0);
   await page.reload();
   await expect(page.getByText("第一段，第二段。", { exact: true })).toBeVisible();
 });
@@ -35,12 +36,13 @@ test("逐步显示第一段然后完成", async ({ page }) => {
 test("停止保留部分内容和刷新后的状态", async ({ page }) => {
   await start(page, "验证停止回答");
   await expect(page.getByText("第一段", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "停止生成", exact: true }).click();
-  await expect(page.getByText("已停止 · 已保留部分内容", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "停止回答", exact: true }).click();
+  await expect(page.getByText("已停止 · 已保留这部分回答", { exact: true })).toBeVisible();
+  await expect(page.locator(".agent-progress")).toHaveCount(0);
   await page.reload();
-  await expect(page.getByText("已停止 · 已保留部分内容", { exact: true })).toBeVisible();
+  await expect(page.getByText("已停止 · 已保留这部分回答", { exact: true })).toBeVisible();
   await expect(page.getByText("第一段", { exact: true })).toBeVisible();
-  await expect(page.getByText("停止生成不会撤回已经发出的服务请求", { exact: false })).toBeVisible();
+  await expect(page.getByText("回答可能不准确，重要信息请核实。", { exact: false })).toBeVisible();
 });
 
 // 模型断流后明确展示失败，重试创建新回答尝试且不重复用户消息。
@@ -49,7 +51,7 @@ test("断流后可重试且不重复用户消息", async ({ page }) => {
   await expect(page.getByText("第一段", { exact: true })).toBeVisible();
   await expect(page.getByText("模型回答流中断", { exact: false })).toBeVisible();
   await page.reload();
-  await page.getByRole("button", { name: "重试回答", exact: true }).click();
+  await page.getByRole("button", { name: "再试一次", exact: true }).click();
   await expect(page.getByText("第一段，第二段。", { exact: true })).toBeVisible();
   await expect(page.locator(".message.user .message-content").filter({ hasText: "验证断流重试" })).toHaveCount(1);
   await expect(page.locator(".message.assistant.failed")).toHaveCount(1);

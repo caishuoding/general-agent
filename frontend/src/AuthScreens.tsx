@@ -46,7 +46,7 @@ export function LoginScreen({
   expectedRole = "user",
   kicker = "个人对话空间",
   title = "登录",
-  description = "账号由管理员创建，不开放注册。",
+  description = "使用管理员为你创建的账号登录。",
   initialError = "",
 }: LoginProps) {
   const [username, setUsername] = useState("");
@@ -157,8 +157,8 @@ export function PasswordChangeScreen({
         <h1 id="change-password-title">{forced ? "设置新密码" : "修改密码"}</h1>
         <p className="auth-description">
           {forced
-            ? `${user.username}，请先把临时密码替换为至少 10 个字符的新密码。`
-            : `${user.username}，请输入当前密码并设置至少 10 个字符的新密码。`}
+            ? `${user.username}，先设置一个至少 10 个字符的新密码，然后就可以开始对话。`
+            : `${user.username}，输入当前密码并设置一个新的登录密码。`}
         </p>
         <form className="auth-form" onSubmit={submit}>
           <label className="auth-field">
@@ -193,7 +193,7 @@ export function PasswordChangeScreen({
           </label>
           {error && <div className="auth-error" role="alert">{error}</div>}
           <button className="auth-submit" type="submit" disabled={submitting}>
-            {submitting ? "正在保存…" : "保存新密码"}
+            {submitting ? "正在更新密码…" : forced ? "设置新密码" : "更新密码"}
           </button>
           {forced ? (
             <button className="auth-link" type="button" onClick={onLogout}>
@@ -201,7 +201,7 @@ export function PasswordChangeScreen({
             </button>
           ) : (
             <button className="auth-link" type="button" onClick={onCancel}>
-              返回
+              返回对话
             </button>
           )}
         </form>

@@ -11,6 +11,7 @@ class SpawnInput(BaseModel):
     task: str = Field(min_length=1, max_length=12000)
     context: str = Field(default='', max_length=16000)
     expected_output: str = Field(min_length=1, max_length=4000)
+    instructions: str = Field(default='', max_length=4000)
 
 
 class WaitInput(BaseModel):
@@ -26,6 +27,7 @@ class SendInput(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True, str_strip_whitespace=True)
     agent_id: str
     message: str = Field(min_length=1, max_length=12000)
+    instructions: str | None = Field(default=None, max_length=4000)
 
 
 class CancelInput(BaseModel):
@@ -35,15 +37,17 @@ class CancelInput(BaseModel):
 
 
 ORCHESTRATION = {'spawn_agent', 'wait_agents', 'send_agent_message', 'cancel_agent'}
-WORKER_TOOLS = {'get_current_time', 'search_documents', 'read_document', 'search_knowledge', 'search_web', 'fetch_web'}
+SHARED_TOOLS = {'get_current_time', 'search_documents', 'read_document', 'search_knowledge', 'search_web', 'fetch_web'}
+MAIN_ONLY_TOOLS = {'add_memory', 'search_memories', 'update_memory', 'delete_memory'}
+WORKER_TOOLS = SHARED_TOOLS
 
 
 def orchestration_tools() -> list[dict[str, Any]]:
     """提供异步创建、等待、补充和取消工具，不强制每个问题分工。"""
     definitions: list[tuple[str, str, type[BaseModel]]] = [
-        ('spawn_agent', '按需异步分派独立子任务，立即返回 ID。简单问题直接回答。任务应明确且可验收；子任务在后台执行，你可以继续自己工作或创建其他子任务。', SpawnInput),
+        ('spawn_agent', '按需异步分派独立子任务，立即返回 ID。简单问题直接回答。任务应明确且可验收；instructions 只补充任务方法和重点，不能覆盖固定安全规则；子任务在后台执行，你可以继续自己工作或创建其他子任务。', SpawnInput),
         ('wait_agents', '等待任一指定子智能体的新结果；超时只返回状态，不取消任务。使用返回的游标避免重复取得全文。需要结果时再等待，收到结果后检查证据与缺口。', WaitInput),
-        ('send_agent_message', '给已完成的子智能体追加任务，延续其上下文并立即返回新执行 ID。运行中返回 agent_busy，不自动排队；之后用 wait_agents 取结果。', SendInput),
+        ('send_agent_message', '给已完成的子智能体追加任务，延续其上下文并立即返回新执行 ID；instructions 可更新下一轮任务级方法，留空则沿用。运行中返回 agent_busy，不自动排队；之后用 wait_agents 取结果。', SendInput),
         ('cancel_agent', '取消不再需要的子任务，防止继续调用；已发请求仍可能计费。最终回答前等待需要的任务，取消其余任务。', CancelInput),
     ]
     return [{'type': 'function', 'function': {'name': name, 'description': description,

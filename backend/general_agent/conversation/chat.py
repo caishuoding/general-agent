@@ -32,7 +32,7 @@ class ChatService:
             reserved = self.execution.reserve_first(content, settings, operation)
             connection.execute("INSERT INTO messages(id,conversation_id,role,content,status) VALUES(%s,%s,'user',%s,'complete')", (user_id,conversation_id,content))
             self.attachments.bind_to_user_message(connection, conversation_id, user_id)
-            connection.execute("INSERT INTO messages(id,conversation_id,role,content,status,reply_to,operation_id,model_revision,embedding_revision) VALUES(%s,%s,'assistant','','generating',%s,%s,%s,%s)", (answer_id,conversation_id,user_id,operation.operation_id,settings.revision,self.execution.embedding_revision(content)))
+            connection.execute("INSERT INTO messages(id,conversation_id,role,content,status,reply_to,operation_id) VALUES(%s,%s,'assistant','','generating',%s,%s)", (answer_id,conversation_id,user_id,operation.operation_id))
             connection.execute("UPDATE conversations SET title=%s WHERE id=%s AND title='新会话'", (content[:40],conversation_id))
             rows = connection.execute("SELECT role,content FROM messages WHERE conversation_id=%s AND status='complete' ORDER BY position", (conversation_id,)).fetchall()
         result = self.graph.run(ConversationContext(
