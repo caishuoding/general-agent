@@ -477,12 +477,18 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         return [UsageRecord.model_validate({**row, "credits": format(row["credits"], "f") if row["credits"] is not None else None}) for row in database.list_usage(current_user(request).id)]
 
     frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    if (frontend / "index.html").is_file():
+        @app.get("/")
+        @app.get("/index.html")
+        def user_frontend() -> FileResponse:
+            """用户端入口禁止缓存，确保重新构建后其他浏览器能取得最新资源。"""
+            return FileResponse(frontend / "index.html", headers={"Cache-Control": "no-store, max-age=0, must-revalidate"})
     if (frontend / "admin.html").is_file():
         @app.get("/admin")
         @app.get("/admin/")
         def admin_frontend() -> FileResponse:
             """为独立管理端提供单独入口，不与用户聊天页面共用路由。"""
-            return FileResponse(frontend / "admin.html")
+            return FileResponse(frontend / "admin.html", headers={"Cache-Control": "no-store, max-age=0, must-revalidate"})
     if frontend.is_dir():
         app.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
     return app

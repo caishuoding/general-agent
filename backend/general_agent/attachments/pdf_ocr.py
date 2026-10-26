@@ -87,7 +87,7 @@ def render_scan_page(path: Path, directory: Path, number: int) -> 'ParsedDocumen
         return ParsedDocument(info=DocumentInfo(format='pdf'), images=[image])
 
 
-def recognize_page(path: Path, transport: httpx.BaseTransport | None, timeout: float = 120) -> OcrPage:
+def recognize_page(path: Path, transport: httpx.BaseTransport | None, timeout: float = 300) -> OcrPage:
     """有界调用私网 OCR 服务，只传 PNG 且不透传模型凭据或服务端原始错误。"""
     endpoint = os.environ.get('DOCUMENT_OCR_URL', '').strip().rstrip('/')
     if not endpoint:
@@ -254,7 +254,7 @@ def complete_scans(path: Path, directory: Path, document: 'ParsedDocument',
     info = document.info
     info.ocr_rules = OCR_REVISION
     rotated_pages: set[int] = set()
-    deadline = monotonic() + 1800
+    deadline = monotonic() + 3600
     if progress:
         progress(0, len(document.scan_pages))
     for completed, number in enumerate(document.scan_pages, 1):
@@ -262,12 +262,12 @@ def complete_scans(path: Path, directory: Path, document: 'ParsedDocument',
         pictures: list[ParsedImage] = []
         try:
             if monotonic() >= deadline:
-                raise ValueError('整份扫描 PDF OCR 超过 30 分钟资源限制。')
+                raise ValueError('整份扫描 PDF OCR 超过 60 分钟资源限制。')
             rendered = parse_document_worker(path, f'.scan-page:{number}', directory)
             if rendered.error or not rendered.images:
                 raise ValueError(rendered.error or '扫描页渲染未完成。')
             image = rendered.images[0]
-            result = recognize_page(directory / image.storage_name, transport, max(1, min(120, deadline - monotonic())))
+            result = recognize_page(directory / image.storage_name, transport, max(1, min(300, deadline - monotonic())))
             units, pictures, notes = page_content(
                 result, image, directory, len(document.images),
                 max((unit.table or 0 for unit in document.units), default=0),

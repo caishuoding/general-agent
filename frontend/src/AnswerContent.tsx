@@ -82,15 +82,13 @@ function CodeBlock({ node, children }: ExtraProps & { children?: ReactNode }) {
 }
 
 /** 为本条消息的可信来源生成独立锚点，防止不同回答的相同编号发生冲突。 */
-function sourceId(messageId: string, key: string) {
+export function sourceId(messageId: string, key: string) {
   return `answer-source-${encodeURIComponent(messageId)}-${encodeURIComponent(key)}`;
 }
 
-/** 展开并定位回答底部对应的可信来源。 */
-function revealSource(event: MouseEvent<HTMLAnchorElement>) {
-  event.preventDefault();
-  const href = event.currentTarget.getAttribute('href');
-  const target = href ? document.getElementById(href.slice(1)) : null;
+/** 定位到已展开的可信来源，并为键盘用户保留焦点。 */
+function scrollToSource(identifier: string) {
+  const target = document.getElementById(identifier);
   if (!target) return;
   let ancestor: HTMLElement | null = target;
   while (ancestor) {
@@ -101,8 +99,10 @@ function revealSource(event: MouseEvent<HTMLAnchorElement>) {
   target.focus({ preventScroll: true });
 }
 
+type RenderedMessage = Pick<Message, 'id' | 'content' | 'web_sources' | 'knowledge_sources'>;
+
 /** 根据服务端来源编号创建 Markdown 插件，仅转换正文中真实存在的网页或知识库引用。 */
-function citationPlugin(message: Message, citationNumbers: Map<string, string>) {
+function citationPlugin(message: RenderedMessage, citationNumbers: Map<string, string>) {
   const webKeys = new Set((message.web_sources || []).map(function getKey(source) { return source.key; }));
   const knowledge = new Map((message.knowledge_sources || []).map(function indexSource(source) { return [source.key, source]; }));
   /** 返回语法树转换器，不修改代码、已有链接或未知来源标记。 */
@@ -274,7 +274,7 @@ const components: Components = {
 };
 
 /** 为当前回答提供引用定位、行内媒体和普通 Markdown 的组合渲染器。 */
-function answerComponents(message: Message): Components {
+function answerComponents(message: RenderedMessage, onCitationClick: (identifier: string) => void): Components {
   const knowledge = new Map((message.knowledge_sources || []).map(function indexSource(source) { return [source.key, source]; }));
   return {
     ...components,
@@ -286,7 +286,13 @@ function answerComponents(message: Message): Components {
         return source ? <InlineKnowledgeMedia source={source} /> : <span>{children}</span>;
       }
       if (href.startsWith('#answer-source-')) {
-        return <a {...props} className="answer-citation" href={href} onClick={revealSource}>{children}</a>;
+        const identifier = href.slice(1);
+        /** 由回答容器先展开来源区，再定位到真实来源条目。 */
+        function reveal(event: MouseEvent<HTMLAnchorElement>) {
+          event.preventDefault();
+          onCitationClick(identifier);
+        }
+        return <a {...props} className="answer-citation" href={href} onClick={reveal}>{children}</a>;
       }
       return <a {...props} href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
     },
@@ -309,32 +315,87 @@ function answerComponents(message: Message): Components {
   };
 }
 
+/** 使用统一安全组件渲染一段可带真实引用的 Markdown 正文。 */
+export function AnswerMarkdown({ message, onCitationClick, className = '' }: {
+  message: RenderedMessage;
+  onCitationClick?: (identifier: string) => void;
+  className?: string;
+}) {
+  const citationNumbers = new Map((message.knowledge_sources || []).map(function numberSource(source, index) {
+    // 为知识库来源分配面向用户的连续编号。
+    return [source.key, String(index + 1)];
+  }));
+  /** 没有外部定位回调时保留正文锚点，不额外展开页面状态。 */
+  function reveal(identifier: string) {
+    if (onCitationClick) onCitationClick(identifier);
+    else scrollToSource(identifier);
+  }
+  return <div className={`message-content answer-markdown ${className}`.trim()}>
+    <Markdown skipHtml remarkPlugins={[remarkGfm, lineBreakPlugin(), citationPlugin(message, citationNumbers)]} rehypePlugins={[[rehypeHighlight, { detect: false }]]} components={answerComponents(message, reveal)}>{message.content}</Markdown>
+  </div>;
+}
+
 /** 接收助手消息及所属会话，输出安全 Markdown、复制入口与可定位的真实来源。 */
 export function AnswerContent({ message }: {
   message: Message;
 }) {
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const pendingSource = useRef<string | null>(null);
   const webSources = message.web_sources || [];
   const knowledgeSources = message.knowledge_sources || [];
+  const sourceCount = webSources.length + knowledgeSources.length;
+  const sourceSectionId = `answer-sources-${encodeURIComponent(message.id)}`;
   const citationNumbers = new Map(knowledgeSources.map(function numberSource(source, index) {
+    // 为知识库来源分配面向用户的连续编号。
     return [source.key, String(index + 1)];
   }));
-  const sourceCount = webSources.length + knowledgeSources.length;
+
+  // 来源区首次展开后定位正文所点击的引用。
+  useEffect(function revealPendingSource() {
+    /** 来源区渲染完成后再滚动，确保首次点击引用也能定位。 */
+    if (!sourcesOpen || !pendingSource.current) return;
+    const identifier = pendingSource.current;
+    pendingSource.current = null;
+    // 等来源区完成布局后再滚动，避免定位到旧位置。
+    requestAnimationFrame(function scrollAfterPaint() { scrollToSource(identifier); });
+  }, [sourcesOpen]);
+
+  /** 展开来源区并定位正文引用；已展开时直接滚动到目标。 */
+  function revealSource(identifier: string) {
+    if (sourcesOpen) {
+      // 已展开时无需等待状态更新，下一帧直接定位。
+      requestAnimationFrame(function scrollOpenSource() { scrollToSource(identifier); });
+      return;
+    }
+    pendingSource.current = identifier;
+    setSourcesOpen(true);
+  }
+
+  /** 切换参考来源区的展开状态，默认保持收起以减少正文干扰。 */
+  function toggleSources() {
+    /** 反转当前参考来源区的展开状态。 */
+    function invert(open: boolean) { return !open; }
+    setSourcesOpen(invert);
+  }
+
   return <>
-    <div className="message-content answer-markdown">
-      <Markdown skipHtml remarkPlugins={[remarkGfm, lineBreakPlugin(), citationPlugin(message, citationNumbers)]} rehypePlugins={[[rehypeHighlight, { detect: false }]]} components={answerComponents(message)}>{message.content}</Markdown>
-    </div>
-    {sourceCount > 0 && <section className="answer-sources" aria-label="回答来源">
-      <div className="answer-sources-heading">参考来源 · {sourceCount}</div>
-      {webSources.map(function renderWebSource(source) {
-        /** 输出网页来源详情并绑定本回答唯一定位锚点。 */
-        return <SourceDetails key={source.key} id={sourceId(message.id, source.key)} source={source} />;
-      })}
-      {knowledgeSources.map(function renderKnowledgeSource(source) {
-        /** 知识库来源只展示文件、位置和定位链接，不重复切片正文。 */
-        return <KnowledgeSourceLink key={source.key} id={sourceId(message.id, source.key)} source={source}
-          number={citationNumbers.get(source.key) || '?'} />;
-      })}
-    </section>}
+    <AnswerMarkdown message={message} onCitationClick={revealSource} />
+    {sourceCount > 0 && <div className="answer-source-toggle">
+      <button type="button" aria-expanded={sourcesOpen} aria-controls={sourceSectionId} onClick={toggleSources}>
+        参考来源 · {sourceCount}
+      </button>
+      {sourcesOpen && <section className="answer-sources" id={sourceSectionId} aria-label="回答来源">
+        {webSources.map(function renderWebSource(source) {
+          /** 输出网页来源详情并绑定本回答唯一定位锚点。 */
+          return <SourceDetails key={source.key} id={sourceId(message.id, source.key)} source={source} />;
+        })}
+        {knowledgeSources.map(function renderKnowledgeSource(source) {
+          /** 知识库来源只展示文件、位置和定位链接，不重复切片正文。 */
+          return <KnowledgeSourceLink key={source.key} id={sourceId(message.id, source.key)} source={source}
+            number={citationNumbers.get(source.key) || '?'} />;
+        })}
+      </section>}
+    </div>}
     {!!message.content && <div className="answer-actions"><CopyButton text={message.content} label="复制回答" /></div>}
   </>;
 }

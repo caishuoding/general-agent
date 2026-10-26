@@ -31,10 +31,14 @@ class BoundCalls:
 
     @contextmanager
     def call(self, settings: StoredSettings, unit: Unit, reserved: UUID | None = None, assistant_message_id: UUID | None = None) -> Iterator[UUID]:
-        """包围一次真实调用并持久化失败用量；业务解析和 SDK 写入失败不会回滚计量。"""
+        """记录真实调用与失败用量；外发许可被拒绝时终结预留，避免留下永久等待记录。"""
         operations = self.gateway.operations
         call_id = reserved or operations.reserve(self.context, settings, unit)
-        operations.begin(self.context, call_id, settings, assistant_message_id)
+        try:
+            operations.begin(self.context, call_id, settings, assistant_message_id)
+        except ValueError:
+            operations.cancel_reservation(call_id)
+            raise
         try:
             yield call_id
         except ModelFailure as error:

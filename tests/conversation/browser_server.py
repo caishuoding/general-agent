@@ -81,7 +81,7 @@ class ControlledModel(BaseHTTPRequestHandler):
                     'name': 'search_web', 'arguments': json.dumps({'query': '智谱 API 定价', 'ori_question': '查询官方定价'})}}]})
             else:
                 sources = tool_messages[-1].get('results', [])
-                self.send_agent_reply({'content': '子智能体公开交付结果。[' + sources[0]['key'] + ']'})
+                self.send_agent_reply({'content': '## 子智能体结论\n\n- 已完成官方来源核验\n\n**子智能体公开交付结果。**[' + sources[0]['key'] + ']'})
             return
         if 'browser-followup' in prompt:
             self.send_agent_reply({'content': '子智能体补充交付结果。'})

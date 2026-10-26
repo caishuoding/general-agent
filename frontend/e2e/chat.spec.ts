@@ -40,6 +40,32 @@ test("配置模型后可以对话并在刷新后继续", async ({ page }) => {
   ).toBeVisible();
 });
 
+// 输入法候选确认中的回车不能提交消息，组字结束后立即到达的回车也要拦截。
+test("输入法回车只确认候选不会发送消息", async ({ page }) => {
+  await configureChatModel(page, modelUrl, "controlled-model");
+  await page.goto("/");
+  await page.getByRole("button", { name: "开始新对话" }).click();
+  const input = page.getByRole("textbox", { name: "消息", exact: true });
+  await input.fill("正在输入中文");
+  await input.focus();
+
+  await input.dispatchEvent("compositionstart");
+  await page.keyboard.press("Enter");
+  await expect(input).toHaveValue(/正在输入中文/);
+  await expect(page.locator(".message")).toHaveCount(0);
+
+  await input.dispatchEvent("compositionend");
+  await page.keyboard.press("Enter");
+  await expect(input).toHaveValue(/正在输入中文/);
+  await expect(page.locator(".message")).toHaveCount(0);
+
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByText("这是受控模型的测试回答。", { exact: true }),
+  ).toBeVisible();
+});
+
 // 真实接口的旧读取响应延迟到发送完成后送达，最新回答仍应保留在页面上。
 test("较慢的会话读取不会覆盖刚收到的回答", async ({ page }) => {
   await configureChatModel(page, modelUrl, "controlled-model");

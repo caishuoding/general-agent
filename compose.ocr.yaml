@@ -7,10 +7,15 @@ services:
     restart: unless-stopped
     environment:
       OCR_DEVICE: cpu
+      DISABLE_MODEL_SOURCE_CHECK: "True"
+      OCR_LAYOUT_MODEL: PP-DocLayout-S
+      OCR_TEXT_DETECTION_MODEL: PP-OCRv5_mobile_det
+      OCR_TEXT_RECOGNITION_MODEL: PP-OCRv5_mobile_rec
     volumes:
       - ocr_models:/models
-    mem_limit: 6g
-    cpus: 2
+    mem_limit: 7g
+    memswap_limit: 8g
+    cpus: 4
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3)"]
       interval: 20s

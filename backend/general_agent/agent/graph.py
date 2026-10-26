@@ -16,6 +16,7 @@ from general_agent.infrastructure.provider import ModelFailure, ModelMessage
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.memory.automatic import MemoryCheckpoint
 from general_agent.prompts import tool_result_fragment, tool_turn_fragment
+from general_agent.search.failures import WebRequestFailure
 
 
 ToolExecutor = Callable[[MemoryCheckpoint, str, dict[str, Any], StoredSettings], dict[str, Any]]
@@ -157,7 +158,7 @@ class AgentToolGraph:
             return "execute_tools" if state["tool_calls"] else "settle_answer"
 
         def execute_tools(state: AgentState) -> dict[str, Any]:
-            """检查调用与重试限额；时间实时执行，文档读取预算包含同批已产生的结果。"""
+            """检查限额并缓存最终联网失败；后端已处理重试的结果不再套用模型重试循环。"""
             tool_messages: list[dict[str, Any]] = []
             executed_results: list[dict[str, Any]] = []
             failures = dict(state["tool_failures"])
@@ -212,6 +213,9 @@ class AgentToolGraph:
                     continue
                 tool_key = checkpoint.key("tools:result", [settings.revision, state["round_index"] - 1, call])
                 attempt_key = checkpoint.key("tools:attempt", [str(assistant_message_id), tool_key])
+                web_tool = name in ('search_web', 'fetch_web')
+                web_key = checkpoint.key('tools:web-failure', [str(assistant_message_id), name, arguments])
+                provider_key = checkpoint.key('tools:web-provider-failure', [str(assistant_message_id)])
                 # 当前时间每次执行都重新读取，不复用历史步骤中的旧时钟。
                 cacheable = name != 'get_current_time' and name not in ORCHESTRATION
                 result = checkpoint.get(attempt_key) if cacheable else None
@@ -220,7 +224,10 @@ class AgentToolGraph:
                     if cached is not None and "error" not in cached and cached.get("status") != "failed":
                         result = cached
                 exhausted = failures.get(name, 0) > self.maximum_tool_retries
-                if exhausted:
+                blocked = (checkpoint.get(provider_key) or checkpoint.get(web_key)) if web_tool else None
+                if blocked is not None:
+                    result = {**blocked, 'cached_failure': True}
+                elif exhausted:
                     # 即使模型忽略可用工具列表，后端也不得继续执行已禁用工具。
                     result = {"error": "该工具已达到最大重试次数，本次回答中已禁用。"}
                 elif result is None:
@@ -229,9 +236,18 @@ class AgentToolGraph:
                     else:
                         try:
                             result = execute_tool(checkpoint, name, arguments, settings)
+                        except WebRequestFailure as error:
+                            result = error.tool_result()
                         except (ValueError, LookupError, ModelFailure) as error:
                             result = {"error": str(error)}
-                if name in known_tools and ("error" in result or result.get("status") == "failed"):
+                if web_tool and result.get('retry_managed_by') == 'backend':
+                    # 同一参数的最终失败跨模型轮次复用，新的 URL／查询不受影响。
+                    checkpoint.put(web_key, result)
+                    if result.get('tool_disabled'):
+                        checkpoint.put(provider_key, result)
+                        for tool_name in ('search_web', 'fetch_web'):
+                            failures[tool_name] = self.maximum_tool_retries + 1
+                elif name in known_tools and ("error" in result or result.get("status") == "failed"):
                     if not exhausted:
                         failures[name] = failures.get(name, 0) + 1
                     exhausted = failures.get(name, 0) > self.maximum_tool_retries

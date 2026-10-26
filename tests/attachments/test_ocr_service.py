@@ -1,6 +1,8 @@
 """验证独立 OCR HTTP 边界把固定版本 Paddle 结果转换为业务应用可读取的协议。"""
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 from typing import Any
 from io import BytesIO
 
@@ -28,6 +30,27 @@ class ExternalPipeline:
         yield NativeResult()
 
 
+class BlockingPipeline(ExternalPipeline):
+    """第一次推理阻塞，验证并发请求会排队而不是立即返回 503。"""
+
+    def __init__(self, entered: Event, release: Event) -> None:
+        """保存测试同步事件和只允许首次调用阻塞的计数器。"""
+        self.entered = entered
+        self.release = release
+        self.guard = Lock()
+        self.calls = 0
+
+    def predict(self, path: str) -> Iterator[NativeResult]:
+        """首个请求等待释放，后续请求直接完成，证明锁采用有界等待。"""
+        with self.guard:
+            self.calls += 1
+            first = self.calls == 1
+        if first:
+            self.entered.set()
+            assert self.release.wait(10)
+        yield NativeResult()
+
+
 def test_ocr_service_exports_ordered_blocks_and_frame() -> None:
     """HTTP 服务返回固定规则版本、页面尺寸和模型原文，不夹带文件路径。"""
     output = BytesIO()
@@ -43,3 +66,19 @@ def test_ocr_service_exports_ordered_blocks_and_frame() -> None:
         assert 'input_path' not in result.text
         assert client.get('/health').status_code == 200
         assert client.post('/parse', content=b'not png').status_code == 415
+
+
+def test_concurrent_page_waits_for_current_inference_instead_of_503() -> None:
+    """模型繁忙时第二个页面应在有界时间内排队，不能因旧请求未结束而直接失败。"""
+    entered, release = Event(), Event()
+    output = BytesIO()
+    Image.new('RGB', (300, 400), 'white').save(output, 'PNG')
+    blob = output.getvalue()
+    with TestClient(create_app(pipeline=BlockingPipeline(entered, release))) as client:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(client.post, '/parse', content=blob, headers={'Content-Type': 'image/png'})
+            assert entered.wait(5)
+            second = executor.submit(client.post, '/parse', content=blob, headers={'Content-Type': 'image/png'})
+            release.set()
+            assert first.result(timeout=10).status_code == 200
+            assert second.result(timeout=10).status_code == 200

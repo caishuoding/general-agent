@@ -1,7 +1,8 @@
-import { useEffect, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { AnswerMarkdown, sourceId } from "./AnswerContent";
 import { api, errorMessage, type AgentTask } from "./api";
 
-type Source = { key: string; url?: string; title?: string; filename?: string; site_name?: string; knowledge_base_id?: string; document_id?: string; page?: number };
+type Source = { key: string; url?: string; title?: string; excerpt?: string; filename?: string; site_name?: string; knowledge_base_id?: string; document_id?: string; page?: number };
 type AgentRun = { run_id: string; sequence: number; task: string; status: string; result: string | null; error: string | null; created_at: string; started_at: string | null; finished_at: string | null; delivered: boolean; sources: Source[] };
 type AgentThread = AgentTask & { runs: AgentRun[] };
 const labels: Record<string, string> = { queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", cancelled: "已取消", timed_out: "超时" };
@@ -67,13 +68,66 @@ function sourceLabel(source: Source) {
   return "未命名来源";
 }
 
+// 为单轮子消息的来源生成隔离锚点，避免同一回答内重复编号相互冲突。
+function agentSourceId(runId: string, key: string) {
+  return sourceId(`agent-run-${runId}`, key);
+}
+
+// 将公开交付正文转换成统一 Markdown 渲染器可识别的消息形状。
+function agentMessage(run: AgentRun, sources: Source[]) {
+  return {
+    id: `agent-run-${run.run_id}`,
+    content: run.result || "",
+    web_sources: sources.map(function webSource(source) {
+      // 只保留统一 Markdown 引用识别所需的公开字段。
+      return { key: source.key, title: sourceLabel(source), url: source.url || "", excerpt: source.excerpt || "" };
+    }),
+    knowledge_sources: [],
+  };
+}
+
 // 渲染一次执行的派工、公开回复、系统错误与真实来源，不展示内部模型消息。
 function AgentRunItem({ run, title }: { run: AgentRun; title: string }) {
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const pendingSource = useRef<string | null>(null);
   const sources = uniqueSources(run.sources);
+  const message = agentMessage(run, sources);
+  // 来源区首次展开后读取待定位锚点。
+  useEffect(function revealPendingAgentSource() {
+    // 来源区完成渲染后再定位，确保首次点击子消息引用可见。
+    if (!sourcesOpen || !pendingSource.current) return;
+    const target = document.getElementById(pendingSource.current);
+    pendingSource.current = null;
+    // 等浏览器完成列表布局后再滚动和聚焦。
+    if (target) requestAnimationFrame(function focusAgentSource() {
+      target.scrollIntoView({ block: 'center' });
+      target.focus({ preventScroll: true });
+    });
+  }, [sourcesOpen]);
+  // 展开当前子消息的来源区并定位引用；已展开时直接滚动。
+  function revealSource(identifier: string) {
+    if (sourcesOpen) {
+      const target = document.getElementById(identifier);
+      // 已展开时无需重渲染，下一帧直接滚动。
+      if (target) requestAnimationFrame(function scrollOpenAgentSource() {
+        target.scrollIntoView({ block: 'center' });
+        target.focus({ preventScroll: true });
+      });
+      return;
+    }
+    pendingSource.current = identifier;
+    setSourcesOpen(true);
+  }
+  // 切换当前子消息来源的展开状态，默认保持隐藏。
+  function toggleSources() {
+    /** 反转当前来源区的展开状态。 */
+    function invert(open: boolean) { return !open; }
+    setSourcesOpen(invert);
+  }
   // 为单轮来源创建稳定链接并使用可读名称，无法安全打开的项目不渲染。
   function renderSource(source: Source) {
     const href = sourceHref(source);
-    return href ? <li key={source.key}><a href={href} target="_blank" rel="noopener noreferrer">{sourceLabel(source)}</a></li> : null;
+    return href ? <li key={source.key} id={agentSourceId(run.run_id, source.key)} tabIndex={-1}><a href={href} target="_blank" rel="noopener noreferrer">{sourceLabel(source)}</a></li> : null;
   }
   return <section className="agent-run" aria-label={`第 ${run.sequence} 轮`}>
     <div className="agent-run-heading"><span>第 {run.sequence} 轮</span><span className={`agent-status agent-status-${run.status}`}>{statusLabel(run.status)}</span></div>
@@ -83,11 +137,11 @@ function AgentRunItem({ run, title }: { run: AgentRun; title: string }) {
     </article>
     {run.delivered && run.result && <article className="agent-chat-message agent-chat-subagent">
       <strong>{title}</strong>
-      <p>{run.result}</p>
-      {!!sources.length && <details className="agent-message-sources">
-        <summary>来源 · {sources.length}</summary>
-        <ul aria-label={`第 ${run.sequence} 轮来源`}>{sources.map(renderSource)}</ul>
-      </details>}
+      <AnswerMarkdown message={message} onCitationClick={revealSource} className="agent-message-markdown" />
+      {!!sources.length && <div className="agent-message-sources">
+        <button type="button" aria-expanded={sourcesOpen} onClick={toggleSources}>参考来源 · {sources.length}</button>
+        {sourcesOpen && <ul aria-label={`第 ${run.sequence} 轮来源`}>{sources.map(renderSource)}</ul>}
+      </div>}
     </article>}
     {run.delivered && run.error && <p className="agent-chat-system" role="status">{run.error}</p>}
     {!run.delivered && (run.status === "queued" || run.status === "running") && <p className="agent-chat-progress" role="status">子 Agent 正在处理，完成后交付主 Agent。</p>}
@@ -176,7 +230,7 @@ export function AgentTasks({ tasks, conversationId, answerId }: { tasks: AgentTa
         function activateTask() { openTask(task); }
         return <div className="agent-task-card" key={task.agent_id}>
           <button type="button" className="agent-task-button" onClick={activateTask} aria-label={`${task.title} · ${statusLabel(task.status)}`}><span>{task.title}</span><span className={`agent-status agent-status-${task.status}`}>{statusLabel(task.status)}</span></button>
-          {task.result && <p className="agent-task-result">{task.result}</p>}
+          {task.result && <div className="agent-task-result"><AnswerMarkdown message={{ id: `agent-card-${task.agent_id}`, content: task.result, web_sources: [], knowledge_sources: [] }} /></div>}
         </div>;
       },
     )}

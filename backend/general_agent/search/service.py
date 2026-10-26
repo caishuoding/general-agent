@@ -1,7 +1,9 @@
 """DeepSeek Search / Fetch 的模型工具、操作记录与来源核验。"""
 
 import math
+import random
 import re
+import time
 from decimal import Decimal
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -14,11 +16,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from general_agent.attachments.service import AttachmentService
 from general_agent.infrastructure.calls import CallGateway
 from general_agent.infrastructure.database import Database
-from general_agent.infrastructure.operations import OperationContext
+from general_agent.infrastructure.operations import CallBudgetExceeded, OperationContext
 from general_agent.infrastructure.provider import ModelFailure, TokenUsage
 from general_agent.infrastructure.settings import SettingsInput, SettingsStore, StoredSettings
 from general_agent.memory.service import MemoryService
 from general_agent.prompts import TOOL_DESCRIPTIONS
+from general_agent.search.failures import WEB_MAX_ATTEMPTS, WEB_MAX_RETRY_WAIT, WebRequestFailure, http_failure
 
 
 SEARCH_CANDIDATE_COUNT = 15
@@ -283,7 +286,46 @@ class SearchService:
         self, settings: StoredSettings, query: str, operation: OperationContext,
         kind: Literal["search", "fetch"] = "search", ori_question: str | None = None,
     ) -> list[dict[str, Any]]:
-        """调用 DeepSeek Search/Fetch，扩大候选并保留质量字段后返回精简结果。"""
+        """仅对临时网络故障执行初次加两次退避重试，每次外发独立鉴权、计数和计量。"""
+        for attempt in range(WEB_MAX_ATTEMPTS):
+            try:
+                return self.fetch_once(settings, query, operation, kind, ori_question)
+            except CallBudgetExceeded as error:
+                failure = WebRequestFailure(str(error), retryable=False, scope='execution', error_code='call_budget_exhausted')
+                failure.attempt_count = attempt
+                raise failure from None
+            except WebRequestFailure as error:
+                error.attempt_count = attempt + 1
+                if not error.retryable or attempt + 1 == WEB_MAX_ATTEMPTS:
+                    raise
+                delay = max(0.5 * (2 ** attempt) + random.uniform(0, 0.25), error.retry_after)
+                if delay > WEB_MAX_RETRY_WAIT:
+                    # 不提前违背服务端等待时间，也不让一次重试无限占用工作线程。
+                    raise
+                self.wait_for_retry(operation, settings, delay)
+        raise AssertionError('联网重试循环没有返回结果或失败。')
+
+    def wait_for_retry(self, operation: OperationContext, settings: StoredSettings, delay: float) -> None:
+        """小步等待并检查取消、来源撤销和配置版本，停止后不再发送下一次请求。"""
+        deadline = time.monotonic() + delay
+        while True:
+            with self.database.connect() as connection:
+                row = connection.execute('SELECT cancelled,invalidated FROM cloud_operations WHERE id=%s', (operation.operation_id,)).fetchone()
+            if row is None or row['cancelled'] or row['invalidated']:
+                raise ValueError('操作已停止，已取消后续联网重试。')
+            current = self.settings.read()
+            if current is None or current.revision != settings.revision:
+                raise ValueError('搜索配置已经变化，已取消后续联网重试。')
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 0.1))
+
+    def fetch_once(
+        self, settings: StoredSettings, query: str, operation: OperationContext,
+        kind: Literal['search', 'fetch'], ori_question: str | None,
+    ) -> list[dict[str, Any]]:
+        """发送恰好一次真实请求，按官方 HTTP 状态分类失败并保留安全诊断字段。"""
         with self.database.connect() as connection:
             answer = connection.execute(
                 "SELECT id FROM messages WHERE operation_id=%s AND role='assistant'",
@@ -308,28 +350,28 @@ class SearchService:
                 with httpx.Client(transport=self.transport, timeout=30, follow_redirects=False, trust_env=False) as client:
                     response = client.post(endpoint, headers={'Authorization': 'Bearer ' + settings.api_key}, json=body)
             except httpx.TimeoutException:
-                raise ModelFailure('DeepSeek 联网请求超时，本次未取得可核验结果。') from None
+                raise WebRequestFailure('DeepSeek 联网请求超时，本次未取得可核验结果。', retryable=True) from None
             except httpx.RequestError:
-                raise ModelFailure('无法连接 DeepSeek 联网服务，本次未取得可核验结果。') from None
+                raise WebRequestFailure('无法连接 DeepSeek 联网服务，本次未取得可核验结果。', retryable=True) from None
             if response.status_code != 200:
                 self.calls.operations.record(call_id, TokenUsage(), credits=Decimal(0))
-                raise ModelFailure(f'DeepSeek 联网请求失败（HTTP {response.status_code}），请检查配置或稍后重试。')
+                raise http_failure(response)
             try:
                 payload = response.json()
             except ValueError:
-                raise ModelFailure('DeepSeek 返回了无效 JSON，本次未完成请求。') from None
+                raise WebRequestFailure('DeepSeek 返回了无效 JSON，本次未完成请求。', retryable=False) from None
             if not isinstance(payload, dict):
-                raise ModelFailure('DeepSeek 返回了无效结果，本次未完成请求。')
+                raise WebRequestFailure('DeepSeek 返回了无效结果，本次未完成请求。', retryable=False)
             if kind == 'fetch':
                 if not isinstance(payload.get('content'), str) or not isinstance(payload.get('title'), str):
-                    raise ModelFailure('DeepSeek 未返回有效网页正文，本次未完成抓取。')
+                    raise WebRequestFailure('DeepSeek 未返回有效网页正文，本次未完成抓取。', retryable=False)
                 content = payload['content']
                 self.calls.operations.record(call_id, TokenUsage(), credits=Decimal(int(bool(content.strip()))))
                 if not content.strip():
-                    raise ModelFailure('DeepSeek 未返回可读取的网页正文。')
+                    raise WebRequestFailure('DeepSeek 未返回可读取的网页正文。', retryable=False)
                 return [{'url': query, 'title': payload['title'], 'excerpt': content[:8000], 'content': content}]
             if not isinstance(payload.get('results'), list):
-                raise ModelFailure('DeepSeek 未返回有效结果列表，本次未完成搜索。')
+                raise WebRequestFailure('DeepSeek 未返回有效结果列表，本次未完成搜索。', retryable=False)
             self.calls.operations.record(call_id, TokenUsage(), credits=Decimal(int(bool(payload['results']))))
             results = [
                 normalized

@@ -39,6 +39,9 @@ def create_app(pipeline: Any = None, orientation: Any = None) -> FastAPI:
                 device=device, use_doc_orientation_classify=False, use_doc_unwarping=False,
                 use_textline_orientation=True, use_table_recognition=True,
                 use_formula_recognition=False, use_chart_recognition=False, use_seal_recognition=False,
+                layout_detection_model_name=os.environ.get('OCR_LAYOUT_MODEL', 'PP-DocLayout-S'),
+                text_detection_model_name=os.environ.get('OCR_TEXT_DETECTION_MODEL', 'PP-OCRv5_mobile_det'),
+                text_recognition_model_name=os.environ.get('OCR_TEXT_RECOGNITION_MODEL', 'PP-OCRv5_mobile_rec'),
                 # PaddleX 3.3.13 仍初始化已关闭的图表槽位；用已缓存的轻量方向模型占位。
                 # use_chart_recognition=False 确保该槽位不参与推理，插图继续由业务视觉模型描述。
                 chart_recognition_model_name='PP-LCNet_x1_0_doc_ori',
@@ -49,7 +52,7 @@ def create_app(pipeline: Any = None, orientation: Any = None) -> FastAPI:
 
     def recognize(blob: bytes) -> dict[str, Any]:
         """校验 PNG 后先作整页正交旋转，再识别相同画布，模型忙时明确拒绝排队。"""
-        if not lock.acquire(blocking=False):
+        if not lock.acquire(timeout=300):
             raise HTTPException(503, 'OCR 正在处理其他页面，请稍后重试。')
         try:
             with warnings.catch_warnings():
