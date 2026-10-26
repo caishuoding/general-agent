@@ -1,10 +1,10 @@
 import { test, expect } from "@playwright/test";
-import { configureChatModel, loginUser } from "./auth";
+import { configureSearchModel } from "./auth";
 
 // 通过真实主从工具流验证只读子会话、多轮任务及刷新恢复。
 test("主智能体汇总子任务并可查看只读会话", async ({ page }) => {
-  await loginUser(page);
-  await configureChatModel(page, `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18081"}/v1`, "controlled-model");
+  const modelUrl = `http://127.0.0.1:${process.env.TEST_MODEL_PORT || "18081"}/v1`;
+  await configureSearchModel(page, modelUrl, modelUrl);
   await page.goto("/");
   await page.getByRole("button", { name: /新建会话|开始新对话/ }).click();
   await page.getByRole("textbox", { name: "消息", exact: true }).fill("__multi_agent_browser__");
@@ -23,9 +23,15 @@ test("主智能体汇总子任务并可查看只读会话", async ({ page }) => 
   const dialog = page.getByRole("dialog", { name: "研究子任务" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText("第 1 轮", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("子智能体公开交付结果。", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("子智能体公开交付结果。[W", { exact: false })).toBeVisible();
   await expect(dialog.getByText("第 2 轮", { exact: true })).toBeVisible();
   await expect(dialog.getByText("子智能体补充交付结果。", { exact: true })).toBeVisible();
+  const firstReply = dialog.locator(".agent-chat-subagent").filter({ hasText: "子智能体公开交付结果。" });
+  await expect(firstReply.getByText("来源 · 2", { exact: true })).toBeVisible();
+  await firstReply.getByText("来源 · 2", { exact: true }).click();
+  await expect(firstReply.getByRole("link", { name: "API 定价 - 智谱AI开放文档", exact: true })).toHaveCount(1);
+  await expect(firstReply.getByRole("link", { name: "模型 API 价格", exact: true })).toHaveCount(1);
+  await expect(firstReply.getByText(/^W\d+$/, { exact: true })).toHaveCount(0);
   await expect(dialog.getByText("此会话由主智能体管理，无法直接输入。", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("textbox")).toHaveCount(0);
   await dialog.getByRole("button", { name: "关闭子任务会话" }).click();

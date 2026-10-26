@@ -150,6 +150,7 @@ def test_completed_agent_can_continue_and_wait_does_not_repeat_results(database_
         public = thread.json()
         assert public['title'] == '研究'
         assert [run['sequence'] for run in public['runs']] == [1, 2]
+        assert all(run['delivered'] for run in public['runs'])
         assert [run['result'] for run in public['runs']] == ['首次研究结论', '已补充成本证据']
         assert '任务：调查方案' in public['runs'][0]['task']
         assert public['runs'][1]['task'] == '请补充成本'

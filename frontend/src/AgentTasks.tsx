@@ -1,8 +1,8 @@
 import { useEffect, useState, type MouseEvent } from "react";
 import { api, errorMessage, type AgentTask } from "./api";
 
-type Source = { key: string; url?: string; title?: string; filename?: string; knowledge_base_id?: string; document_id?: string; page?: number };
-type AgentRun = { run_id: string; sequence: number; task: string; status: string; result: string | null; error: string | null; created_at: string; started_at: string | null; finished_at: string | null; sources: Source[] };
+type Source = { key: string; url?: string; title?: string; filename?: string; site_name?: string; knowledge_base_id?: string; document_id?: string; page?: number };
+type AgentRun = { run_id: string; sequence: number; task: string; status: string; result: string | null; error: string | null; created_at: string; started_at: string | null; finished_at: string | null; delivered: boolean; sources: Source[] };
 type AgentThread = AgentTask & { runs: AgentRun[] };
 const labels: Record<string, string> = { queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", cancelled: "已取消", timed_out: "超时" };
 
@@ -16,12 +16,64 @@ function sourceHref(source: Source) {
   return source.url && /^https?:\/\//i.test(source.url) ? source.url : null;
 }
 
+
+// 生成来源的规范身份，合并 Markdown 版本、末尾斜杠及常见追踪参数。
+function sourceIdentity(source: Source) {
+  if (source.knowledge_base_id && source.document_id)
+    return `kb:${source.knowledge_base_id}:${source.document_id}:${source.page || ""}`;
+  if (source.url) {
+    try {
+      const parsed = new URL(source.url);
+      parsed.hash = "";
+      for (const key of [...parsed.searchParams.keys()]) {
+        if (key.startsWith("utm_") || ["gspk", "gsxid", "irclickid", "wid"].includes(key)) parsed.searchParams.delete(key);
+      }
+      const path = parsed.pathname.replace(/\.md$/i, "").replace(/\/+$/, "");
+      return `${parsed.hostname.toLowerCase()}${path}${parsed.search ? "?" + parsed.searchParams.toString() : ""}`;
+    } catch {
+      return source.url;
+    }
+  }
+  return source.title || source.filename || source.key;
+}
+
+// 按规范 URL 去重来源，只保留第一条可展示记录并忽略辅助字段差异。
+function uniqueSources(sources: Source[]) {
+  const seen = new Set<string>();
+  const unique: Source[] = [];
+  for (const source of sources) {
+    const identity = sourceIdentity(source);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    unique.push(source);
+  }
+  return unique;
+}
+
+// 为缺少标题的来源生成可读名称，避免把内部 W 编号直接展示给用户。
+function sourceLabel(source: Source) {
+  const explicit = source.filename || source.title?.trim();
+  if (explicit) return explicit;
+  if (source.site_name) return source.site_name;
+  if (source.url) {
+    try {
+      const parsed = new URL(source.url);
+      const filename = decodeURIComponent(parsed.pathname.split("/").filter(Boolean).at(-1) || "");
+      return filename ? `${parsed.hostname} · ${filename}` : parsed.hostname;
+    } catch {
+      return source.url;
+    }
+  }
+  return "未命名来源";
+}
+
 // 渲染一次执行的派工、公开回复、系统错误与真实来源，不展示内部模型消息。
 function AgentRunItem({ run, title }: { run: AgentRun; title: string }) {
-  // 为单轮来源创建稳定链接，无法安全打开的项目不渲染。
+  const sources = uniqueSources(run.sources);
+  // 为单轮来源创建稳定链接并使用可读名称，无法安全打开的项目不渲染。
   function renderSource(source: Source) {
     const href = sourceHref(source);
-    return href ? <li key={source.key}><a href={href} target="_blank" rel="noopener noreferrer">{source.filename || source.title || source.key}</a></li> : null;
+    return href ? <li key={source.key}><a href={href} target="_blank" rel="noopener noreferrer">{sourceLabel(source)}</a></li> : null;
   }
   return <section className="agent-run" aria-label={`第 ${run.sequence} 轮`}>
     <div className="agent-run-heading"><span>第 {run.sequence} 轮</span><span className={`agent-status agent-status-${run.status}`}>{statusLabel(run.status)}</span></div>
@@ -29,12 +81,17 @@ function AgentRunItem({ run, title }: { run: AgentRun; title: string }) {
       <strong>主 Agent</strong>
       <p>{run.task}</p>
     </article>
-    {run.result && <article className="agent-chat-message agent-chat-subagent">
+    {run.delivered && run.result && <article className="agent-chat-message agent-chat-subagent">
       <strong>{title}</strong>
       <p>{run.result}</p>
+      {!!sources.length && <details className="agent-message-sources">
+        <summary>来源 · {sources.length}</summary>
+        <ul aria-label={`第 ${run.sequence} 轮来源`}>{sources.map(renderSource)}</ul>
+      </details>}
     </article>}
-    {run.error && <p className="agent-chat-system" role="status">{run.error}</p>}
-    {!!run.sources.length && <div className="agent-run-sources"><strong>来源</strong><ul aria-label={`第 ${run.sequence} 轮来源`}>{run.sources.map(renderSource)}</ul></div>}
+    {run.delivered && run.error && <p className="agent-chat-system" role="status">{run.error}</p>}
+    {!run.delivered && (run.status === "queued" || run.status === "running") && <p className="agent-chat-progress" role="status">子 Agent 正在处理，完成后交付主 Agent。</p>}
+    {!run.delivered && run.status === "completed" && <p className="agent-chat-progress" role="status">子 Agent 已完成，等待主 Agent 接收结果。</p>}
   </section>;
 }
 

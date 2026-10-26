@@ -15,7 +15,7 @@ export type Conversation = { id: string; title: string; created_at: string };
 export type DocumentParseInfo = { format?: string; total_units?: number; readable_units?: number; coverage?: string; missing_units?: string[]; limitations?: string[] };
 export type Attachment = { id: string; filename: string; size: number; status: "processing" | "ready" | "failed" | "deleting"; error: string | null; parse_info?: DocumentParseInfo; image_metadata: { format: string; mime: string; width: number; height: number } | null };
 export type MessageAttachment = Pick<Attachment, "id" | "filename" | "size" | "status" | "error">;
-export type AgentTask = { agent_id: string; run_id: string; title: string; status: string; result: string | null; error: string | null };
+export type AgentTask = { agent_id: string; run_id: string; title: string; status: string; result: string | null; delivered: boolean; error: string | null };
 export type MessageProgress = { code: string; label: string };
 export type Message = {
   id: string;

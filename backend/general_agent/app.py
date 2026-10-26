@@ -439,13 +439,19 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         streaming.message(conversation_id, account_id, message_id)
         execution.agent_runtime.repository.validate_detail(message_id)
         with database.connect() as connection:
-            rows = connection.execute('SELECT a.id AS agent_id,a.title,r.id AS run_id,r.sequence,r.task,r.status,r.result,r.error,r.created_at,r.started_at,r.finished_at FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE a.id=%s AND a.answer_attempt_id=%s AND a.account_id=%s AND a.conversation_id=%s AND a.parent_agent_id IS NOT NULL ORDER BY r.sequence', (agent_id, message_id, account_id, conversation_id)).fetchall()
+            rows = connection.execute('SELECT a.id AS agent_id,a.title,r.id AS run_id,r.sequence,r.task,r.status,r.result,r.error,r.created_at,r.started_at,r.finished_at,EXISTS (SELECT 1 FROM agent_inbox_events e WHERE e.sender_run_id=r.id AND e.delivery_id IS NOT NULL) AS delivered FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE a.id=%s AND a.answer_attempt_id=%s AND a.account_id=%s AND a.conversation_id=%s AND a.parent_agent_id IS NOT NULL ORDER BY r.sequence', (agent_id, message_id, account_id, conversation_id)).fetchall()
             if not rows:
                 raise HTTPException(404, '子任务不存在。')
             runs: list[dict[str, Any]] = []
             for row in rows:
                 run = dict(row)
-                run['sources'] = [item['payload'] for item in connection.execute('SELECT payload FROM agent_sources WHERE run_id=%s ORDER BY source_key', (row['run_id'],)).fetchall()]
+                if run['delivered']:
+                    run['sources'] = [item['payload'] for item in connection.execute('SELECT payload FROM agent_sources WHERE run_id=%s ORDER BY source_key', (row['run_id'],)).fetchall()]
+                else:
+                    run['result'] = None
+                    if run['error'] != 'source_invalidated':
+                        run['error'] = None
+                    run['sources'] = []
                 runs.append(run)
         return {'agent_id': str(rows[0]['agent_id']), 'title': rows[0]['title'],
                 'status': rows[-1]['status'], 'runs': runs}

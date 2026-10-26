@@ -33,6 +33,13 @@ class ControlledModel(BaseHTTPRequestHandler):
             self.send_json({'id': 'file-api-document-browser', 'created_at': int(time()), 'expires_at': int(time()) + 2592000})
             return
         payload = json.loads(raw)
+        if self.path == '/v1/tools/search':
+            self.send_json({'results': [
+                {'url': 'https://docs.bigmodel.cn/cn/guide/start/pricing', 'title': 'API 定价 - 智谱AI开放文档', 'summary': '官方定价'},
+                {'url': 'https://docs.bigmodel.cn/cn/guide/start/pricing.md', 'title': '', 'summary': '同一页面的 Markdown 版本'},
+                {'url': 'https://bigmodel.cn/pricing', 'title': '模型 API 价格', 'summary': '模型价格'},
+            ]})
+            return
         if not payload.get('stream') and any(isinstance(item.get('content'), list) for item in payload['messages']):
             self.send_json({'choices': [{'message': {'content': '受控扫描图片描述'}}]})
             return
@@ -68,7 +75,13 @@ class ControlledModel(BaseHTTPRequestHandler):
                 self.send_agent_reply({'content': '主智能体已经汇总子任务。'})
             return
         if 'browser-sub' in prompt:
-            self.send_agent_reply({'content': '子智能体公开交付结果。'})
+            tool_messages = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
+            if not tool_messages:
+                self.send_agent_reply({'tool_calls': [{'id': 'browser-search', 'type': 'function', 'function': {
+                    'name': 'search_web', 'arguments': json.dumps({'query': '智谱 API 定价', 'ori_question': '查询官方定价'})}}]})
+            else:
+                sources = tool_messages[-1].get('results', [])
+                self.send_agent_reply({'content': '子智能体公开交付结果。[' + sources[0]['key'] + ']'})
             return
         if 'browser-followup' in prompt:
             self.send_agent_reply({'content': '子智能体补充交付结果。'})

@@ -14,4 +14,4 @@ Implementation: complete（2026-10-26）
 
 ## Comments
 
-- 2026-10-26：用户确认子 Agent 会话只读；已实现多轮只读线程、主对话结果卡、来源链接和授权刷新。Docker Python 回归 300 通过、5 跳过；前端构建、多轮 API、来源撤销及 Playwright 只读会话专项通过。
+- 2026-10-26：用户确认子 Agent 会话只读；已实现多轮只读线程、主对话结果卡、来源链接和授权刷新。后续修复来源显示时机：仅正式交付主 Agent 后展示回复，来源归并在回复气泡内并按规范 URL 去重。Docker Python、前端构建、多轮 API、来源撤销及 Playwright 专项验证通过。

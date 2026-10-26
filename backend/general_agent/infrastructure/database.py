@@ -79,7 +79,7 @@ class Database:
     def decorate_message(self, row: dict[str, Any]) -> dict[str, Any]:
         """补齐记忆、来源、附件及子任务简要状态，不返回子任务正文或私有推理。"""
         with self.connect() as connection:
-            row['agent_tasks'] = connection.execute('SELECT DISTINCT ON (a.id) a.id AS agent_id,a.title,r.id AS run_id,r.status,r.result,r.error FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE a.answer_attempt_id=%s AND a.parent_agent_id IS NOT NULL ORDER BY a.id,r.sequence DESC', (row.get('id'),)).fetchall() if row['role'] == 'assistant' else []
+            row['agent_tasks'] = connection.execute('SELECT DISTINCT ON (a.id) a.id AS agent_id,a.title,r.id AS run_id,r.status,CASE WHEN EXISTS (SELECT 1 FROM agent_inbox_events e WHERE e.sender_run_id=r.id AND e.delivery_id IS NOT NULL) THEN r.result ELSE NULL END AS result,CASE WHEN EXISTS (SELECT 1 FROM agent_inbox_events e WHERE e.sender_run_id=r.id AND e.delivery_id IS NOT NULL) THEN TRUE ELSE FALSE END AS delivered,r.error FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE a.answer_attempt_id=%s AND a.parent_agent_id IS NOT NULL ORDER BY a.id,r.sequence DESC', (row.get('id'),)).fetchall() if row['role'] == 'assistant' else []
             row['attachments'] = connection.execute(
                 "SELECT id,filename,size,status,error FROM attachments "
                 "WHERE user_message_id=%s ORDER BY created_at,id",
