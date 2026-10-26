@@ -432,6 +432,24 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
                 await asyncio.sleep(0.1)
         return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    @app.get('/api/conversations/{conversation_id}/messages/{message_id}/agents/{agent_id}/thread')
+    def agent_thread(conversation_id: UUID, message_id: UUID, agent_id: UUID, request: Request) -> dict[str, Any]:
+        """按账号与回答授权返回子智能体完整只读会话，不暴露内部模型消息。"""
+        account_id = current_user(request).id
+        streaming.message(conversation_id, account_id, message_id)
+        execution.agent_runtime.repository.validate_detail(message_id)
+        with database.connect() as connection:
+            rows = connection.execute('SELECT a.id AS agent_id,a.title,r.id AS run_id,r.sequence,r.task,r.status,r.result,r.error,r.created_at,r.started_at,r.finished_at FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE a.id=%s AND a.answer_attempt_id=%s AND a.account_id=%s AND a.conversation_id=%s AND a.parent_agent_id IS NOT NULL ORDER BY r.sequence', (agent_id, message_id, account_id, conversation_id)).fetchall()
+            if not rows:
+                raise HTTPException(404, '子任务不存在。')
+            runs: list[dict[str, Any]] = []
+            for row in rows:
+                run = dict(row)
+                run['sources'] = [item['payload'] for item in connection.execute('SELECT payload FROM agent_sources WHERE run_id=%s ORDER BY source_key', (row['run_id'],)).fetchall()]
+                runs.append(run)
+        return {'agent_id': str(rows[0]['agent_id']), 'title': rows[0]['title'],
+                'status': rows[-1]['status'], 'runs': runs}
+
     @app.get('/api/conversations/{conversation_id}/messages/{message_id}/agents/{agent_id}')
     def agent_detail(conversation_id: UUID, message_id: UUID, agent_id: UUID, request: Request) -> dict[str, Any]:
         """按账号及回答授权读取最新子任务结果，不暴露模型消息或推理。"""

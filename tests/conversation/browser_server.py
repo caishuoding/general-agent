@@ -41,17 +41,37 @@ class ControlledModel(BaseHTTPRequestHandler):
                        and not message['content'].startswith('{"type": "subagent_results"')), '')
         if prompt == '__multi_agent_browser__':
             results = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
+            visible = []
+            for item in payload['messages']:
+                if item.get('role') not in ('tool', 'user') or not isinstance(item.get('content'), str):
+                    continue
+                try:
+                    parsed = json.loads(item['content'])
+                except ValueError:
+                    continue
+                if isinstance(parsed, dict):
+                    visible.append(parsed)
+            deliveries = {agent['run_id']: agent for result in visible for agent in result.get('agents', [])
+                          if agent.get('run_id') and agent.get('result') is not None}
+            calls = [call.get('function', {}).get('name') for message in payload['messages']
+                     if message.get('role') == 'assistant' for call in (message.get('tool_calls') or [])]
             if not results:
                 self.send_agent_reply({'tool_calls': [{'id': 'browser-create', 'type': 'function', 'function': {'name': 'spawn_agent', 'arguments': json.dumps({'title': '研究子任务', 'task': 'browser-sub 调查', 'expected_output': '给出结论'})}}]})
-            elif 'agent_id' in results[-1] and not any(
-                    item['role'] == 'user' and isinstance(item.get('content'), str)
-                    and item['content'].startswith('{"type": "subagent_results"') for item in payload['messages']):
-                self.send_agent_reply({'tool_calls': [{'id': 'browser-wait', 'type': 'function', 'function': {'name': 'wait_agents', 'arguments': json.dumps({})}}]})
+            elif not deliveries:
+                self.send_agent_reply({'tool_calls': [{'id': 'browser-wait-1', 'type': 'function', 'function': {'name': 'wait_agents', 'arguments': json.dumps({})}}]})
+            elif len(deliveries) == 1 and calls.count('send_agent_message') == 0:
+                delivered = next(iter(deliveries.values()))
+                self.send_agent_reply({'tool_calls': [{'id': 'browser-followup', 'type': 'function', 'function': {'name': 'send_agent_message', 'arguments': json.dumps({'agent_id': delivered['agent_id'], 'message': 'browser-followup 补充核验'})}}]})
+            elif len(deliveries) == 1:
+                self.send_agent_reply({'tool_calls': [{'id': 'browser-wait-2', 'type': 'function', 'function': {'name': 'wait_agents', 'arguments': json.dumps({})}}]})
             else:
                 self.send_agent_reply({'content': '主智能体已经汇总子任务。'})
             return
         if 'browser-sub' in prompt:
             self.send_agent_reply({'content': '子智能体公开交付结果。'})
+            return
+        if 'browser-followup' in prompt:
+            self.send_agent_reply({'content': '子智能体补充交付结果。'})
             return
         document_reply: str | None = None
         document_id: str | None = None

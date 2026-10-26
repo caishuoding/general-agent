@@ -141,8 +141,18 @@ def test_completed_agent_can_continue_and_wait_does_not_repeat_results(database_
         identifier = client.post('/api/conversations', json={}).json()['id']
         sent = client.post(f'/api/conversations/{identifier}/messages', json={'content': '研究并检查成本'})
         assert sent.status_code == 200, sent.text
-        assert sent.json()['messages'][-1]['content'] == '汇总两次研究'
+        answer = sent.json()['messages'][-1]
+        assert answer['content'] == '汇总两次研究'
         assert len(child_calls) == 2
+        task = answer['agent_tasks'][0]
+        thread = client.get(f"/api/conversations/{identifier}/messages/{answer['id']}/agents/{task['agent_id']}/thread")
+        assert thread.status_code == 200, thread.text
+        public = thread.json()
+        assert public['title'] == '研究'
+        assert [run['sequence'] for run in public['runs']] == [1, 2]
+        assert [run['result'] for run in public['runs']] == ['首次研究结论', '已补充成本证据']
+        assert '任务：调查方案' in public['runs'][0]['task']
+        assert public['runs'][1]['task'] == '请补充成本'
 
 
 def test_child_web_sources_are_verified_in_main_answer(database_url: str, tmp_path: Path) -> None:
@@ -376,6 +386,11 @@ def test_child_knowledge_evidence_and_revocation_clear_task_details(database_url
         assert detail.json()['result'] is None
         assert detail.json()['error'] == 'source_invalidated'
         assert 'PRIVATE_MAINTENANCE_SUMMARY' not in detail.text
+        thread = client.get(f"/api/conversations/{identifier}/messages/{answer['id']}/agents/{task['agent_id']}/thread")
+        assert thread.status_code == 200
+        assert thread.json()['runs'][0]['result'] is None
+        assert thread.json()['runs'][0]['error'] == 'source_invalidated'
+        assert 'PRIVATE_MAINTENANCE_SUMMARY' not in thread.text
 
 
 def test_opening_revoked_history_does_not_cancel_new_answer(database_url: str, tmp_path: Path) -> None:
