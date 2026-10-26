@@ -18,6 +18,7 @@ from general_agent.attachments.files import DeepSeekFiles, file_api_base
 from general_agent.infrastructure.database import Database
 from general_agent.attachments.documents import parse_document
 from general_agent.attachments.pdf_text import PDF_TEXT_SOURCE
+from general_agent.attachments.pdf_ocr import OCR_REVISION
 from general_agent.attachments.document_images import DocumentVision, ParsedImage, VISION_PROMPT_VERSION
 from general_agent.attachments.knowledge import (
     ChunkPolicy,
@@ -74,6 +75,7 @@ class AttachmentService:
     def __init__(self, database: Database, directory: Path, transport: httpx.BaseTransport | None = None) -> None:
         """绑定文档处理依赖；每个新任务按当前回答 LLM 获取切片计数快照。"""
         self.database = database
+        self.transport = transport
         self.settings_directory = directory
         self.directory = directory / 'attachments'
         self.files = DeepSeekFiles(SettingsStore(directory), transport)
@@ -109,9 +111,11 @@ class AttachmentService:
                 "OR (lower(filename) LIKE '%%.pdf' AND (parse_info->>'text_source' IS DISTINCT FROM %s "
                 "OR COALESCE(parse_info->>'chunk_layout',parse_info->>'chunk_policy') IS DISTINCT FROM %s "
                 "OR (COALESCE((parse_info->>'image_count')::int,0)>0 "
-                "AND parse_info->>'vision_rules' IS DISTINCT FROM %s)))) "
+                "AND parse_info->>'vision_rules' IS DISTINCT FROM %s) "
+                "OR parse_info->>'pdf_ocr_rules' IS DISTINCT FROM %s))) "
                 "AND expires_at>CURRENT_TIMESTAMP RETURNING id",
-                (policy.layout_signature, VISION_PROMPT_VERSION, PDF_TEXT_SOURCE, policy.layout_signature, VISION_PROMPT_VERSION),
+                (policy.layout_signature, VISION_PROMPT_VERSION, PDF_TEXT_SOURCE, policy.layout_signature,
+                 VISION_PROMPT_VERSION, OCR_REVISION),
             ).fetchall()
         for row in legacy:
             self.process(row['id'])
@@ -164,7 +168,7 @@ class AttachmentService:
             self.process_file(attachment_id)
 
     def process_file(self, attachment_id: UUID) -> None:
-        """用同一 LLM 计数快照提取并切片，发布前重核来源与原 TTL。"""
+        """用同一计数快照完成原生或 OCR 解析，再统一描述插图和切片，发布前重核 TTL。"""
         info: dict[str, Any] = {}
         try:
             with self.database.connect() as connection:
@@ -190,7 +194,8 @@ class AttachmentService:
                 image_directory = self.directory / f'{attachment_id}.images'
                 if extension in {'.pdf', '.docx'}:
                     shutil.rmtree(image_directory, ignore_errors=True)
-                    document = parse_document(path, extension, image_directory)
+                    document = (parse_document(path, extension, image_directory, ocr_transport=self.transport)
+                                if extension == '.pdf' else parse_document(path, extension, image_directory))
                     info = document.info.model_dump()
                     if document.error:
                         raise ValueError(document.error)

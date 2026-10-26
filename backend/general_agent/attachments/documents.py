@@ -4,6 +4,7 @@ import ctypes
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from ctypes import Structure
 from ctypes import wintypes
 from tempfile import TemporaryFile
@@ -19,6 +20,7 @@ from docx import Document
 from pydantic import BaseModel, Field
 from pypdf import PdfReader, filters
 import pdfplumber
+import httpx
 
 from general_agent.attachments.limits import (
     MAX_DOCUMENT_CPU_SECONDS,
@@ -116,6 +118,11 @@ class DocumentInfo(BaseModel):
     coverage: str = 'complete'
     text_source: str | None = None
     image_count: int = 0
+    pdf_ocr_rules: str | None = None
+    ocr_rules: str | None = None
+    ocr_completed_pages: list[int] = Field(default_factory=list)
+    ocr_failed_pages: list[int] = Field(default_factory=list)
+    ocr_low_confidence_pages: list[int] = Field(default_factory=list)
 
 
 class ParsedDocument(BaseModel):
@@ -124,6 +131,8 @@ class ParsedDocument(BaseModel):
     error: str | None = None
     units: list[DocumentUnit] = Field(default_factory=list)
     images: list[ParsedImage] = Field(default_factory=list)
+    scan_pages: list[int] = Field(default_factory=list)
+    page_sizes: dict[int, tuple[float, float]] = Field(default_factory=dict)
 
 
 def attach_pdf_captions(units: list[DocumentUnit], images: list[ParsedImage]) -> list[ParsedImage]:
@@ -163,8 +172,12 @@ def exclude_caption_units(units: list[DocumentUnit], images: list[ParsedImage]) 
 
 
 def parse_pdf(path: Path, image_directory: Path | None = None) -> ParsedDocument:
-    """按单栏版面还原 PDF 标题、自然段与表格位置，图片由后续视觉阶段生成描述。"""
-    info = DocumentInfo(format='pdf', text_source=PDF_TEXT_SOURCE, limitations=['面向单栏文字型 PDF；标题和段落按版面启发式还原，复杂矢量图保留原图供视觉理解但不还原编辑结构。', '表格保留真实表头、合并单元格与续表；无法可靠识别的数据矩阵使用原区域截图。'])
+    """还原文字型 PDF 结构并登记扫描页，扫描页由父进程的独立 OCR 阶段处理。"""
+    from general_agent.attachments.pdf_ocr import OCR_REVISION, is_scan_page
+    info = DocumentInfo(format='pdf', text_source=PDF_TEXT_SOURCE, pdf_ocr_rules=OCR_REVISION,
+                        limitations=['文字页面向单栏 PDF；标题和段落按版面启发式还原，复杂矢量图保留原图供视觉理解但不还原编辑结构。',
+                                     '扫描页通过版面 OCR 恢复正文与表格，识别文字需对照原页核对。',
+                                     '表格保留真实表头、合并单元格与续表；无法可靠识别的数据矩阵使用原区域截图。'])
     try:
         filters.ZLIB_MAX_OUTPUT_LENGTH = 10_000_000
         reader = PdfReader(path, strict=True)
@@ -175,6 +188,7 @@ def parse_pdf(path: Path, image_directory: Path | None = None) -> ParsedDocument
             return ParsedDocument(info=info, error='单份 PDF 最多 200 页，请拆分后上传。')
         images: list[ParsedImage] = []
         units: list[DocumentUnit] = []
+        scans: list[int] = []
         text_size, table_count = 0, 0
         with pdfplumber.open(path) as layout:
             try:
@@ -196,6 +210,9 @@ def parse_pdf(path: Path, image_directory: Path | None = None) -> ParsedDocument
                 structure = None
                 try:
                     structure = layout.pages[number - 1]
+                    if is_scan_page(structure, text):
+                        scans.append(number)
+                        continue
                     page_content, count, page_pictures = page_units(structure, number, table_count, text_layout,
                                                                     image_directory, len(images))
                     table_count += count
@@ -231,11 +248,13 @@ def parse_pdf(path: Path, image_directory: Path | None = None) -> ParsedDocument
                                    for page in range(unit.page or 1, (unit.end_page or unit.page or 1) + 1)})
         info.coverage = 'partial' if info.missing_units else 'complete'
         if not info.readable_units:
-            if not images:
+            if not images and not scans:
                 return ParsedDocument(info=info, error='PDF 没有可提取文字或图片；可能是空白文档。')
             info.coverage = 'partial'
-            info.missing_units.append('PDF 没有文字层，正在使用页面内嵌图片进行视觉理解')
-        return ParsedDocument(info=info, units=units, images=images)
+            if not scans:
+                info.missing_units.append('PDF 没有文字层，正在使用页面内嵌图片进行视觉理解')
+        return ParsedDocument(info=info, units=units, images=images, scan_pages=scans,
+                              page_sizes=text_layout.page_sizes)
     except Exception:
         return ParsedDocument(info=info, error='PDF 损坏或不是有效 PDF，无法读取文字。')
 
@@ -295,7 +314,19 @@ def parse_docx(path: Path, image_directory: Path | None = None) -> ParsedDocumen
         return ParsedDocument(info=info, error='DOCX 损坏、受保护或不是有效 Word 文档，无法读取文字。')
 
 
-def parse_document(path: Path, extension: str, image_directory: Path) -> ParsedDocument:
+def parse_document(path: Path, extension: str, image_directory: Path, *,
+                   ocr_transport: httpx.BaseTransport | None = None,
+                   ocr_progress: Callable[[int, int], None] | None = None) -> ParsedDocument:
+    """先受限解析，再在独立阶段逐页 OCR；两条入库路径共用同一中间结构。"""
+    from general_agent.attachments.pdf_ocr import complete_scans
+
+    result = parse_document_worker(path, extension, image_directory)
+    if result.scan_pages and result.error is None:
+        complete_scans(path, image_directory, result, ocr_transport, ocr_progress)
+    return result
+
+
+def parse_document_worker(path: Path, extension: str, image_directory: Path) -> ParsedDocument:
     """隔离解析并监控实际内存及墙钟时间，异常子进程不能拖住应用线程或回显原始错误。"""
     info = DocumentInfo(format=extension.lstrip('.'))
     environment = {

@@ -134,3 +134,7 @@ uv run python scripts/restore_auth_backup.py \
 文字型 PDF 新增 pdfplumber 坐标与线条表格解析，依赖已锁定在 uv.lock 和 requirements-server.txt。解析版本 pdf_tables_v2 首次启动时从有效 PDF 原件重建索引，旧向量随切片撤销，之后配置和版本匹配时不会重复重建；上线前保留业务数据库及原件备份。有框与保守识别的无框表格转 Markdown，表格按行拆片并重复表头；单页表格识别失败回退纯文字并标记缺口。原有 20 秒、内存、200 页和字符资源上限继续生效。
 
 迁移 048 增加 document_images：Word／PDF 的常见栅格图片保存稳定 image_id、页码／段落、结构化描述和 DeepSeek 文件身份；图片描述切片与普通文字共用检索。当前使用管理端配置的 deepseek-flash，解析完成后异步调用视觉模型；图片失败只标记该图片。召回后同一回答的每张图片只发送一次，单批最多五张。派生文件位于 APP_DATA_DIR/attachments/<UUID>.images，删除和到期时与远端文件一起清理。第一版不处理 SmartArt、EMF、WMF、矢量图表及 Markdown 外部图片引用，每份文档最多处理 50 张图片。
+
+## 扫描 PDF OCR
+
+扫描 PDF 需要额外部署本地 PP-StructureV3 服务。使用 `docker compose -f compose.yaml -f compose.ocr.yaml up -d --build` 叠加 OCR；业务应用通过 `DOCUMENT_OCR_URL` 访问。模型缓存独立保存，文字解析与 OCR 推理有各自资源预算。首次启动会下载官方模型，模型健康检查通过后应用才启动。运行时版本、坐标协议、资源与验证说明见[OCR 运行时](../ocr/README.md)及[ADR 0018](../docs/adr/0018-scanned-pdf-layout-ocr.md)。

@@ -8,7 +8,7 @@ type KnowledgeDocument = {
   completed: number; total: number | null; error: string | null; warning: string | null;
 };
 const stages: Record<string, string> = {
-  queued: '等待处理', parsing: '正在读取内容', images: '正在理解图片',
+  queued: '等待处理', parsing: '正在读取内容', ocr: '正在识别扫描页', images: '正在理解图片',
   chunking: '正在整理段落', indexing: '正在建立检索', complete: '处理完成',
 };
 

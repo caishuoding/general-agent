@@ -85,7 +85,7 @@ def _apply_windows_limits() -> object | None:
 
 
 def main() -> None:
-    """限制资源后输出结构化结果；Windows 使用 Job Object 并由父进程补充监控。"""
+    """限制资源后解析原件或渲染单个扫描页，OCR 模型不在本进程中加载。"""
     _apply_windows_limits()
     if sys.platform != 'win32':
         import resource
@@ -100,7 +100,11 @@ def main() -> None:
     from general_agent.attachments.documents import parse_docx, parse_pdf
 
     path, extension, image_directory = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
-    result = parse_pdf(path, image_directory) if extension == '.pdf' else parse_docx(path, image_directory)
+    if extension.startswith('.scan-page:'):
+        from general_agent.attachments.pdf_ocr import render_scan_page
+        result = render_scan_page(path, image_directory, int(extension.split(':')[1]))
+    else:
+        result = parse_pdf(path, image_directory) if extension == '.pdf' else parse_docx(path, image_directory)
     payload = result.model_dump_json().encode('utf-8') + b'\n'
     if len(payload) > MAX_DOCUMENT_OUTPUT_BYTES:
         raise RuntimeError('文档解析结果超过输出资源限制。')

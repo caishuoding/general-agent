@@ -82,8 +82,8 @@ def figure_regions(page: Page, tables: list[BBox]) -> list[FigureRegion]:
         and region.bbox[3] - region.bbox[1] >= 30)], key=figure_order)
 
 
-def caption_distance(region: BBox, caption: BBox) -> float | None:
-    """只匹配水平有交集且上下距离较近的图注，优先紧邻图片下方的说明。"""
+def caption_distance(region: BBox, caption: BBox, max_gap: float = 48) -> float | None:
+    """匹配水平交集且上下邻近的图注；OCR 调用方按渲染比例换算最大间距。"""
     if min(region[2], caption[2]) <= max(region[0], caption[0]):
         return None
     if caption[1] >= region[3]:
@@ -92,7 +92,7 @@ def caption_distance(region: BBox, caption: BBox) -> float | None:
         gap = region[1] - caption[3] + 2
     else:
         return None
-    return gap if gap <= 48 else None
+    return gap if gap <= max_gap else None
 
 
 def caption_pair_order(pair: tuple[float, int, int]) -> tuple[float, int, int]:
