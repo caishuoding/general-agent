@@ -27,7 +27,7 @@ class ControlledModel(BaseHTTPRequestHandler):
     attempts: dict[str, int] = {}
 
     def do_POST(self) -> None:
-        """支持 Files、资料读取与主从受控工具流，保留慢速和断流验收。"""
+        """支持 Files、资料读取、零参数等待和被动交付，保留慢速与断流验收。"""
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         if self.path == '/files':
             self.send_json({'id': 'file-api-document-browser', 'created_at': int(time()), 'expires_at': int(time()) + 2592000})
@@ -37,13 +37,16 @@ class ControlledModel(BaseHTTPRequestHandler):
             self.send_json({'choices': [{'message': {'content': '受控扫描图片描述'}}]})
             return
         prompt = next((message['content'] for message in reversed(payload['messages'])
-                       if message['role'] == 'user' and isinstance(message.get('content'), str)), '')
+                       if message['role'] == 'user' and isinstance(message.get('content'), str)
+                       and not message['content'].startswith('{"type": "subagent_results"')), '')
         if prompt == '__multi_agent_browser__':
             results = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
             if not results:
                 self.send_agent_reply({'tool_calls': [{'id': 'browser-create', 'type': 'function', 'function': {'name': 'spawn_agent', 'arguments': json.dumps({'title': '研究子任务', 'task': 'browser-sub 调查', 'expected_output': '给出结论'})}}]})
-            elif 'agent_id' in results[-1]:
-                self.send_agent_reply({'tool_calls': [{'id': 'browser-wait', 'type': 'function', 'function': {'name': 'wait_agents', 'arguments': json.dumps({'agent_ids': [results[-1]['agent_id']]})}}]})
+            elif 'agent_id' in results[-1] and not any(
+                    item['role'] == 'user' and isinstance(item.get('content'), str)
+                    and item['content'].startswith('{"type": "subagent_results"') for item in payload['messages']):
+                self.send_agent_reply({'tool_calls': [{'id': 'browser-wait', 'type': 'function', 'function': {'name': 'wait_agents', 'arguments': json.dumps({})}}]})
             else:
                 self.send_agent_reply({'content': '主智能体已经汇总子任务。'})
             return

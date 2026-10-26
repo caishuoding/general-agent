@@ -145,8 +145,17 @@ class ConversationGraph:
             if context.delivery == 'stream':
                 update_message_progress(self.database, context.assistant_message_id, progress)
 
+        def reset_draft() -> None:
+            """新模型轮次清空旧候选及部分正文缓冲，界面使用 SSE 整条快照替换。"""
+            nonlocal progress_started
+            chunks.clear()
+            progress_started = False
+            if context.delivery == 'stream':
+                with self.database.connect() as connection:
+                    connection.execute("UPDATE messages SET content='' WHERE id=%s AND status='generating'", (context.assistant_message_id,))
+
         def on_content(text: str) -> None:
-            """缓冲本节点文字并更新流式 UI，节点完成后再把回答作为 State 更新返回。"""
+            """缓冲本轮模型文字并更新流式正文，完成后由 State 交给最终收尾。"""
             nonlocal progress_started
             if not text:
                 return
@@ -174,6 +183,7 @@ class ConversationGraph:
                 assistant_message_id=context.assistant_message_id,
                 on_content=on_content,
                 on_progress=on_progress,
+                on_round_start=reset_draft,
                 source_attachment_ids=[UUID(identifier) for identifier in state['source_attachment_ids']],
             )
             answer = outcome.answer or ''.join(chunks)

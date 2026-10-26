@@ -14,3 +14,5 @@ class AgentState(TypedDict):
     used_tools: bool
     answer: str | None
     handled: bool
+    inbox_deliveries: list[str]
+    settled: bool

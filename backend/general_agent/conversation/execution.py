@@ -125,13 +125,14 @@ class ChatExecution:
         assistant_message_id: UUID,
         on_content: Callable[[str], None] | None = None,
         on_progress: Callable[[MessageProgress], None] | None = None,
+        on_round_start: Callable[[], None] | None = None,
         source_attachment_ids: list[UUID] | None = None,
     ) -> ToolOutcome:
-        """把 State 材料交给主从运行模块，返回主回答及可信证据快照。"""
+        """把 State 材料和草稿轮次回调交给主从模块，返回主回答及可信证据快照。"""
         if settings is None:
             return ToolOutcome(None, False)
         return self.agent_runtime.run(conversation_id, account_id, user_id, assistant_message_id,
-            settings, operation, messages, on_content, source_attachment_ids, on_progress)
+            settings, operation, messages, on_content, source_attachment_ids, on_progress, on_round_start)
 
     @staticmethod
     def material_attachment_ids(material: AttachmentContext | None) -> list[UUID]:

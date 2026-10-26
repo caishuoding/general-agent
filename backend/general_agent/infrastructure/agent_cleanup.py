@@ -1,11 +1,11 @@
-"""在资料撤销事务中清除主从执行的派生正文与外发许可。"""
+"""在资料撤销事务中清除主从执行、结果信箱的派生正文与外发许可。"""
 
 from typing import Any
 from uuid import UUID
 
 
 def invalidate_agent_material(connection: Any, conversation_ids: list[UUID], answer_ids: list[UUID] | None = None) -> None:
-    """撤销指定回答的派生正文；真实资料变更可撤销会话全部任务，历史读取仅清理原回答。"""
+    """撤销回答正文、信箱事件与交付批次；历史读取仅清理原回答。"""
     if not conversation_ids:
         return
     if answer_ids is None:
@@ -21,3 +21,6 @@ def invalidate_agent_material(connection: Any, conversation_ids: list[UUID], ans
     for table in ('agent_messages', 'agent_sources'):
         connection.execute(f'DELETE FROM {table} WHERE run_id IN (SELECT r.id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=ANY(%s))', (answer_ids,))
     connection.execute('DELETE FROM agent_tool_requests WHERE parent_run_id IN (SELECT r.id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=ANY(%s))', (answer_ids,))
+
+    connection.execute('DELETE FROM agent_inbox_events WHERE recipient_run_id IN (SELECT r.id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=ANY(%s))', (answer_ids,))
+    connection.execute('DELETE FROM agent_inbox_deliveries WHERE recipient_run_id IN (SELECT r.id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=ANY(%s))', (answer_ids,))

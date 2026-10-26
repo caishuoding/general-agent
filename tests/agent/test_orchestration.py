@@ -1,4 +1,4 @@
-"""在四个公开编排工具接口验证幂等、游标、追加限制和取消。"""
+"""在编排工具公开接口验证零参数等待、幂等交付、追加、取消与超时。"""
 
 from collections.abc import Iterator
 from threading import Event
@@ -51,20 +51,17 @@ def test_creation_is_idempotent_and_cancel_is_terminal(orchestration: tuple[Agen
     request = {'title': '任务', 'task': '检查事项', 'expected_output': '结论'}
     first = service.execute(checkpoint, 'spawn_agent', request, execute)
     assert service.execute(checkpoint, 'spawn_agent', request, execute) == first
-    checkpoint.current_call = '1:wait'
-    pending = service.execute(checkpoint, 'wait_agents', {'agent_ids': [first['agent_id']], 'timeout_seconds': 0}, execute)
-    assert pending['agents'][0]['status'] in ('queued', 'running')
-    assert 'result' not in pending['agents'][0]
     checkpoint.current_call = '2:cancel'
     assert service.execute(checkpoint, 'cancel_agent', {'agent_id': first['agent_id']}, execute)['status'] == 'cancelled'
     release.set()
     checkpoint.current_call = '3:wait'
-    done = service.execute(checkpoint, 'wait_agents', {'agent_ids': [first['agent_id']]}, execute)
+    done = service.execute(checkpoint, 'wait_agents', {}, execute)
     assert done['agents'][0]['status'] == 'cancelled'
     assert done['agents'][0]['result'] is None
     checkpoint.current_call = '4:wait'
-    again = service.execute(checkpoint, 'wait_agents', {'agent_ids': [first['agent_id']], 'after_cursor': done['cursor']}, execute)
-    assert 'result' not in again['agents'][0]
+    again = service.execute(checkpoint, 'wait_agents', {}, execute)
+    assert again['status'] == 'idle'
+    assert again['agents'] == []
 
 
 def test_unknown_identity_and_busy_followup_are_rejected(orchestration: tuple[AgentOrchestrator, RunCheckpoint, Event]) -> None:
@@ -82,6 +79,95 @@ def test_unknown_identity_and_busy_followup_are_rejected(orchestration: tuple[Ag
         service.execute(checkpoint, 'send_agent_message', {'agent_id': child['agent_id'], 'message': '追加要求'}, execute)
     checkpoint.current_call = '2:wait'
     with pytest.raises(ValueError, match='不属于当前回答'):
-        service.execute(checkpoint, 'wait_agents', {'agent_ids': [str(uuid4())], 'timeout_seconds': 0}, execute)
+        service.execute(checkpoint, 'cancel_agent', {'agent_id': str(uuid4())}, execute)
     with pytest.raises(ValueError):
         service.execute(checkpoint, 'spawn_agent', {'title': '任务', 'task': '事项', 'expected_output': '结果', 'account_id': str(uuid4())}, execute)
+
+
+def test_wait_without_targets_returns_idle(orchestration: tuple[AgentOrchestrator, RunCheckpoint, Event]) -> None:
+    """零参数等待在没有子任务时立即返回空闲，不要求模型管理目标或游标。"""
+    service, checkpoint, _ = orchestration
+
+    def execute(run_id: UUID) -> None:
+        """本用例不应分派任何后台任务。"""
+        raise AssertionError('不应创建子任务')
+
+    checkpoint.current_call = '0:wait'
+    result = service.execute(checkpoint, 'wait_agents', {}, execute)
+    assert result['status'] == 'idle'
+    assert result['agents'] == []
+    assert result['active_count'] == 0
+
+
+def test_wait_delivers_first_finished_run_and_followup_once(orchestration: tuple[AgentOrchestrator, RunCheckpoint, Event]) -> None:
+    """慢任务不挡住先完成结果，工具重放幂等，补充执行有独立的新交付。"""
+    service, checkpoint, release = orchestration
+
+    def execute(run_id: UUID) -> None:
+        """让第一个任务等待，其他任务立即交付供公开等待接口验收。"""
+        task = service.repository.info(run_id)['task']
+        if '慢任务' in task:
+            assert release.wait(8)
+        service.repository.transition(run_id, 'completed', '公开结果：' + task)
+
+    checkpoint.current_call = '0:slow'
+    slow = service.execute(checkpoint, 'spawn_agent', {'title': '慢任务', 'task': '慢任务', 'expected_output': '结论'}, execute)
+    checkpoint.current_call = '1:fast'
+    fast = service.execute(checkpoint, 'spawn_agent', {'title': '快任务', 'task': '快任务', 'expected_output': '结论'}, execute)
+    checkpoint.current_call = '2:wait'
+    first = service.execute(checkpoint, 'wait_agents', {}, execute)
+    assert [item['agent_id'] for item in first['agents']] == [fast['agent_id']]
+    assert first['active_count'] == 1
+    assert service.execute(checkpoint, 'wait_agents', {}, execute) == first
+    checkpoint.current_call = '3:followup'
+    followup = service.execute(checkpoint, 'send_agent_message', {'agent_id': fast['agent_id'], 'message': '补充核验'}, execute)
+    checkpoint.current_call = '4:wait'
+    second = service.execute(checkpoint, 'wait_agents', {}, execute)
+    assert [item['run_id'] for item in second['agents']] == [followup['run_id']]
+    assert followup['run_id'] != fast['run_id']
+    checkpoint.current_call = '5:cancel'
+    service.execute(checkpoint, 'cancel_agent', {'agent_id': slow['agent_id']}, execute)
+    checkpoint.current_call = '6:wait'
+    cancelled = service.execute(checkpoint, 'wait_agents', {}, execute)
+    assert cancelled['agents'][0]['status'] == 'cancelled'
+    release.set()
+    checkpoint.current_call = '7:wait'
+    assert service.execute(checkpoint, 'wait_agents', {}, execute)['status'] == 'idle'
+
+
+def test_wait_returns_child_failure_as_a_delivery(orchestration: tuple[AgentOrchestrator, RunCheckpoint, Event]) -> None:
+    """子任务失败属于成功取得的终态通知，不能误判成等待工具自身失败。"""
+    service, checkpoint, _ = orchestration
+
+    def execute(run_id: UUID) -> None:
+        """模拟真实后台任务执行异常，由调度器保存失败终态。"""
+        raise ValueError('模拟研究失败')
+
+    checkpoint.current_call = '0:spawn'
+    child = service.execute(checkpoint, 'spawn_agent', {'title': '失败研究', 'task': '研究', 'expected_output': '结论'}, execute)
+    checkpoint.current_call = '1:wait'
+    result = service.execute(checkpoint, 'wait_agents', {}, execute)
+    assert result['status'] == 'results'
+    assert result['agents'][0]['run_id'] == child['run_id']
+    assert result['agents'][0]['status'] == 'failed'
+    assert result['agents'][0]['error']
+
+
+def test_wait_is_woken_by_run_timeout(orchestration: tuple[AgentOrchestrator, RunCheckpoint, Event], monkeypatch: pytest.MonkeyPatch) -> None:
+    """排队与运行期限到达后交付超时，等待不必等阻塞的外部执行器退出。"""
+    from dataclasses import replace
+    from general_agent.infrastructure.agent_limits import LIMITS
+    service, checkpoint, release = orchestration
+    monkeypatch.setattr('general_agent.agent.repository.LIMITS', replace(LIMITS, run_seconds=1))
+
+    def execute(run_id: UUID) -> None:
+        """保持任务阻塞，超时终态由后台监控独立设置。"""
+        assert release.wait(8)
+
+    checkpoint.current_call = '0:spawn'
+    child = service.execute(checkpoint, 'spawn_agent', {'title': '超时任务', 'task': '等待外部请求', 'expected_output': '结果'}, execute)
+    checkpoint.current_call = '1:wait'
+    result = service.execute(checkpoint, 'wait_agents', {}, execute)
+    assert result['agents'][0]['run_id'] == child['run_id']
+    assert result['agents'][0]['status'] == 'timed_out'
+    release.set()

@@ -35,19 +35,20 @@ class AgentRuntime:
     def run(self, conversation_id: UUID, account_id: UUID, user_id: UUID, answer_id: UUID,
             settings: StoredSettings, operation: OperationContext, messages: list[ModelMessage],
             on_content: Callable[[str], None] | None, attachment_ids: list[UUID] | None,
-            on_progress: Callable[[MessageProgress], None] | None = None) -> 'ToolOutcome':
-        """执行主工具图并在任何出口关闭剩余子任务，子任务不写用户回答。"""
+            on_progress: Callable[[MessageProgress], None] | None = None,
+            on_round_start: Callable[[], None] | None = None) -> 'ToolOutcome':
+        """主图完成信箱收尾后返回结果，异常出口关闭剩余子任务且保留用量。"""
         from general_agent.memory.tools import ToolOutcome
         root = self.repository.start(answer_id, account_id, conversation_id, operation)
         try:
-            result = self.execute(root['id'], user_id, answer_id, settings, cast(list[dict[str, Any]], messages), on_content, attachment_ids, on_progress)
-            self.repository.guard(root['id'])
+            result = self.execute(root['id'], user_id, answer_id, settings, cast(list[dict[str, Any]], messages), on_content, attachment_ids, on_progress, on_round_start)
+            if self.repository.info(root['id'])['status'] != 'completed':
+                raise ValueError('主回答尚未完成子任务收尾。')
             sources = self.repository.sources(root['id'])
             # 收尾只读取可信登记；这条本地证据快照不再发给模型。
             final_messages = result['messages']
             if sources:
                 final_messages = [*final_messages[:-1], {'role': 'tool', 'content': json.dumps({'results': sources}, ensure_ascii=False)}, final_messages[-1]]
-            self.repository.transition(root['id'], 'completed', result['answer'], final_messages)
             return ToolOutcome(result['answer'], bool(result['used_tools']), final_messages)
         finally:
             self.repository.close(answer_id)
@@ -55,8 +56,9 @@ class AgentRuntime:
     def execute(self, run_id: UUID, user_id: UUID, answer_id: UUID, settings: StoredSettings,
                 messages: list[dict[str, Any]], on_content: Callable[[str], None] | None,
                 attachment_ids: list[UUID] | None,
-                on_progress: Callable[[MessageProgress], None] | None = None) -> dict[str, Any]:
-        """为单次执行组装权限、上下文和图片预算，主从状态不共享可变容器。"""
+                on_progress: Callable[[MessageProgress], None] | None = None,
+                on_round_start: Callable[[], None] | None = None) -> dict[str, Any]:
+        """组装独立权限和预算，主执行额外绑定信箱收信、收尾与草稿轮次回调。"""
         from general_agent.memory.tools import agent_tools, worker_tools
         row = self.repository.info(run_id)
         worker = row['parent_agent_id'] is not None
@@ -156,6 +158,28 @@ class AgentRuntime:
             checkpoint.guard()
             return output
 
+        def receive(current: list[dict[str, Any]], key: str, wait: bool) -> dict[str, Any]:
+            """主动与被动交付共用信箱，在标记已交付前校验文本上下文预算。"""
+            def validate(result: dict[str, Any]) -> None:
+                """完整结果无法容纳时拒绝交付，不静默截断或丢弃未读事件。"""
+                extra = {'role': 'user', 'content': json.dumps({'type': 'subagent_results', **result}, ensure_ascii=False)}
+                if counter.available(settings, [*current, extra], tools) <= 0:
+                    raise ValueError('子任务交付超过上下文预算，请缩小任务范围。')
+
+            if wait and on_progress is not None:
+                on_progress(SUBAGENT_PROGRESS)
+            try:
+                if wait:
+                    return self.orchestrator.inbox.wait(checkpoint, key, validate)
+                return self.orchestrator.inbox.collect(checkpoint, key, validate=validate)
+            finally:
+                if wait and on_progress is not None:
+                    on_progress(DRAFTING_PROGRESS)
+
+        def settle(current: list[dict[str, Any]], answer: str) -> bool:
+            """主模型候选答案在无未读结果及活动子执行时原子完成，子模型不走此入口。"""
+            return self.orchestrator.inbox.settle(checkpoint, answer, current)
+
         fragments = [SUBAGENT_PROMPT if worker else MAIN_AGENT_PROMPT]
         instructions = str(row.get('instructions') or '').strip()
         if worker and instructions:
@@ -167,5 +191,7 @@ class AgentRuntime:
         output = graph.run(messages=messages, settings=settings, calls=self.tools.memory.calls.bind(checkpoint.operation),
             checkpoint=cast(MemoryCheckpoint, checkpoint), tools=tools, execute_tool=execute_tool,
             context_fragments=fragments, assistant_message_id=answer_id, on_content=on_content,
-            on_tool_context=budget, on_tool_results=images, before_model=before_model, before_tool=before_tool)
+            on_tool_context=budget, on_tool_results=images, before_model=before_model, before_tool=before_tool,
+            receive_inbox=None if worker else receive, settle_answer=None if worker else settle,
+            on_round_start=None if worker else on_round_start)
         return dict(output)

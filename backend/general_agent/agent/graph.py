@@ -20,6 +20,8 @@ from general_agent.prompts import tool_result_fragment, tool_turn_fragment
 
 ToolExecutor = Callable[[MemoryCheckpoint, str, dict[str, Any], StoredSettings], dict[str, Any]]
 ToolResultImages = Callable[[list[dict[str, Any]]], list[ModelMessage]]
+InboxReceiver = Callable[[list[dict[str, Any]], str, bool], dict[str, Any]]
+AnswerSettler = Callable[[list[dict[str, Any]], str], bool]
 LOGGER = logging.getLogger(__name__)
 DOCUMENT_TOOLS = {'search_documents', 'read_document', 'search_knowledge'}
 
@@ -51,8 +53,30 @@ class AgentToolGraph:
         on_tool_results: ToolResultImages | None = None,
         before_model: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None] | None = None,
         before_tool: Callable[[int, str, str], None] | None = None,
+        receive_inbox: InboxReceiver | None = None,
+        settle_answer: AnswerSettler | None = None,
+        on_round_start: Callable[[], None] | None = None,
     ) -> AgentState:
-        """运行工具循环；模型及工具执行前可核验独立身份，编排结果不走普通缓存。"""
+        """串行运行工具与信箱节点；模型外发前收信，候选答案通过原子收尾才结束。"""
+
+        def inbox_update(state: AgentState, result: dict[str, Any]) -> dict[str, Any]:
+            """将新批次作为不可信资料追加到 State，同时复用原图加载和批次去重。"""
+            delivery = str(result.get('delivery_id') or '')
+            if not result.get('agents') or delivery in state['inbox_deliveries']:
+                return {}
+            extra: list[dict[str, Any]] = [{'role': 'user', 'content': json.dumps(
+                {'type': 'subagent_results', **result}, ensure_ascii=False)}]
+            if on_tool_results is not None:
+                extra.extend(cast(list[dict[str, Any]], on_tool_results([result])))
+            return {'messages': [*state['messages'], *extra],
+                    'inbox_deliveries': [*state['inbox_deliveries'], delivery]}
+
+        def collect_inbox(state: AgentState) -> dict[str, Any]:
+            """完整工具回复之后自动领取当前回答的结果，等待逻辑不占模型轮次。"""
+            if receive_inbox is None:
+                return {}
+            result = receive_inbox(state['messages'], f'automatic:{state["round_index"]}', False)
+            return inbox_update(state, result)
 
         def call_model(state: AgentState) -> dict[str, Any]:
             """组装当前消息并隐藏耗尽额度的工具，所有工具选择均由模型决定。"""
@@ -61,6 +85,8 @@ class AgentToolGraph:
             index = state["round_index"]
             if index >= self.maximum_rounds:
                 raise ValueError("工具调用达到本次执行上限；已完成的操作保留，请缩小范围后继续。")
+            if on_round_start is not None:
+                on_round_start()
             key = checkpoint.key("tools:round", [settings.revision, index, state["messages"]])
             reply = checkpoint.get(key)
             if reply is None:
@@ -124,9 +150,9 @@ class AgentToolGraph:
                 "round_index": index + 1,
             }
 
-        def route_model(state: AgentState) -> Literal["execute_tools", "finish"]:
-            """根据模型是否返回函数调用选择执行工具或结束工具流程。"""
-            return "execute_tools" if state["tool_calls"] else "finish"
+        def route_model(state: AgentState) -> Literal["execute_tools", "settle_answer"]:
+            """模型无工具调用时先检查子任务收尾，避免提前结束并丢弃完成结果。"""
+            return "execute_tools" if state["tool_calls"] else "settle_answer"
 
         def execute_tools(state: AgentState) -> dict[str, Any]:
             """检查调用与重试限额；时间实时执行，文档读取预算包含同批已产生的结果。"""
@@ -165,6 +191,19 @@ class AgentToolGraph:
                         # 文档读取不复用历史工具缓存，避免到期或删除后重放旧正文。
                         result = {**result, 'call_count': document_calls[name], 'call_limit': 5,
                                   'call_exhausted': document_calls[name] >= 5}
+                    tool_messages.append({'role': 'tool', 'tool_call_id': call['id'],
+                                          'content': json.dumps(result, ensure_ascii=False)})
+                    executed_results.append(result)
+                    continue
+                if name == 'wait_agents' and name in known_tools:
+                    # 等待基础设施故障应终止执行，不套用普通工具的失败禁用策略。
+                    if receive_inbox is None:
+                        result = execute_tool(checkpoint, name, arguments, settings)
+                    else:
+                        from general_agent.agent.tools import WaitInput
+                        WaitInput.model_validate(arguments)
+                        result = receive_inbox([*state['messages'], *tool_messages],
+                                               f'wait:{state["round_index"] - 1}:{call["id"]}', True)
                     tool_messages.append({'role': 'tool', 'tool_call_id': call['id'],
                                           'content': json.dumps(result, ensure_ascii=False)})
                     executed_results.append(result)
@@ -226,6 +265,19 @@ class AgentToolGraph:
                 "document_calls": document_calls,
             }
 
+        def settle_candidate(state: AgentState) -> dict[str, Any]:
+            """子任务未结束则后端等待，收到结果后继续分析，否则提交候选答案。"""
+            answer = str(state['messages'][-1].get('content') or '').strip()
+            if settle_answer is None or settle_answer(state['messages'], answer):
+                return {'settled': True}
+            assert receive_inbox is not None
+            result = receive_inbox(state['messages'], f'settle:{state["round_index"]}', True)
+            return {**inbox_update(state, result), 'settled': False}
+
+        def route_settle(state: AgentState) -> Literal['finish', 'collect_inbox']:
+            """只允许已确认关闭的候选答案结束，其他情况进入下一轮收信。"""
+            return 'finish' if state['settled'] else 'collect_inbox'
+
         def finish(state: AgentState) -> dict[str, Any]:
             """返回最后一轮流式文本作为回答，并保留是否执行过工具。"""
             reply = state["messages"][-1]
@@ -235,16 +287,21 @@ class AgentToolGraph:
             return {"answer": answer or None, "handled": handled}
 
         builder = StateGraph(AgentState)
+        builder.add_node('collect_inbox', collect_inbox)
         builder.add_node("call_model", call_model)
         builder.add_node("execute_tools", execute_tools)
         builder.add_node("finish", finish)
-        builder.add_edge(START, "call_model")
+        builder.add_node('settle_answer', settle_candidate)
+        builder.add_edge(START, 'collect_inbox')
+        builder.add_edge('collect_inbox', 'call_model')
         builder.add_conditional_edges(
             "call_model",
             route_model,
-            {"execute_tools": "execute_tools", "finish": "finish"},
+            {"execute_tools": "execute_tools", "settle_answer": "settle_answer"},
         )
-        builder.add_edge("execute_tools", "call_model")
+        builder.add_edge('execute_tools', 'collect_inbox')
+        builder.add_conditional_edges('settle_answer', route_settle,
+                                      {'finish': 'finish', 'collect_inbox': 'collect_inbox'})
         builder.add_edge("finish", END)
         graph = builder.compile()
         raw_messages = [*(context_messages or []), *messages]
@@ -257,9 +314,11 @@ class AgentToolGraph:
             "document_calls": {},
             "answer": None,
             "handled": False,
+            'inbox_deliveries': [],
+            'settled': False,
         }
         # thread_id 使用当前回答来源消息，后续接入持久化 checkpointer 时无需改变调用身份。
         return cast(AgentState, graph.invoke(initial, {
             "configurable": {"thread_id": str(checkpoint.message_id)},
-            "recursion_limit": self.maximum_rounds * 2 + 2,
+            "recursion_limit": self.maximum_rounds * 3 + 4,
         }))
