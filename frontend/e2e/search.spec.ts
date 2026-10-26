@@ -24,6 +24,8 @@ test('联网搜索作为模型工具直接执行并提供来源链接', async ({
   await expect(page.locator('.agent-progress')).toContainText(/正在联网搜索…|正在整理回答…/);
   await expect(page.locator('.agent-progress')).toContainText('已用时');
   await expect(page.getByText('咖啡店营业时间 9–18。[W1]', { exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: '咖啡店信息', exact: true })).toHaveCount(0);
+  await page.locator('.answer-citation').first().click();
   await expect(page.getByRole('link', { name: '咖啡店信息', exact: true })).toHaveAttribute('href', 'https://cafe.example/nearby');
   await page.screenshot({ path: '/private/tmp/general-agent-implementation/search-17.png', fullPage: true });
 });

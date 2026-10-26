@@ -44,7 +44,7 @@ def ingest(service: 'KnowledgeService', row: dict[str, Any]) -> None:
 
 
 def process(service: 'KnowledgeService', row: dict[str, Any], calls: BoundCalls) -> None:
-    """固定本次 LLM 计数快照并写入独立切片表，索引失败明确标记降级。"""
+    """固定计数快照，先完成原生/OCR 结构与插图描述，再写独立切片及索引。"""
     policy = service.policy
     identifier, attempt = row['id'], row['attempt']
     folder = service.directory / str(identifier)
@@ -52,7 +52,12 @@ def process(service: 'KnowledgeService', row: dict[str, Any], calls: BoundCalls)
     extension = Path(row['filename']).suffix.lower()
     service.progress(identifier, attempt, 'parsing')
     if extension in {'.pdf', '.docx'}:
-        document = parse_document(original, extension, images_directory)
+        def ocr_progress(completed: int, total: int) -> None:
+            """逐页发布实际 OCR 进度并核验原处理尝试，删除后停止继续识别。"""
+            service.progress(identifier, attempt, 'ocr', completed, total)
+
+        document = parse_document(original, extension, images_directory,
+                                  ocr_transport=service.transport, ocr_progress=ocr_progress)
         if document.error:
             raise ValueError(document.error)
         if extension == '.docx':
@@ -99,6 +104,10 @@ def process(service: 'KnowledgeService', row: dict[str, Any], calls: BoundCalls)
         connection.execute('UPDATE knowledge_documents SET parse_info=%s,chunk_policy=%s WHERE id=%s AND attempt=%s',
                            (Jsonb(info), policy.signature, identifier, attempt))
     warnings = [f'{failures} 张图片描述失败，可重试。'] if failures else []
+    if info.get('ocr_failed_pages'):
+        warnings.append(f'{len(info["ocr_failed_pages"])} 页 OCR 失败，可重试。')
+    if info.get('ocr_low_confidence_pages'):
+        warnings.append('部分扫描页识别置信度较低，请核对原文。')
     try:
         index_document(service, identifier, attempt, calls)
     except LookupError:

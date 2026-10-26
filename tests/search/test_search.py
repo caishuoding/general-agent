@@ -561,12 +561,12 @@ def test_fetch_success_does_not_cache_a_failed_search(database_url: str, tmp_pat
         assert message['status'] == 'complete' and search_count == 2
 
 
-def test_failed_search_is_disabled_after_five_retries_and_answer_continues(database_url: str, tmp_path: Path) -> None:
-    """通过公开聊天接口验证六次失败后禁用搜索，其他工具保留且回答正常完成。"""
+def test_backend_search_retries_do_not_restart_for_repeated_model_calls(database_url: str, tmp_path: Path) -> None:
+    """搜索由后端最多尝试三次，同一查询重复调用直接返回失败，工具仍可换词使用。"""
     attempts = 0
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """持续返回搜索失败，模型收到禁用说明后基于已有信息回答。"""
+        """持续返回限流，模型故意重复查询时核对后端只返回缓存失败。"""
         nonlocal attempts
         payload = json.loads(request.content)
         if request.url.host == 'search.example':
@@ -580,11 +580,10 @@ def test_failed_search_is_disabled_after_five_retries_and_answer_continues(datab
                 'ori_question': '查询杭州天气',
             }, f'search-{len(messages)}')
         result = json.loads(messages[-1]['content'])
-        assert result['retry_exhausted'] is True and result['retry_count'] == 5
-        assert '本次回答中已禁用' in result['message']
+        assert result['request_retry_exhausted'] is True and result['retry_count'] == 2
+        assert result['cached_failure'] is True and result['retryable'] is False
         names = {tool['function']['name'] for tool in payload['tools']}
-        assert 'search_web' not in names and 'fetch_web' in names
-        assert any('retry_exhausted' in message['content'] for message in payload['messages'] if message['role'] == 'system')
+        assert 'search_web' in names and 'fetch_web' in names
         return structured_text('暂时无法取得最新天气，请稍后再查。')
 
     configure_search_settings(database_url, tmp_path, 'https://search.example')
@@ -593,7 +592,7 @@ def test_failed_search_is_disabled_after_five_retries_and_answer_continues(datab
         message = client.post(f'/api/conversations/{conversation}/messages', json={'content': '查询杭州天气'}).json()['messages'][-1]
         assert message['status'] == 'complete' and message['error'] is None
         assert message['content'] == '暂时无法取得最新天气，请稍后再查。'
-        assert attempts == 6
+        assert attempts == 3
         assert message['search_action']['status'] == 'failed'
 
 
@@ -601,7 +600,7 @@ def test_failed_search_is_disabled_after_five_retries_and_answer_continues(datab
 def test_multiple_queries_keep_independent_results_and_retry_failures(
     database_url: str, tmp_path: Path, streaming: bool,
 ) -> None:
-    """同步和流式回答可换词搜索；缓存区分查询及空结果，失败后换词再重试仍执行。"""
+    """同步和流式搜索的临时错误由后端恢复，成功和空结果按查询独立缓存。"""
     from tests.conversation.test_streaming import wait_message
 
     queries = ['北京天气', '上海天气', '北京天气', '空结果', '空结果', '暂时失败', '广州天气', '暂时失败']
@@ -623,14 +622,11 @@ def test_multiple_queries_keep_independent_results_and_retry_failures(
         if messages:
             result = json.loads(messages[-1]['content'])
             index = len(messages) - 1
-            if index == 5:
-                assert 'HTTP 500' in result['error']
+            assert result['query'] == queries[index]
+            if index in (3, 4):
+                assert result['results'] == []
             else:
-                assert result['query'] == queries[index]
-                if index in (3, 4):
-                    assert result['results'] == []
-                else:
-                    assert [item['title'] for item in result['results']] == [queries[index]]
+                assert [item['title'] for item in result['results']] == [queries[index]]
             if index == 2:
                 assert result == json.loads(messages[0]['content'])
         if len(messages) < len(queries):
@@ -650,7 +646,7 @@ def test_multiple_queries_keep_independent_results_and_retry_failures(
         message = (wait_message(client, conversation, 'complete') if streaming
                    else response.json()['messages'][-1])
         assert message['status'] == 'complete'
-        assert outbound == ['北京天气', '上海天气', '空结果', '暂时失败', '广州天气', '暂时失败']
+        assert outbound == ['北京天气', '上海天气', '空结果', '暂时失败', '暂时失败', '广州天气']
         assert len(message['web_sources']) == 4
         assert len({item['key'] for item in message['web_sources']}) == 4
         usage = [call for call in client.get('/api/usage').json() if call['unit'] == 'credits']

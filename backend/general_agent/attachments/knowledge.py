@@ -73,6 +73,10 @@ class DocumentUnit(BaseModel):
     table_title: str | None = None
     table_continued: bool = False
     table_image_id: UUID | None = None
+    reading_order: int | None = None
+    text_source: str | None = None
+    confidence: float | None = None
+    ocr_label: str | None = None
 
 
 def default_chunk_counter() -> TokenCounter:
@@ -264,15 +268,18 @@ def markdown_cell_end(text: str, start: int, end: int, stop: int) -> int:
 
 
 def table_specs(group: list[DocumentUnit], offset: int, policy: ChunkPolicy) -> list[ChunkSpec]:
-    """按完整 Markdown 行分片且重复表头；超长单行按单元格续片，包装均计入预算。"""
+    """按完整行切片并重复全部连续表头；超长单行按单元格续片，包装计入预算。"""
     text = ''.join(unit.content for unit in group)
-    header = group[0].content
+    header_count = 1
+    while header_count < len(group) and group[header_count].table_header:
+        header_count += 1
+    header = ''.join(unit.content for unit in group[:header_count])
     if policy.counter.count(text) <= policy.max_tokens:
         return [ChunkSpec(offset, offset + len(text))]
     if policy.counter.count(header) >= policy.max_tokens:
         raise ValueError('表头已达到切片 Token 上限，请简化过宽的表格。')
     specs: list[ChunkSpec] = []
-    cursor, index = len(header), 1
+    cursor, index = len(header), header_count
     while index < len(group):
         row = group[index].content
         if policy.counter.count(header + row) > policy.max_tokens:
@@ -316,7 +323,7 @@ def table_specs(group: list[DocumentUnit], offset: int, policy: ChunkPolicy) -> 
 
 
 def chunk_specs(units: list[DocumentUnit], policy: ChunkPolicy) -> list[ChunkSpec]:
-    """按章节、表格和媒体位置断开正文，再沿自然切点分片并单独保存结构包装。"""
+    """按章节和媒体分片；可靠表格按行，截图兜底文字按预算无重叠切分。"""
     specs: list[ChunkSpec] = []
     offset, index = 0, 0
     native = any(unit.location is not None for unit in units)
@@ -331,7 +338,10 @@ def chunk_specs(units: list[DocumentUnit], policy: ChunkPolicy) -> list[ChunkSpe
             group.append(unit)
             index += 1
         text = ''.join(unit.content for unit in group)
-        if native and first.table is not None:
+        if first.ocr_label == 'table_preview':
+            preview_policy = replace(policy, overlap=0)
+            specs.extend(ChunkSpec(offset + start, offset + end) for start, end in chunk_ranges(text, preview_policy))
+        elif native and first.table is not None:
             specs.extend(table_specs(group, offset, policy))
         else:
             ends: list[int] = []
@@ -343,14 +353,16 @@ def chunk_specs(units: list[DocumentUnit], policy: ChunkPolicy) -> list[ChunkSpe
 
 
 def unit_position(unit: DocumentUnit) -> tuple[int, float, float]:
-    """有坐标时按物理位置排序，否则沿用 Word 的页码和段落位置。"""
+    """OCR 优先采用版面阅读顺序；原生 PDF 按坐标，Word 按页码和段落。"""
+    if unit.reading_order is not None:
+        return unit.page or 1, float(unit.reading_order), 0
     if unit.regions:
         return unit.regions[0].page, unit.regions[0].bbox[1], unit.regions[0].bbox[0]
     return unit.page or 1, float(unit.paragraph), 0
 
 
 def media_boundaries(units: list[DocumentUnit], images: list[dict[str, Any]]) -> list[DocumentUnit]:
-    """在图片所在位置插入不持久化正文的边界，防止一个正文片跨过图片。"""
+    """按原生坐标或 OCR 阅读顺序插入媒体边界，防止正文切片跨过插图。"""
     ordered = list(units)
     for image in images:
         if image.get('media_type') == 'table_preview':
@@ -358,6 +370,7 @@ def media_boundaries(units: list[DocumentUnit], images: list[dict[str, Any]]) ->
         page = image.get('page') or 1
         regions = [DocumentRegion(page=page, bbox=image['bbox'])] if image.get('bbox') else []
         ordered.append(DocumentUnit(page=page, end_page=page, paragraph=image['paragraph'], content='', kind='image',
+                                    reading_order=image.get('reading_order'),
                                     section=image.get('section', []), location=image['location'], regions=regions))
     return sorted(ordered, key=unit_position)
 
@@ -401,7 +414,7 @@ def table_chunk_fragment(all_units: list[DocumentUnit], selected: list[DocumentU
 
 def store_chunks(connection: Any, identifier: UUID, units: list[DocumentUnit], policy: ChunkPolicy,
                  *, knowledge: bool = False, images: list[dict[str, Any]] | None = None) -> None:
-    """保存正文与原文区域，媒体存在时先按位置分组；表名仅由内部白名单选择。"""
+    """保存共用切片与区域；截图表格只携带实际本片文字，表名由内部白名单选择。"""
     if images:
         units = media_boundaries(units, images)
     table, parent = ('knowledge_chunks', 'document_id') if knowledge else ('document_chunks', 'attachment_id')
@@ -427,7 +440,14 @@ def store_chunks(connection: Any, identifier: UUID, units: list[DocumentUnit], p
         if regions:
             structure['regions'] = [DocumentRegion(page=page, bbox=bbox).model_dump() for page, bbox in regions]
         if start_unit.table is not None:
-            fragment = table_chunk_fragment(units, units[first:last + 1], start_unit.table_image_id)
+            fragment: dict[str, Any] | None
+            if start_unit.ocr_label == 'table_preview':
+                fragment = TableFragment(table_id=start_unit.table, columns=1, rows=1,
+                                         cells=[TableCell(row=0, column=0, text=content)], source_rows=[1],
+                                         render_as_image=True, image_id=start_unit.table_image_id).model_dump(
+                                             mode='json', exclude_defaults=True)
+            else:
+                fragment = table_chunk_fragment(units, units[first:last + 1], start_unit.table_image_id)
             if fragment is not None:
                 structure['table'] = fragment
         chunks.append((identifier, len(chunks) + 1, start_unit.page, end_unit.end_page or end_unit.page,
@@ -478,7 +498,7 @@ def store_document_images(
 
 def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str, Any]], policy: ChunkPolicy,
                        *, knowledge: bool = False) -> None:
-    """保存绑定原图的描述切片，再把所有类型切片统一恢复为原文位置顺序。"""
+    """保存绑定原图的描述切片，沿用原生位置或 OCR 阅读顺序统一排序。"""
     table, parent = ('knowledge_chunks', 'document_id') if knowledge else ('document_chunks', 'attachment_id')
     next_ordinal = (connection.execute(
         sql.SQL('SELECT COALESCE(MAX(ordinal),0)+1 AS ordinal FROM {} WHERE {}=%s').format(sql.Identifier(table), sql.Identifier(parent)),
@@ -492,6 +512,8 @@ def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str,
         content = image['description']
         metadata = {'kind': 'image', 'ordinal': image['ordinal'], 'caption': image.get('caption'),
                     'section': image.get('section', []), 'location': image['location']}
+        if image.get('reading_order') is not None:
+            metadata['reading_order'] = image['reading_order']
         if image.get('bbox'):
             metadata['regions'] = [{'page': image.get('page') or 1, 'bbox': image['bbox']}]
         structure = Jsonb(metadata)
@@ -519,7 +541,9 @@ def store_image_chunks(connection: Any, identifier: UUID, images: list[dict[str,
 
 
 def chunk_position(row: dict[str, Any]) -> tuple[int, float, float, int]:
-    """按保存的区域排序切片，同一图片的描述续片用旧序号保持相邻顺序。"""
+    """OCR 切片按阅读顺序排序，原生切片按区域排序，续片用旧序号保持相邻。"""
+    if row['structure'].get('reading_order') is not None:
+        return row['page'] or 1, float(row['structure']['reading_order']), 0, row['ordinal']
     regions = row['structure'].get('regions', [])
     if regions:
         return regions[0]['page'], regions[0]['bbox'][1], regions[0]['bbox'][0], row['ordinal']

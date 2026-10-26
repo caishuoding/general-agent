@@ -1,6 +1,6 @@
 # DeepSeek Search / Fetch 接入核对
 
-核对日期：2026-10-23。仅采用 DeepSeek 官方文档；本笔记记录协议事实，不代表已经调用真实接口。
+核对日期：2026-10-26。仅采用 DeepSeek 官方文档；本笔记记录协议事实，不代表外部服务的持续可用性。
 
 ## 接口与认证
 
@@ -38,6 +38,12 @@ HTTP 200 的对象包含必填 `results` 数组；无匹配时为空数组。每
 请求仅要求 `url` 字符串：非空且不超过 8192 字符，协议只能为 HTTP/HTTPS，必须含 host，禁止用户名和密码。HTTP 200 返回必填字符串 `title`、`content`；缺少标题时 title 为空串，content 是提取后的 Markdown 正文。[Fetch 参考](https://api-docs.deepseek.com/api/fetch/)
 
 官方只保证上述入参协议；抓取仍受目标站点可用性、访问政策与 DeepSeek 安全策略限制。HTTP 404 也可能表示内容类型不支持或正文无法提取，不能仅理解成目标页面不存在。[官方指南](https://api-docs.deepseek.com/guides/search/)
+
+## 应用重试策略（2026-10-26）
+
+应用在 HTTP 边界将 400、401、402、403、404、413 等非临时错误直接结束；只对 408、429、5xx 及网络连接／超时做后端重试，单请求最多三次真实外发。等待采用 0.5／1 秒基础退避加 0–0.25 秒抖动，保留不小于 Retry-After 的间隔；若服务端要求等待超过 10 秒，返回当前失败，不提前重试。取消、资料撤销、配置变化、执行时限及根回答共享预算继续生效，每次重试单独记录真实用量。
+
+交给模型的最终结果带 retryable=false、retry_managed_by=backend、attempt_count、retry_count、failure_scope 及可用的 http_status、error_code、request_id；上游原始 message 不直接回传，改用应用生成的安全说明。临时错误终止后带 request_retry_exhausted=true，模型原样重复时直接复用当前执行的失败，不再外发。401／402 和根联网预算耗尽会隐藏并拦截当前执行的两个联网工具；单网页错误不累计成整个 fetch_web 的禁用额度，其他 URL 仍可继续核验。缓存按 run 及回答尝试隔离，新执行可重新尝试。
 
 ## 错误、用量与限速
 

@@ -27,28 +27,64 @@ class ControlledModel(BaseHTTPRequestHandler):
     attempts: dict[str, int] = {}
 
     def do_POST(self) -> None:
-        """支持 Files、资料读取与主从受控工具流，保留慢速和断流验收。"""
+        """支持 Files、资料读取、零参数等待和被动交付，保留慢速与断流验收。"""
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         if self.path == '/files':
             self.send_json({'id': 'file-api-document-browser', 'created_at': int(time()), 'expires_at': int(time()) + 2592000})
             return
         payload = json.loads(raw)
+        if self.path == '/v1/tools/search':
+            self.send_json({'results': [
+                {'url': 'https://docs.bigmodel.cn/cn/guide/start/pricing', 'title': 'API 定价 - 智谱AI开放文档', 'summary': '官方定价'},
+                {'url': 'https://docs.bigmodel.cn/cn/guide/start/pricing.md', 'title': '', 'summary': '同一页面的 Markdown 版本'},
+                {'url': 'https://bigmodel.cn/pricing', 'title': '模型 API 价格', 'summary': '模型价格'},
+            ]})
+            return
         if not payload.get('stream') and any(isinstance(item.get('content'), list) for item in payload['messages']):
             self.send_json({'choices': [{'message': {'content': '受控扫描图片描述'}}]})
             return
         prompt = next((message['content'] for message in reversed(payload['messages'])
-                       if message['role'] == 'user' and isinstance(message.get('content'), str)), '')
+                       if message['role'] == 'user' and isinstance(message.get('content'), str)
+                       and not message['content'].startswith('{"type": "subagent_results"')), '')
         if prompt == '__multi_agent_browser__':
             results = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
+            visible = []
+            for item in payload['messages']:
+                if item.get('role') not in ('tool', 'user') or not isinstance(item.get('content'), str):
+                    continue
+                try:
+                    parsed = json.loads(item['content'])
+                except ValueError:
+                    continue
+                if isinstance(parsed, dict):
+                    visible.append(parsed)
+            deliveries = {agent['run_id']: agent for result in visible for agent in result.get('agents', [])
+                          if agent.get('run_id') and agent.get('result') is not None}
+            calls = [call.get('function', {}).get('name') for message in payload['messages']
+                     if message.get('role') == 'assistant' for call in (message.get('tool_calls') or [])]
             if not results:
                 self.send_agent_reply({'tool_calls': [{'id': 'browser-create', 'type': 'function', 'function': {'name': 'spawn_agent', 'arguments': json.dumps({'title': '研究子任务', 'task': 'browser-sub 调查', 'expected_output': '给出结论'})}}]})
-            elif 'agent_id' in results[-1]:
-                self.send_agent_reply({'tool_calls': [{'id': 'browser-wait', 'type': 'function', 'function': {'name': 'wait_agents', 'arguments': json.dumps({'agent_ids': [results[-1]['agent_id']]})}}]})
+            elif not deliveries:
+                self.send_agent_reply({'tool_calls': [{'id': 'browser-wait-1', 'type': 'function', 'function': {'name': 'wait_agents', 'arguments': json.dumps({})}}]})
+            elif len(deliveries) == 1 and calls.count('send_agent_message') == 0:
+                delivered = next(iter(deliveries.values()))
+                self.send_agent_reply({'tool_calls': [{'id': 'browser-followup', 'type': 'function', 'function': {'name': 'send_agent_message', 'arguments': json.dumps({'agent_id': delivered['agent_id'], 'message': 'browser-followup 补充核验'})}}]})
+            elif len(deliveries) == 1:
+                self.send_agent_reply({'tool_calls': [{'id': 'browser-wait-2', 'type': 'function', 'function': {'name': 'wait_agents', 'arguments': json.dumps({})}}]})
             else:
                 self.send_agent_reply({'content': '主智能体已经汇总子任务。'})
             return
         if 'browser-sub' in prompt:
-            self.send_agent_reply({'content': '子智能体公开交付结果。'})
+            tool_messages = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
+            if not tool_messages:
+                self.send_agent_reply({'tool_calls': [{'id': 'browser-search', 'type': 'function', 'function': {
+                    'name': 'search_web', 'arguments': json.dumps({'query': '智谱 API 定价', 'ori_question': '查询官方定价'})}}]})
+            else:
+                sources = tool_messages[-1].get('results', [])
+                self.send_agent_reply({'content': '## 子智能体结论\n\n- 已完成官方来源核验\n\n**子智能体公开交付结果。**[' + sources[0]['key'] + ']'})
+            return
+        if 'browser-followup' in prompt:
+            self.send_agent_reply({'content': '子智能体补充交付结果。'})
             return
         document_reply: str | None = None
         document_id: str | None = None

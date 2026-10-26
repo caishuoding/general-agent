@@ -139,18 +139,30 @@ class ConversationGraph:
         context = runtime.context
         chunks: list[str] = []
         progress_started = False
+        draft_written = False
 
         def on_progress(progress: MessageProgress) -> None:
             """只在流式入口写入最新工具状态，同步调用不需要临时进度。"""
             if context.delivery == 'stream':
                 update_message_progress(self.database, context.assistant_message_id, progress)
 
+        def reset_draft() -> None:
+            """新轮次仅在上轮写过草稿时清空正文，纯工具轮不增加数据库写入。"""
+            nonlocal progress_started, draft_written
+            chunks.clear()
+            progress_started = False
+            if draft_written and context.delivery == 'stream':
+                with self.database.connect() as connection:
+                    connection.execute("UPDATE messages SET content='' WHERE id=%s AND status='generating'", (context.assistant_message_id,))
+            draft_written = False
+
         def on_content(text: str) -> None:
-            """缓冲本节点文字并更新流式 UI，节点完成后再把回答作为 State 更新返回。"""
-            nonlocal progress_started
+            """缓冲本轮模型文字并更新流式正文，完成后由 State 交给最终收尾。"""
+            nonlocal progress_started, draft_written
             if not text:
                 return
             chunks.append(text)
+            draft_written = True
             if context.delivery == 'stream':
                 if not progress_started:
                     on_progress(DRAFTING_PROGRESS)
@@ -174,6 +186,7 @@ class ConversationGraph:
                 assistant_message_id=context.assistant_message_id,
                 on_content=on_content,
                 on_progress=on_progress,
+                on_round_start=reset_draft,
                 source_attachment_ids=[UUID(identifier) for identifier in state['source_attachment_ids']],
             )
             answer = outcome.answer or ''.join(chunks)

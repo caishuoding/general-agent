@@ -59,6 +59,8 @@ export function App() {
   const selection = useRef(0);
   const chatScroll = useRef<HTMLDivElement>(null);
   const draftInput = useRef<HTMLTextAreaElement>(null);
+  const composing = useRef(false);
+  const compositionEndedAt = useRef(0);
   const followLatest = useRef(true);
   const [showLatest, setShowLatest] = useState(false);
   const composer = useRef<HTMLFormElement>(null);
@@ -489,13 +491,29 @@ export function App() {
     if (event.pointerType === "touch" && document.activeElement === draftInput.current && target.closest("button")) event.preventDefault();
   }
 
-  // 桌面 Enter 发送、Shift+Enter 换行；触屏保留回车换行，组合输入不触发发送。
+  /** 标记输入法开始组字，后续回车只处理候选而不是发送消息。 */
+  function startComposition() {
+    composing.current = true;
+  }
+
+  /** 记录输入法结束时间，拦截 Safari 等浏览器紧随组字结束送达的回车。 */
+  function finishComposition() {
+    composing.current = false;
+    compositionEndedAt.current = performance.now();
+  }
+
+  // 桌面 Enter 发送、Shift+Enter 换行；输入法组字和候选确认回车绝不发送。
   function composeKey(event: KeyboardEvent<HTMLTextAreaElement>) {
+    const native = event.nativeEvent;
+    const composingNow = composing.current || native.isComposing || native.keyCode === 229;
+    const justFinishedComposition = performance.now() - compositionEndedAt.current < 120;
     if (
       event.key === "Enter" &&
       !window.matchMedia("(pointer: coarse)").matches &&
       !event.shiftKey &&
-      !event.nativeEvent.isComposing
+      !event.repeat &&
+      !composingNow &&
+      !justFinishedComposition
     ) {
       event.preventDefault();
       composer.current?.requestSubmit();
@@ -852,6 +870,8 @@ export function App() {
                   value={draft}
                   onChange={editDraft}
                   onKeyDown={composeKey}
+                  onCompositionStart={startComposition}
+                  onCompositionEnd={finishComposition}
                   maxLength={32000}
                   disabled={loading || creating}
                   rows={mobile ? 1 : 2}

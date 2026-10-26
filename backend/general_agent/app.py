@@ -432,6 +432,30 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
                 await asyncio.sleep(0.1)
         return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    @app.get('/api/conversations/{conversation_id}/messages/{message_id}/agents/{agent_id}/thread')
+    def agent_thread(conversation_id: UUID, message_id: UUID, agent_id: UUID, request: Request) -> dict[str, Any]:
+        """按账号与回答授权返回子智能体完整只读会话，不暴露内部模型消息。"""
+        account_id = current_user(request).id
+        streaming.message(conversation_id, account_id, message_id)
+        execution.agent_runtime.repository.validate_detail(message_id)
+        with database.connect() as connection:
+            rows = connection.execute('SELECT a.id AS agent_id,a.title,r.id AS run_id,r.sequence,r.task,r.status,r.result,r.error,r.created_at,r.started_at,r.finished_at,EXISTS (SELECT 1 FROM agent_inbox_events e WHERE e.sender_run_id=r.id AND e.delivery_id IS NOT NULL) AS delivered FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE a.id=%s AND a.answer_attempt_id=%s AND a.account_id=%s AND a.conversation_id=%s AND a.parent_agent_id IS NOT NULL ORDER BY r.sequence', (agent_id, message_id, account_id, conversation_id)).fetchall()
+            if not rows:
+                raise HTTPException(404, '子任务不存在。')
+            runs: list[dict[str, Any]] = []
+            for row in rows:
+                run = dict(row)
+                if run['delivered']:
+                    run['sources'] = [item['payload'] for item in connection.execute('SELECT payload FROM agent_sources WHERE run_id=%s ORDER BY source_key', (row['run_id'],)).fetchall()]
+                else:
+                    run['result'] = None
+                    if run['error'] != 'source_invalidated':
+                        run['error'] = None
+                    run['sources'] = []
+                runs.append(run)
+        return {'agent_id': str(rows[0]['agent_id']), 'title': rows[0]['title'],
+                'status': rows[-1]['status'], 'runs': runs}
+
     @app.get('/api/conversations/{conversation_id}/messages/{message_id}/agents/{agent_id}')
     def agent_detail(conversation_id: UUID, message_id: UUID, agent_id: UUID, request: Request) -> dict[str, Any]:
         """按账号及回答授权读取最新子任务结果，不暴露模型消息或推理。"""
@@ -453,12 +477,18 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         return [UsageRecord.model_validate({**row, "credits": format(row["credits"], "f") if row["credits"] is not None else None}) for row in database.list_usage(current_user(request).id)]
 
     frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    if (frontend / "index.html").is_file():
+        @app.get("/")
+        @app.get("/index.html")
+        def user_frontend() -> FileResponse:
+            """用户端入口禁止缓存，确保重新构建后其他浏览器能取得最新资源。"""
+            return FileResponse(frontend / "index.html", headers={"Cache-Control": "no-store, max-age=0, must-revalidate"})
     if (frontend / "admin.html").is_file():
         @app.get("/admin")
         @app.get("/admin/")
         def admin_frontend() -> FileResponse:
             """为独立管理端提供单独入口，不与用户聊天页面共用路由。"""
-            return FileResponse(frontend / "admin.html")
+            return FileResponse(frontend / "admin.html", headers={"Cache-Control": "no-store, max-age=0, must-revalidate"})
     if frontend.is_dir():
         app.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
     return app

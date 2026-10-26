@@ -43,4 +43,4 @@ Implementation: complete（2026-10-23）。完整记录见[单栏 PDF 解析验�
 
 ## 仍不包含
 
-- 双栏和扫描 PDF。
+- 双栏文字型 PDF。扫描 PDF 由[独立 OCR 规格](../pdf-scan-ocr/spec.md)承接。

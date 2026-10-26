@@ -94,12 +94,16 @@ test("知识库媒体可嵌入正文并保留来源链接", /** 验证图片和�
   await expect(page.locator(".answer-markdown p").filter({ hasText: "小标题" }).locator("br")).toHaveCount(1);
   const citations = page.locator(".answer-citation");
   await expect(citations).toHaveText(["[1]", "[2]", "[3]"]);
+  await expect(page.locator(".answer-sources")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "参考来源 · 3", exact: true })).toBeVisible();
   const citationStyle = await citations.first().evaluate(function inspectCitation(element) {
     const style = getComputedStyle(element);
     return { verticalAlign: style.verticalAlign, fontSize: parseFloat(style.fontSize) };
   });
   expect(citationStyle.verticalAlign).toBe("super");
   expect(citationStyle.fontSize).toBeLessThan(13);
+  await citations.first().click();
+  await expect(page.locator(".answer-sources")).toBeVisible();
   const imageMedia = page.locator('.inline-knowledge-media[data-media="K12"]');
   await expect(imageMedia.getByRole("img", { name: "quarter.pdf · 第 2 页第 1 张图片" })).toBeVisible();
   await expect(imageMedia.getByText("季度增长图。", { exact: true })).toHaveCount(0);

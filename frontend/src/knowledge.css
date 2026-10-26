@@ -527,3 +527,36 @@
     width: 100%;
   }
 }
+
+/* 知识库选择器使用独立浅色面板，和聊天输入区形成清晰边界。 */
+.knowledge-selector > div {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 11px;
+  border: 1px solid var(--line, #d0e0dc);
+  border-radius: 12px;
+  background: #f8fcfa;
+  box-shadow: 0 9px 24px rgba(18, 56, 59, 0.06);
+}
+.knowledge-selector label {
+  min-height: 34px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  color: var(--ink-soft, #315554);
+  cursor: pointer;
+}
+.knowledge-selector label:hover {
+  background: #eef7f4;
+}
+.knowledge-selector input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--teal, #277773);
+}
+.knowledge-selector-help {
+  margin: 0 0 2px;
+  color: var(--muted, #56706e);
+  font-size: 10px;
+}

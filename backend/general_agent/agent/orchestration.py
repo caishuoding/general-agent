@@ -1,17 +1,15 @@
 """通过四个公开工具编排异步子任务与有界后台执行。"""
 
-import json
 import logging
 import time
 from collections.abc import Callable
-from threading import Condition, Thread
+from threading import Thread
 from typing import Any
-from uuid import UUID, uuid4
-
-from psycopg.types.json import Jsonb
+from uuid import UUID
 
 from general_agent.infrastructure.agent_limits import LIMITS
-from general_agent.agent.repository import AgentRepository, RunCheckpoint, ACTIVE
+from general_agent.agent.repository import AgentRepository, RunCheckpoint
+from general_agent.agent.inbox import AgentInbox
 from general_agent.agent.tools import SpawnInput, WaitInput, SendInput, CancelInput
 
 LOGGER = logging.getLogger(__name__)
@@ -23,7 +21,8 @@ class AgentOrchestrator:
     def __init__(self, repository: AgentRepository) -> None:
         """保存应用级队列和配额，线程在首次分派时按需启动。"""
         self.repository = repository
-        self.condition = Condition()
+        self.condition = repository.condition
+        self.inbox = AgentInbox(repository)
         self.jobs: list[tuple[UUID, UUID, UUID, Callable[[], None]]] = []
         self.running: dict[UUID, tuple[UUID, UUID]] = {}
         self.threads: list[Thread] = []
@@ -134,46 +133,8 @@ class AgentOrchestrator:
         return result
 
     def wait(self, checkpoint: RunCheckpoint, request: WaitInput) -> dict[str, Any]:
-        """等待任一新终态；结果仅交付一次，幂等重放始终重新鉴权。"""
-        targets = [UUID(value) for value in request.agent_ids]
-        deadline = time.monotonic() + request.timeout_seconds
-        with self.repository.database.connect() as connection:
-            previous = connection.execute('SELECT result FROM agent_tool_requests WHERE parent_run_id=%s AND request_key=%s', (checkpoint.run_id, checkpoint.current_call)).fetchone()
-        if previous:
-            checkpoint.guard()
-            return dict(previous['result'])
-        seen: set[str] = set()
-        if request.after_cursor:
-            with self.repository.database.connect() as connection:
-                cursor = connection.execute("SELECT result FROM agent_tool_requests WHERE parent_run_id=%s AND result->>'cursor'=%s", (checkpoint.run_id, request.after_cursor)).fetchone()
-            if not cursor:
-                raise ValueError('等待游标不属于当前回答。')
-            seen.update(cursor['result'].get('seen_run_ids', []))
-        seen.update(checkpoint.delivered)
-        while True:
-            rows = self.repository.targets(checkpoint.run_id, targets)
-            fresh = [row for row in rows if row['status'] not in ACTIVE and str(row['run_id']) not in seen]
-            if fresh or all(row['status'] not in ACTIVE for row in rows) or time.monotonic() >= deadline:
-                break
-            with self.condition:
-                self.condition.wait(timeout=min(0.2, max(0, deadline - time.monotonic())))
-        delivered = {str(row['run_id']) for row in fresh}
-        checkpoint.delivered.update(delivered)
-        seen.update(delivered)
-        agents = []
-        for row in rows:
-            item = {'agent_id': str(row['agent_id']), 'run_id': str(row['run_id']), 'status': row['status']}
-            if str(row['run_id']) in delivered:
-                item.update(result=row['result'], error=row['error'], sources=row['sources'])
-            agents.append(item)
-        result = {'cursor': str(uuid4()), 'agents': agents, 'seen_run_ids': sorted(seen)}
-        checkpoint.guard()
-        with self.repository.database.connect() as connection:
-            self.repository.lock_active(connection, checkpoint.run_id)
-            if delivered:
-                connection.execute('UPDATE agent_sources SET delivered=TRUE WHERE run_id=ANY(%s)', ([UUID(value) for value in delivered],))
-            connection.execute('INSERT INTO agent_tool_requests VALUES(%s,%s,%s) ON CONFLICT DO NOTHING', (checkpoint.run_id, checkpoint.current_call, Jsonb(result)))
-        return result
+        """通过统一信箱等待任意结果，等待失败由执行层终止而非耗尽工具重试额度。"""
+        return self.inbox.wait(checkpoint, 'wait:' + checkpoint.current_call)
 
     def recover(self) -> None:
         """服务重启终结旧执行，不自动重发模型请求。"""

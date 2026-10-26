@@ -3,6 +3,7 @@
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from threading import Condition
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -21,6 +22,18 @@ class AgentRepository:
     def __init__(self, database: Database) -> None:
         """绑定业务数据库，每次操作使用独立事务。"""
         self.database = database
+        self.condition = Condition()
+        self.notification_version = 0
+
+    def notify(self) -> None:
+        """提交后递增通知版本并唤醒等待者，通知不承担持久保存结果的职责。"""
+        with self.condition:
+            self.notification_version += 1
+            self.condition.notify_all()
+
+    def record_terminal(self, connection: Any, run_id: UUID) -> None:
+        """在终态事务内为有效主执行登记唯一事件，根清理不再产生新业务交付。"""
+        connection.execute("INSERT INTO agent_inbox_events(recipient_run_id,sender_run_id) SELECT main.id,r.id FROM agent_runs r JOIN agents a ON a.id=r.agent_id JOIN agents root ON root.id=a.parent_agent_id JOIN agent_runs main ON main.agent_id=root.id JOIN messages m ON m.id=root.answer_attempt_id WHERE r.id=%s AND NOT root.closed AND main.status='running' AND m.status='generating' ON CONFLICT DO NOTHING", (run_id,))
 
     def snapshot(self, conversation_id: UUID) -> dict[str, Any]:
         """取得可访问资料版本清单；变化时保守中止，避免旧上下文泄露撤销内容。"""
@@ -133,20 +146,25 @@ class AgentRepository:
             raise ValueError('执行已关闭，不能提交迟到结果。')
 
     def transition(self, run_id: UUID, status: str, result: str | None = None, messages: list[dict[str, Any]] | None = None, error: str | None = None) -> bool:
-        """仅更新活动执行，迟到的成功或失败不能重写取消终态。"""
+        """根锁内更新活动执行并登记终态事件，提交后唤醒且拒绝迟到重写。"""
         if messages is not None:
             messages = [{key: value for key, value in item.items() if key != 'reasoning_content'} for item in messages]
         with self.database.connect() as connection:
+            connection.execute('SELECT root.id FROM agent_runs r JOIN agents a ON a.id=r.agent_id JOIN agents root ON root.answer_attempt_id=a.answer_attempt_id AND root.parent_agent_id IS NULL WHERE r.id=%s FOR UPDATE OF root', (run_id,))
             if status in ('completed', 'running'):
                 try:
                     self.lock_active(connection, run_id)
                 except ValueError:
                     return False
             row = connection.execute("UPDATE agent_runs SET status=%s,result=%s,error=%s,messages=coalesce(%s,messages),started_at=coalesce(started_at,CURRENT_TIMESTAMP),finished_at=CASE WHEN %s='running' THEN NULL ELSE CURRENT_TIMESTAMP END WHERE id=%s AND status IN ('queued','running') RETURNING id", (status, result, error, Jsonb(messages) if messages is not None else None, status, run_id)).fetchone()
+            if row and status not in ACTIVE:
+                self.record_terminal(connection, run_id)
+        if row and status not in ACTIVE:
+            self.notify()
         return row is not None
 
     def cancel(self, parent_run: UUID, agent_id: UUID) -> dict[str, Any]:
-        """幂等取消属于当前回答的活动子执行，并撤回其外发许可。"""
+        """幂等取消当前回答的子执行，同事务登记取消事件并撤回外发许可。"""
         row = self.targets(parent_run, [agent_id])[0]
         if row['status'] in ACTIVE:
             with self.database.connect() as connection:
@@ -154,6 +172,8 @@ class AgentRepository:
                 updated = connection.execute("UPDATE agent_runs SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE id=%s AND status IN ('queued','running') RETURNING operation_id", (row['run_id'],)).fetchone()
                 if updated:
                     connection.execute('UPDATE cloud_operations SET cancelled=TRUE WHERE id=%s', (updated['operation_id'],))
+                    self.record_terminal(connection, row['run_id'])
+            self.notify()
             row = self.targets(parent_run, [agent_id])[0]
         return {'agent_id': str(agent_id), 'run_id': str(row['run_id']), 'status': row['status']}
 
@@ -169,6 +189,9 @@ class AgentRepository:
                 for table in ('agent_sources', 'agent_messages'):
                     connection.execute(f'DELETE FROM {table} WHERE run_id IN (SELECT r.id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s)', (answer_id,))
                 connection.execute('DELETE FROM agent_tool_requests WHERE parent_run_id IN (SELECT r.id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s)', (answer_id,))
+                connection.execute('DELETE FROM agent_inbox_events WHERE recipient_run_id IN (SELECT r.id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s)', (answer_id,))
+                connection.execute('DELETE FROM agent_inbox_deliveries WHERE recipient_run_id IN (SELECT r.id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s)', (answer_id,))
+        self.notify()
 
     def expire(self) -> None:
         """按根锁再执行锁的顺序原子撤销超时任务及其外发许可。"""
@@ -180,6 +203,9 @@ class AgentRepository:
                 expired = connection.execute("UPDATE agent_runs SET status='timed_out',error='执行超时。',finished_at=CURRENT_TIMESTAMP WHERE id=%s AND status IN ('queued','running') AND deadline<CURRENT_TIMESTAMP RETURNING operation_id", (row['id'],)).fetchone()
                 if expired:
                     connection.execute('UPDATE cloud_operations SET cancelled=TRUE WHERE id=%s', (expired['operation_id'],))
+                    self.record_terminal(connection, row['id'])
+            if expired:
+                self.notify()
 
     def record_sources(self, run_id: UUID, results: list[dict[str, Any]]) -> None:
         """仅登记执行器实际返回的工具来源，模型不能直接构造可信登记。"""

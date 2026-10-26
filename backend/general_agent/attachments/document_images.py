@@ -46,6 +46,7 @@ class ParsedImage(BaseModel):
     bbox: tuple[float, float, float, float] | None = None
     media_type: str = 'image'
     table_ordinal: int | None = None
+    reading_order: int | None = None
 
 
 @dataclass

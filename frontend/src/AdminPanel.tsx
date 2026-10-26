@@ -270,10 +270,10 @@ export function AdminPanel({ currentUserId }: AdminPanelProps) {
           </label>
           <label>
             <span>角色</span>
-            <select value={role} onChange={(event) => setRole(event.target.value as "user" | "admin")}>
-              <option value="user">普通用户</option>
-              <option value="admin">管理员</option>
-            </select>
+            <div className="role-segment" role="group" aria-label="角色">
+              <button type="button" className={role === "user" ? "active" : ""} aria-pressed={role === "user"} onClick={() => setRole("user")}>普通用户</button>
+              <button type="button" className={role === "admin" ? "active" : ""} aria-pressed={role === "admin"} onClick={() => setRole("admin")}>管理员</button>
+            </div>
           </label>
           <button className="admin-primary" type="submit" disabled={busy}>
             {busy ? "正在创建…" : "创建用户"}

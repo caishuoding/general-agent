@@ -21,6 +21,10 @@ from general_agent.infrastructure.settings import StoredSettings
 Unit = Literal["chat_tokens", "embedding_tokens", "credits"]
 
 
+class CallBudgetExceeded(ValueError):
+    """表示根回答的共享请求预算已耗尽，后续相同类型请求不得继续外发。"""
+
+
 @dataclass(frozen=True)
 class OperationContext:
     """保存一次业务操作的稳定身份、用途和可选会话范围。"""
@@ -98,7 +102,7 @@ class OperationService:
                 field = 'search_count' if unit_row['unit'] == 'credits' else 'model_count'
                 limit = LIMITS.search_calls if field == 'search_count' else LIMITS.model_calls
                 if root[field] >= limit:
-                    raise ValueError('本次回答已达到共享调用预算。')
+                    raise CallBudgetExceeded('本次回答已达到共享调用预算。')
                 connection.execute(f'UPDATE agents SET {field}={field}+1 WHERE id=%s', (root['id'],))
                 connection.execute('UPDATE model_calls SET agent_id=%s,agent_run_id=%s,assistant_message_id=%s WHERE id=%s', (run['agent_id'],run['id'],run['answer_attempt_id'],call_id))
                 assistant_message_id = run['answer_attempt_id']
@@ -115,6 +119,15 @@ class OperationService:
         """记录服务商返回的 token 或 credits 以及调用终态。"""
         with self.database.connect() as connection:
             connection.execute("UPDATE model_calls SET prompt_tokens=coalesce(%s,prompt_tokens),completion_tokens=coalesce(%s,completion_tokens),total_tokens=coalesce(%s,total_tokens),credits=coalesce(%s,credits),status=CASE WHEN status='stopped' THEN status ELSE coalesce(%s,status) END,finished_at=CASE WHEN %s::text IS NULL THEN finished_at ELSE CURRENT_TIMESTAMP END WHERE id=%s", (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens, credits, status, status, call_id))
+
+    def cancel_reservation(self, call_id: UUID) -> None:
+        """仅终结未外发的预留，保留已开始或已完成调用的真实状态及用量。"""
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP,"
+                "credits=CASE WHEN unit='credits' THEN 0 ELSE credits END WHERE id=%s AND status='reserved'",
+                (call_id,),
+            )
 
     def invalidate(self, operation_id: UUID) -> None:
         """取消旧操作并清除缓存结果，防止删除后的内容被重放。"""

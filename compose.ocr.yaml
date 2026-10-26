@@ -1,0 +1,32 @@
+# 在原有 Compose 上叠加 OCR；推理服务只对应用所在网络开放。
+services:
+  ocr:
+    build:
+      context: .
+      dockerfile: ocr/Dockerfile
+    restart: unless-stopped
+    environment:
+      OCR_DEVICE: cpu
+      DISABLE_MODEL_SOURCE_CHECK: "True"
+      OCR_LAYOUT_MODEL: PP-DocLayout-S
+      OCR_TEXT_DETECTION_MODEL: PP-OCRv5_mobile_det
+      OCR_TEXT_RECOGNITION_MODEL: PP-OCRv5_mobile_rec
+    volumes:
+      - ocr_models:/models
+    mem_limit: 7g
+    memswap_limit: 8g
+    cpus: 4
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15m
+  app:
+    depends_on:
+      ocr:
+        condition: service_healthy
+    environment:
+      DOCUMENT_OCR_URL: http://ocr:8090
+volumes:
+  ocr_models:
