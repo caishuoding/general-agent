@@ -62,14 +62,16 @@ class AgentToolGraph:
         def inbox_update(state: AgentState, result: dict[str, Any]) -> dict[str, Any]:
             """将新批次作为不可信资料追加到 State，同时复用原图加载和批次去重。"""
             delivery = str(result.get('delivery_id') or '')
+            watching = bool(result.get('active_count'))
             if not result.get('agents') or delivery in state['inbox_deliveries']:
-                return {}
+                return {'watching_inbox': watching}
             extra: list[dict[str, Any]] = [{'role': 'user', 'content': json.dumps(
                 {'type': 'subagent_results', **result}, ensure_ascii=False)}]
             if on_tool_results is not None:
                 extra.extend(cast(list[dict[str, Any]], on_tool_results([result])))
             return {'messages': [*state['messages'], *extra],
-                    'inbox_deliveries': [*state['inbox_deliveries'], delivery]}
+                    'inbox_deliveries': [*state['inbox_deliveries'], delivery],
+                    'watching_inbox': watching}
 
         def collect_inbox(state: AgentState) -> dict[str, Any]:
             """完整工具回复之后自动领取当前回答的结果，等待逻辑不占模型轮次。"""
@@ -256,14 +258,24 @@ class AgentToolGraph:
                 executed_results.append(result)
             if on_tool_results is not None and executed_results:
                 tool_messages.extend(cast(list[dict[str, Any]], on_tool_results(executed_results)))
-            LOGGER.info("event=tool_execute names=%s", [call.get("function", {}).get("name") for call in state["tool_calls"]])
+            names = [call.get("function", {}).get("name") for call in state["tool_calls"]]
+            watching = state['watching_inbox'] or any(name in ORCHESTRATION for name in names)
+            for result in executed_results:
+                if 'active_count' in result:
+                    watching = bool(result['active_count'])
+            LOGGER.info("event=tool_execute names=%s", names)
             return {
                 "messages": [*state["messages"], *tool_messages],
                 "tool_calls": [],
                 "used_tools": True,
                 "tool_failures": failures,
                 "document_calls": document_calls,
+                'watching_inbox': watching,
             }
+
+        def route_tools(state: AgentState) -> Literal['collect_inbox', 'call_model']:
+            """仅在编排工具启用过信箱时于工具批次后收信，普通业务工具直接回模型。"""
+            return 'collect_inbox' if state['watching_inbox'] else 'call_model'
 
         def settle_candidate(state: AgentState) -> dict[str, Any]:
             """子任务未结束则后端等待，收到结果后继续分析，否则提交候选答案。"""
@@ -292,14 +304,15 @@ class AgentToolGraph:
         builder.add_node("execute_tools", execute_tools)
         builder.add_node("finish", finish)
         builder.add_node('settle_answer', settle_candidate)
-        builder.add_edge(START, 'collect_inbox')
+        builder.add_edge(START, 'call_model')
         builder.add_edge('collect_inbox', 'call_model')
         builder.add_conditional_edges(
             "call_model",
             route_model,
             {"execute_tools": "execute_tools", "settle_answer": "settle_answer"},
         )
-        builder.add_edge('execute_tools', 'collect_inbox')
+        builder.add_conditional_edges('execute_tools', route_tools,
+                                      {'collect_inbox': 'collect_inbox', 'call_model': 'call_model'})
         builder.add_conditional_edges('settle_answer', route_settle,
                                       {'finish': 'finish', 'collect_inbox': 'collect_inbox'})
         builder.add_edge("finish", END)
@@ -316,6 +329,7 @@ class AgentToolGraph:
             "handled": False,
             'inbox_deliveries': [],
             'settled': False,
+            'watching_inbox': False,
         }
         # thread_id 使用当前回答来源消息，后续接入持久化 checkpointer 时无需改变调用身份。
         return cast(AgentState, graph.invoke(initial, {

@@ -139,6 +139,7 @@ class ConversationGraph:
         context = runtime.context
         chunks: list[str] = []
         progress_started = False
+        draft_written = False
 
         def on_progress(progress: MessageProgress) -> None:
             """只在流式入口写入最新工具状态，同步调用不需要临时进度。"""
@@ -146,20 +147,22 @@ class ConversationGraph:
                 update_message_progress(self.database, context.assistant_message_id, progress)
 
         def reset_draft() -> None:
-            """新模型轮次清空旧候选及部分正文缓冲，界面使用 SSE 整条快照替换。"""
-            nonlocal progress_started
+            """新轮次仅在上轮写过草稿时清空正文，纯工具轮不增加数据库写入。"""
+            nonlocal progress_started, draft_written
             chunks.clear()
             progress_started = False
-            if context.delivery == 'stream':
+            if draft_written and context.delivery == 'stream':
                 with self.database.connect() as connection:
                     connection.execute("UPDATE messages SET content='' WHERE id=%s AND status='generating'", (context.assistant_message_id,))
+            draft_written = False
 
         def on_content(text: str) -> None:
             """缓冲本轮模型文字并更新流式正文，完成后由 State 交给最终收尾。"""
-            nonlocal progress_started
+            nonlocal progress_started, draft_written
             if not text:
                 return
             chunks.append(text)
+            draft_written = True
             if context.delivery == 'stream':
                 if not progress_started:
                     on_progress(DRAFTING_PROGRESS)

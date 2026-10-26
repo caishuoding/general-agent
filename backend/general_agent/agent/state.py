@@ -16,3 +16,4 @@ class AgentState(TypedDict):
     handled: bool
     inbox_deliveries: list[str]
     settled: bool
+    watching_inbox: bool

@@ -1,6 +1,6 @@
 Status: ready-for-agent
 
-Implementation: complete（2026-10-26；定向接口、类型与前端构建通过；受限沙箱内的完整数据库与浏览器回归待复跑）
+Implementation: complete（2026-10-26；Docker 完整 Python 回归 298 通过、5 跳过，主从浏览器专项通过）
 
 # 主动等待与被动结果信箱
 
@@ -14,4 +14,4 @@ Implementation: complete（2026-10-26；定向接口、类型与前端构建通�
 
 ## Comments
 
-- 2026-10-26：规格、ADR、迁移、零参数等待、被动交付、原子收尾和回归用例已完成。定向主从测试、156 文件 MyPy 与前端生产构建通过；完整 Python／Playwright 回归因当前执行沙箱禁止连接测试 PostgreSQL 而待复跑。
+- 2026-10-26：规格、ADR、迁移、零参数等待、被动交付、原子收尾和回归用例已完成。普通请求仅在编排启用后检查信箱的优化已加入；Docker 内完整 Python 回归 298 通过、5 跳过，156 文件 MyPy、前端生产构建及主从浏览器专项通过。

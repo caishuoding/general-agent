@@ -48,6 +48,23 @@ def test_graph_streams_answer_without_tools() -> None:
     execute.assert_not_called()
 
 
+
+def test_inbox_is_not_checked_before_any_orchestration_tool() -> None:
+    """普通回答没有子任务时不查询结果信箱，避免为每轮模型调用增加数据库开销。"""
+    calls = MagicMock()
+    calls.stream.return_value = [StreamChunk(content="直接回答")]
+    receive = MagicMock()
+
+    result = AgentToolGraph().run(
+        messages=[{"role": "user", "content": "你好"}], settings=settings(), calls=calls,
+        checkpoint=cast(MemoryCheckpoint, checkpoint()), tools=[], execute_tool=MagicMock(),
+        receive_inbox=receive,
+    )
+
+    assert result["answer"] == "直接回答"
+    receive.assert_not_called()
+
+
 def test_default_tool_retry_limit_is_shared_by_every_tool() -> None:
     """默认工具图使用项目统一的五次失败重试，不允许单个工具另设默认值。"""
     assert LIMITS.tool_retries == 5

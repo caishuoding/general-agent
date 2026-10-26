@@ -1,6 +1,6 @@
 Status: ready-for-agent
 
-Implementation: complete（2026-10-26；结果信箱已实现并通过定向接口、类型与构建验收；受限沙箱内的完整数据库回归待复跑）
+Implementation: complete（2026-10-26；Docker 完整 Python 回归 298 通过、5 跳过，主从浏览器专项通过）
 
 # 对话主智能体与子智能体编排
 
