@@ -1,6 +1,6 @@
 Status: ready-for-agent
 
-Implementation: pending（2026-10-26）
+Implementation: complete（2026-10-26；定向接口、类型与前端构建通过；受限沙箱内的完整数据库与浏览器回归待复跑）
 
 # 主动等待与被动结果信箱
 
@@ -14,4 +14,4 @@ Implementation: pending（2026-10-26）
 
 ## Comments
 
-- 2026-10-26：先更新规格和 ADR；实现与测试尚未完成。
+- 2026-10-26：规格、ADR、迁移、零参数等待、被动交付、原子收尾和回归用例已完成。定向主从测试、156 文件 MyPy 与前端生产构建通过；完整 Python／Playwright 回归因当前执行沙箱禁止连接测试 PostgreSQL 而待复跑。

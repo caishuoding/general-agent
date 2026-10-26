@@ -1,6 +1,6 @@
 Status: ready-for-agent
 
-Implementation: updating（2026-10-26；结果信箱规格已更新，等待实现与验收）
+Implementation: complete（2026-10-26；结果信箱已实现并通过定向接口、类型与构建验收；受限沙箱内的完整数据库回归待复跑）
 
 # 对话主智能体与子智能体编排
 
