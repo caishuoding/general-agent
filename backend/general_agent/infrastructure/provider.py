@@ -94,6 +94,10 @@ class ModelFailure(Exception):
         self.usage = usage or TokenUsage()
 
 
+class ModelConnectionFailure(ModelFailure):
+    """表示模型流在完整结束前断开，可由上层保留正文并进行有限续写。"""
+
+
 class ModelClient:
     """通过可替换的 HTTP 传输调用已配置模型。"""
 
@@ -227,9 +231,9 @@ class ModelClient:
                             elif reason is not None:
                                 incomplete = True
         except httpx.TimeoutException:
-            raise ModelFailure("模型流式响应超时，已保留部分内容，可以重试。", usage) from None
+            raise ModelConnectionFailure("模型流式响应超时，已保留部分内容，可以重试。", usage) from None
         except httpx.RequestError:
-            raise ModelFailure("模型连接中断，已保留部分内容，可以重试。", usage) from None
+            raise ModelConnectionFailure("模型连接中断，已保留部分内容，可以重试。", usage) from None
         except (ValueError, TypeError, KeyError, AttributeError):
             raise ModelFailure("模型流式响应格式无效，已保留部分内容，可以重试。", usage) from None
         if raw_lines and not saw_data:
@@ -239,7 +243,7 @@ class ModelClient:
             except (ValueError, AttributeError):
                 pass
             raise ModelFailure("模型未返回有效流式回答，请检查模型是否支持流式工具调用。", usage)
-        raise ModelFailure("模型回答流中断，已保留部分内容，可以重试。", usage)
+        raise ModelConnectionFailure("模型回答流中断，已保留部分内容，可以重试。", usage)
 
     def request(self, settings: StoredSettings, endpoint: str, body: dict[str, object]) -> tuple[dict[str, object], TokenUsage]:
         """发送非流式协议请求，屏蔽原始错误正文并携带可取得的用量。"""

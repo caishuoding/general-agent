@@ -163,8 +163,7 @@ def test_cited_chunks_enter_context_in_source_order_and_persist_only_used_source
 
 
 def test_unbound_conversation_never_falls_back_to_account_wide_search(database_url: str, tmp_path: Path) -> None:
-    """会话未绑定知识库时返回明确状态，不搜索账号下未绑定的资料或生成查询向量。"""
-    results: list[dict[str, Any]] = []
+    """会话未绑定知识库时模型看不到召回工具，也不会搜索账号下的资料。"""
     query_embeddings: list[list[str]] = []
 
     def provider(request: httpx.Request) -> httpx.Response:
@@ -175,10 +174,9 @@ def test_unbound_conversation_never_falls_back_to_account_wide_search(database_u
                 query_embeddings.append(payload['input'])
             return httpx.Response(200, json={'model': 'test-embedding', 'data': [
                 {'index': index, 'embedding': [1.0, 0.0]} for index, _ in enumerate(payload['input'])]})
-        tool_messages = [item for item in payload['messages'] if item['role'] == 'tool']
-        if not tool_messages:
-            return tool_response(' QUESTION_ONLY ')
-        results.append(json.loads(tool_messages[-1]['content']))
+        names = {item['function']['name'] for item in payload.get('tools', [])}
+        assert not {'search_knowledge', 'search_documents', 'read_document'} & names
+        assert not any(item['role'] == 'tool' for item in payload['messages'])
         return httpx.Response(200, json={'choices': [{'message': {'content': '当前会话没有绑定知识库。'}}]})
 
     configure_settings(database_url, tmp_path)
@@ -192,10 +190,6 @@ def test_unbound_conversation_never_falls_back_to_account_wide_search(database_u
         conversation = client.post('/api/conversations', json={}).json()['id']
         response = client.post(f'/api/conversations/{conversation}/messages', json={'content': '查私有资料'})
         assert response.status_code == 200, response.text
-        assert {key: results[-1][key] for key in ('query', 'results', 'status', 'detail')} == {
-            'query': 'QUESTION_ONLY', 'results': [], 'status': 'no_knowledge_bases',
-            'detail': '当前会话尚未绑定知识库，请先选择知识库。',
-        }
         assert query_embeddings == []
 
 
@@ -420,15 +414,14 @@ def test_table_preview_citation_preserves_structure_and_image_identity() -> None
     tools = object.__new__(KnowledgeTools)
     fragment = {'table_id': 2, 'columns': 3, 'rows': 2, 'header_rows': 1, 'cells': [],
                 'source_rows': [1], 'continued': False, 'render_as_image': True, 'image_id': 'table-image'}
-    result = {'results': [{
+    sources = [{
         'key': 'K1', 'knowledge_base_id': 'base', 'knowledge_base_name': '资料',
         'document_id': 'document', 'filename': 'complex.pdf', 'chunk_id': 1,
         'content': '复杂表格', 'page': 3, 'end_page': 3, 'image_id': None,
         'structure': {'kind': 'table_row', 'table': fragment, 'location': '第 3 页表格 2'},
-    }]}
-    answer, sources = tools.resolve_citations([{'role': 'tool', 'content': json.dumps(result)}],
-                                              '见表格 [K1] [[MEDIA:K1]]')
+    }]
+    answer, cited = tools.resolve_citations(sources, '见表格 [K1] [[MEDIA:K1]]')
     assert answer == '见表格 [K1] [[MEDIA:K1]]'
-    assert sources[0]['kind'] == 'table'
-    assert sources[0]['image_id'] == 'table-image'
-    assert sources[0]['table'] == fragment
+    assert cited[0]['kind'] == 'table'
+    assert cited[0]['image_id'] == 'table-image'
+    assert cited[0]['table'] == fragment

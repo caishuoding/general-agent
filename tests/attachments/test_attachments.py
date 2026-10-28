@@ -79,6 +79,7 @@ def test_uploaded_text_is_read_on_demand_and_survives_restart(database_url: str,
         requests.append(payload)
         documents = attachment_documents(payload)
         assert len(documents) == 1
+        assert {'search_documents', 'read_document'} <= {tool['function']['name'] for tool in payload['tools']}
         tool_reply = document_tool_reply(payload)
         if tool_reply is not None:
             assert '蓝鲸项目于星期五交付。' not in str(payload['messages'])

@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from typing import Any
 from uuid import UUID
 
-from general_agent.infrastructure.operations import OperationContext, OperationService, Unit
+from general_agent.infrastructure.operations import OperationContext, OperationService, Unit, WebKind
 from general_agent.infrastructure.provider import Completion, Embedding, ModelClient, ModelMessage, ModelFailure, StreamChunk, TokenUsage, ToolReply
 from general_agent.infrastructure.settings import StoredEmbeddingSettings, StoredSettings
 
@@ -30,12 +30,13 @@ class BoundCalls:
         self.gateway, self.context = gateway, context
 
     @contextmanager
-    def call(self, settings: StoredSettings, unit: Unit, reserved: UUID | None = None, assistant_message_id: UUID | None = None) -> Iterator[UUID]:
-        """记录真实调用与失败用量；外发许可被拒绝时终结预留，避免留下永久等待记录。"""
+    def call(self, settings: StoredSettings, unit: Unit, reserved: UUID | None = None, assistant_message_id: UUID | None = None,
+             web_kind: WebKind | None = None) -> Iterator[UUID]:
+        """输入配置、计量单位及可选联网类别，记录外发用量；拒绝时清理预留并产出调用标识。"""
         operations = self.gateway.operations
         call_id = reserved or operations.reserve(self.context, settings, unit)
         try:
-            operations.begin(self.context, call_id, settings, assistant_message_id)
+            operations.begin(self.context, call_id, settings, assistant_message_id, web_kind=web_kind)
         except ValueError:
             operations.cancel_reservation(call_id)
             raise

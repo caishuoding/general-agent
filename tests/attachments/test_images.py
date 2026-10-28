@@ -99,7 +99,7 @@ def test_message_keywords_do_not_hide_image_or_tools(
         assert payloads[0]['messages'][-1] == {'role': 'user', 'content': content}
         assert {tool['function']['name'] for tool in payloads[0]['tools']} == {
             'add_memory', 'search_memories', 'update_memory', 'delete_memory',
-            'search_web', 'fetch_web', 'search_documents', 'read_document', 'get_current_time', 'search_knowledge',
+            'search_web', 'fetch_web', 'get_current_time',
             'spawn_agent', 'wait_agents', 'send_agent_message', 'cancel_agent',
         }
 

@@ -148,8 +148,8 @@ class ChatExecution:
             )
         return list(dict.fromkeys(identifiers))
 
-    def resolve_knowledge_citations(self, messages: list[dict[str, Any]], answer: str) -> tuple[str, list[dict[str, Any]]]:
-        """从本次工具消息核对知识库 [K编号]，返回可信来源供消息持久化和界面展示。"""
+    def resolve_knowledge_citations(self, sources: list[dict[str, Any]], answer: str) -> tuple[str, list[dict[str, Any]]]:
+        """用主执行取得或子任务已交付的来源核对 [K编号]，返回实际引用。"""
         if self.knowledge is None:
             return answer, []
-        return self.knowledge.resolve_citations(messages, answer)
+        return self.knowledge.resolve_citations(sources, answer)

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -12,7 +13,7 @@ from general_agent.agent.state import AgentState
 from general_agent.agent.tools import ORCHESTRATION
 from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.infrastructure.calls import BoundCalls
-from general_agent.infrastructure.provider import ModelFailure, ModelMessage
+from general_agent.infrastructure.provider import ModelConnectionFailure, ModelFailure, ModelMessage
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.memory.automatic import MemoryCheckpoint
 from general_agent.prompts import base_system_prompt
@@ -25,6 +26,17 @@ InboxReceiver = Callable[[list[dict[str, Any]], str, bool], dict[str, Any]]
 AnswerSettler = Callable[[list[dict[str, Any]], str], bool]
 LOGGER = logging.getLogger(__name__)
 DOCUMENT_TOOLS = {'search_documents', 'read_document', 'search_knowledge'}
+STREAM_RESUMED_MARKER = '[[STREAM_RESUMED]]'
+STREAM_CONTINUATION_PROMPT = (
+    '上一条 assistant 消息因连接中断在末尾停止。请从该消息的最后一个字符直接继续，'
+    '保持原有格式、事实和引用；不要重复已经输出的内容，不要解释连接中断，'
+    '不要重新执行已经完成的工具调用。'
+)
+
+
+def visible_stream_content(parts: list[str]) -> str:
+    """移除仅供前端渲染的恢复标记，得到可重新发送给模型的已出现正文。"""
+    return ''.join(parts).replace(STREAM_RESUMED_MARKER, '')
 
 
 class AgentToolGraph:
@@ -54,6 +66,7 @@ class AgentToolGraph:
         on_tool_results: ToolResultImages | None = None,
         before_model: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None] | None = None,
         before_tool: Callable[[int, str, str], None] | None = None,
+        on_stream_status: Callable[[str, int, int], None] | None = None,
         receive_inbox: InboxReceiver | None = None,
         settle_answer: AnswerSettler | None = None,
         on_round_start: Callable[[], None] | None = None,
@@ -106,32 +119,69 @@ class AgentToolGraph:
                 content: list[str] = []
                 reasoning: list[str] = []
                 partial_calls: dict[int, dict[str, Any]] = {}
-                for chunk in calls.stream(
-                    settings,
-                    cast(list[ModelMessage], model_messages),
-                    assistant_message_id=assistant_message_id,
-                    tools=[tool for tool in tools
-                           if (state['document_calls'].get(tool['function']['name'], 0) < 5
-                               if tool['function']['name'] in DOCUMENT_TOOLS else
-                               state['tool_failures'].get(tool['function']['name'], 0) <= self.maximum_tool_retries)] or None,
-                ):
-                    if chunk.content:
-                        content.append(chunk.content)
-                        if on_content is not None:
-                            on_content(chunk.content)
-                    if chunk.reasoning_content:
-                        reasoning.append(chunk.reasoning_content)
-                    if chunk.tool_call is not None:
-                        current = partial_calls.setdefault(
-                            chunk.tool_call.index,
-                            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
-                        )
-                        if chunk.tool_call.id:
-                            current["id"] += chunk.tool_call.id
-                        if chunk.tool_call.name:
-                            current["function"]["name"] += chunk.tool_call.name
-                        if chunk.tool_call.arguments:
-                            current["function"]["arguments"] += chunk.tool_call.arguments
+                attempt_messages = model_messages
+                for attempt in range(1, LIMITS.stream_attempts + 1):
+                    attempt_calls: dict[int, dict[str, Any]] = {}
+                    attempt_reasoning: list[str] = []
+                    resume_marker_pending = bool(visible_stream_content(content).strip())
+                    try:
+                        for chunk in calls.stream(
+                            settings,
+                            cast(list[ModelMessage], attempt_messages),
+                            assistant_message_id=assistant_message_id,
+                            tools=[tool for tool in tools
+                                   if (state['document_calls'].get(tool['function']['name'], 0) < 5
+                                       if tool['function']['name'] in DOCUMENT_TOOLS else
+                                       state['tool_failures'].get(tool['function']['name'], 0) <= self.maximum_tool_retries)] or None,
+                        ):
+                            if chunk.content:
+                                # 第一批恢复内容前写入持久标记，用户能看到真实的断点位置。
+                                if resume_marker_pending:
+                                    content.append(STREAM_RESUMED_MARKER)
+                                    if on_content is not None:
+                                        on_content(STREAM_RESUMED_MARKER)
+                                    if on_stream_status is not None:
+                                        on_stream_status('resumed', attempt - 1, LIMITS.stream_attempts)
+                                    resume_marker_pending = False
+                                content.append(chunk.content)
+                                if on_content is not None:
+                                    on_content(chunk.content)
+                            if chunk.reasoning_content:
+                                attempt_reasoning.append(chunk.reasoning_content)
+                            if chunk.tool_call is not None:
+                                current = attempt_calls.setdefault(
+                                    chunk.tool_call.index,
+                                    {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                                )
+                                if chunk.tool_call.id:
+                                    current["id"] += chunk.tool_call.id
+                                if chunk.tool_call.name:
+                                    current["function"]["name"] += chunk.tool_call.name
+                                if chunk.tool_call.arguments:
+                                    current["function"]["arguments"] += chunk.tool_call.arguments
+                    except ModelConnectionFailure as error:
+                        if attempt >= LIMITS.stream_attempts:
+                            raise ModelConnectionFailure(
+                                f'模型连接中断，自动恢复 {LIMITS.stream_attempts - 1} 次后仍未成功。',
+                                error.usage,
+                            ) from None
+                        if on_stream_status is not None:
+                            on_stream_status('retrying', attempt, LIMITS.stream_attempts)
+                        prefix = visible_stream_content(content)
+                        if prefix.strip():
+                            # Chat Completions 不支持 Token 级续传，沿用已出现正文并追加临时续写要求。
+                            attempt_messages = [
+                                *model_messages,
+                                {'role': 'assistant', 'content': prefix},
+                                {'role': 'user', 'content': STREAM_CONTINUATION_PROMPT},
+                            ]
+                        checkpoint.guard()
+                        time.sleep(0.25 * attempt)
+                        checkpoint.guard()
+                        continue
+                    partial_calls = attempt_calls
+                    reasoning = attempt_reasoning
+                    break
                 tool_calls = [partial_calls[item] for item in sorted(partial_calls)]
                 for call in tool_calls:
                     if not call["id"] or not call["function"]["name"]:
@@ -247,9 +297,14 @@ class AgentToolGraph:
                     # 同一参数的最终失败跨模型轮次复用，新的 URL／查询不受影响。
                     checkpoint.put(web_key, result)
                     if result.get('tool_disabled'):
-                        checkpoint.put(provider_key, result)
-                        for tool_name in ('search_web', 'fetch_web'):
-                            failures[tool_name] = self.maximum_tool_retries + 1
+                        if result.get('failure_scope') == 'execution':
+                            # 搜索与抓取共享额度，任一工具耗尽后两者都必须停止外发。
+                            for tool_name in ('search_web', 'fetch_web'):
+                                failures[tool_name] = self.maximum_tool_retries + 1
+                        else:
+                            checkpoint.put(provider_key, result)
+                            for tool_name in ('search_web', 'fetch_web'):
+                                failures[tool_name] = self.maximum_tool_retries + 1
                 elif name in known_tools and ("error" in result or result.get("status") == "failed"):
                     if not exhausted:
                         failures[name] = failures.get(name, 0) + 1

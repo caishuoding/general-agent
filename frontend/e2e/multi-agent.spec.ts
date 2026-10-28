@@ -9,10 +9,13 @@ test("主智能体汇总子任务并可查看只读会话", async ({ page }) => 
   await page.getByRole("button", { name: /新建会话|开始新对话/ }).click();
   await page.getByRole("textbox", { name: "消息", exact: true }).fill("__multi_agent_browser__");
   await page.getByRole("button", { name: "发送消息" }).click();
-  await expect(page.getByText("主智能体已经汇总子任务。", { exact: true })).toBeVisible();
+  // 子智能体通过后台调度完成后再由主智能体汇总，给异步执行留出稳定的完成窗口。
+  await expect(page.getByText("主智能体已经汇总子任务。", { exact: true })).toBeVisible({ timeout: 20_000 });
   const task = page.getByRole("button", { name: "研究子任务 · 已完成" });
   await expect(task).toBeVisible();
-  await expect(page.getByText("子智能体补充交付结果。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("list", { name: "子智能体" })).toHaveCSS("display", "flex");
+  await expect(task.locator(".agent-task-avatar-initials")).toHaveText("研究");
+  await expect(page.getByText("子智能体补充交付结果。", { exact: true })).toHaveCount(0);
   const taskBox = await task.boundingBox();
   const answerBox = await page.getByText("主智能体已经汇总子任务。", { exact: true }).boundingBox();
   expect(taskBox).not.toBeNull();

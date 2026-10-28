@@ -1,6 +1,6 @@
 """为对话智能体注册真实记忆工具，执行前核对观察结果、版本和当前来源。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from collections.abc import Callable
 from typing import Any, cast
@@ -52,11 +52,12 @@ class UpdateMemoryInput(DeleteMemoryInput):
 
 @dataclass(frozen=True)
 class ToolOutcome:
-    """返回工具循环的最终文字、工具使用标志及完整模型消息快照。"""
+    """返回最终文字、模型消息快照及已交付的知识库来源候选。"""
 
     answer: str | None
     used_tools: bool
     messages: list[dict[str, Any]] | None = None
+    knowledge_source_candidates: list[dict[str, Any]] = field(default_factory=list)
 
 
 def memory_tools() -> list[dict[str, Any]]:
@@ -70,20 +71,21 @@ def memory_tools() -> list[dict[str, Any]]:
     return [{'type': 'function', 'function': {'name': name, 'description': description, 'parameters': model.model_json_schema()}} for name, description, model in definitions]
 
 
-def shared_tools(knowledge: bool = False) -> list[dict[str, Any]]:
-    """返回主从都可安全使用的时间、资料与网页工具，不包含记忆和编排权限。"""
-    return [search_web_tool(), search_web_tool("fetch_web"), *document_tools(), current_time_tool(),
+def shared_tools(knowledge: bool = False, documents: bool = False) -> list[dict[str, Any]]:
+    """按当前会话的知识库选择和有效文档清单返回公共工具定义，不包含记忆及编排权限。"""
+    return [search_web_tool(), search_web_tool("fetch_web"),
+            *(document_tools() if documents else []), current_time_tool(),
             *([knowledge_tool()] if knowledge else [])]
 
 
-def agent_tools(knowledge: bool = False) -> list[dict[str, Any]]:
-    """返回主智能体业务工具；记忆写入只属于主智能体，编排工具由外层另行附加。"""
-    return [*memory_tools(), *shared_tools(knowledge)]
+def agent_tools(knowledge: bool = False, documents: bool = False) -> list[dict[str, Any]]:
+    """按会话资料可用性返回业务工具定义；包含记忆工具，编排工具由外层另行附加。"""
+    return [*memory_tools(), *shared_tools(knowledge, documents)]
 
 
-def worker_tools(knowledge: bool = False) -> list[dict[str, Any]]:
-    """返回子智能体可复用的公共工具集，显式排除记忆写入与编排能力。"""
-    return shared_tools(knowledge)
+def worker_tools(knowledge: bool = False, documents: bool = False) -> list[dict[str, Any]]:
+    """按会话资料可用性返回子智能体公共工具定义，排除记忆写入与编排能力。"""
+    return shared_tools(knowledge, documents)
 
 
 class MemoryTools:
@@ -309,12 +311,15 @@ class MemoryTools:
         with self.memory.database.connect() as connection:
             self.memory.guard_source(connection, conversation_id, message_id, operation)
             connection.execute("INSERT INTO memory_tool_runs(message_id,operation_id,status) VALUES(%s,%s,'pending') ON CONFLICT(message_id) DO UPDATE SET operation_id=EXCLUDED.operation_id", (message_id, operation.operation_id))
+        # 独立工具图也只声明当前会话真实可用的检索能力；图片附件不属于可读取文档。
+        knowledge_enabled = self.knowledge is not None and bool(self.knowledge.service.selected(conversation_id, account_id))
+        documents_enabled = self.attachments is not None and bool(source_attachment_ids)
         result = self.graph.run(
             messages=cast(list[dict[str, Any]], messages),
             settings=settings,
             calls=self.memory.calls.bind(operation),
             checkpoint=checkpoint,
-            tools=agent_tools(self.knowledge is not None),
+            tools=agent_tools(knowledge_enabled, documents_enabled),
             assistant_message_id=assistant_message_id,
             on_content=on_content,
             execute_tool=execute,

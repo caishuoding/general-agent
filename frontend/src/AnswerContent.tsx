@@ -100,6 +100,27 @@ function scrollToSource(identifier: string) {
 }
 
 type RenderedMessage = Pick<Message, 'id' | 'content' | 'web_sources' | 'knowledge_sources'>;
+const STREAM_RESUMED_TOKEN = /\[\[STREAM_RESUMED(?::\d+)?\]\]/;
+const STREAM_RESUMED_SPLIT = /(\[\[STREAM_RESUMED(?::\d+)?\]\])/;
+
+/** 移除仅用于界面分段的恢复标记，得到适合复制和后续阅读的正文。 */
+function withoutStreamMarkers(content: string) {
+  return content
+    .split(STREAM_RESUMED_SPLIT)
+    .filter(function keepText(part) { return !STREAM_RESUMED_TOKEN.test(part); })
+    .join("")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** 在真实断点处显示持久提示，说明正文经过自动恢复和续写。 */
+function StreamResumeMarker() {
+  return <div className="stream-resume-marker" role="status">
+    <span aria-hidden="true">↻</span>
+    <span>连接中断</span>
+    <strong>已自动恢复并继续</strong>
+  </div>;
+}
 
 /** 根据服务端来源编号创建 Markdown 插件，仅转换正文中真实存在的网页或知识库引用。 */
 function citationPlugin(message: RenderedMessage, citationNumbers: Map<string, string>) {
@@ -331,8 +352,19 @@ export function AnswerMarkdown({ message, onCitationClick, className = '', resou
     if (onCitationClick) onCitationClick(identifier);
     else scrollToSource(identifier);
   }
+  const pieces = message.content.split(STREAM_RESUMED_SPLIT);
   return <div className={`message-content answer-markdown ${className}`.trim()}>
-    <Markdown skipHtml remarkPlugins={[remarkGfm, lineBreakPlugin(), citationPlugin(message, citationNumbers)]} rehypePlugins={[[rehypeHighlight, { detect: false }]]} components={answerComponents(message, reveal, resourceRoot)}>{message.content}</Markdown>
+    {pieces.map(function renderPiece(piece, index) {
+      // 恢复标记不交给 Markdown 解析，确保断点位置稳定且不会被复制为内部字符串。
+      if (STREAM_RESUMED_TOKEN.test(piece)) return <StreamResumeMarker key={`resume-${index}`} />;
+      return piece ? <Markdown
+        key={`content-${index}`}
+        skipHtml
+        remarkPlugins={[remarkGfm, lineBreakPlugin(), citationPlugin(message, citationNumbers)]}
+        rehypePlugins={[[rehypeHighlight, { detect: false }]]}
+        components={answerComponents(message, reveal, resourceRoot)}
+      >{piece}</Markdown> : null;
+    })}
   </div>;
 }
 
@@ -398,6 +430,6 @@ export function AnswerContent({ message, resourceRoot = '/api' }: {
         })}
       </section>}
     </div>}
-    {!!message.content && <div className="answer-actions"><CopyButton text={message.content} label="复制回答" /></div>}
+    {!!message.content && <div className="answer-actions"><CopyButton text={withoutStreamMarkers(message.content)} label="复制回答" /></div>}
   </>;
 }

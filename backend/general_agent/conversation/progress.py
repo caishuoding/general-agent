@@ -36,6 +36,20 @@ TOOL_PROGRESS: dict[str, MessageProgress] = {
 }
 
 
+def connection_retry_progress(attempt: int, total: int) -> MessageProgress:
+    """返回可公开的连接恢复进度，明确当前自动重试序号和总次数。"""
+    return {
+        "code": "connection_retrying",
+        "label": f"连接中断，正在自动恢复（{attempt}/{total}）…",
+    }
+
+
+CONNECTION_RESUMED_PROGRESS: MessageProgress = {
+    "code": "connection_resumed",
+    "label": "连接已恢复，正在从断点继续…",
+}
+
+
 def tool_progress(name: str) -> MessageProgress | None:
     """返回关键工具对应的公开进度；未列出的普通工具不改变当前状态。"""
     return TOOL_PROGRESS.get(name)

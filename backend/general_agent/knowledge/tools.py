@@ -1,6 +1,5 @@
 """按账号和当前会话选择限定知识库召回，并提供命中图片原件。"""
 
-import json
 import re
 import time
 from typing import Any
@@ -127,43 +126,34 @@ class KnowledgeTools:
             return f'第 {paragraph} 段' if end_paragraph in (None, paragraph) else f'第 {paragraph}–{end_paragraph} 段'
         return '未标注位置'
 
-    def resolve_citations(self, messages: list[dict[str, Any]], answer: str) -> tuple[str, list[dict[str, Any]]]:
-        """只保留实际引用且来自真实工具结果的知识库来源，并核对 [K编号]。"""
+    def resolve_citations(self, sources: list[dict[str, Any]], answer: str) -> tuple[str, list[dict[str, Any]]]:
+        """根据已登记并交付的来源核对 [K编号]，只返回回答实际引用的知识库来源。"""
         allowed: dict[str, dict[str, Any]] = {}
-        for message in messages:
-            if message.get('role') != 'tool':
+        # 来源已由执行层按回答身份筛选，这里只接受结构完整的知识库编号。
+        for item in sources:
+            if not isinstance(item, dict) or not isinstance(item.get('key'), str):
                 continue
-            try:
-                payload = json.loads(str(message.get('content') or ''))
-            except ValueError:
+            key = item['key']
+            if re.fullmatch(r'K\d+', key) is None or not item.get('knowledge_base_id') or not item.get('document_id'):
                 continue
-            results = payload.get('results') if isinstance(payload, dict) else None
-            if not isinstance(results, list):
-                continue
-            for item in results:
-                if not isinstance(item, dict) or not isinstance(item.get('key'), str):
-                    continue
-                key = item['key']
-                if re.fullmatch(r'K\d+', key) is None or not item.get('knowledge_base_id') or not item.get('document_id'):
-                    continue
-                allowed[key] = {
-                    'key': key,
-                    'knowledge_base_id': str(item['knowledge_base_id']),
-                    'knowledge_base_name': str(item.get('knowledge_base_name') or ''),
-                    'document_id': str(item['document_id']),
-                    'filename': str(item.get('filename') or ''),
-                    'chunk_id': item.get('chunk_id'),
-                    'kind': self.source_kind(item),
-                    'location': self.source_location(item),
-                    'page': item.get('page'),
-                    'end_page': item.get('end_page'),
-                    'excerpt': str(item.get('content') or '')[:8000],
-                    'image_id': (str(item['image_id']) if item.get('image_id') else
-                                 str(item.get('structure', {}).get('table', {}).get('image_id'))
-                                 if isinstance(item.get('structure'), dict) and isinstance(item['structure'].get('table'), dict)
-                                 and item['structure']['table'].get('image_id') else None),
-                    'table': item.get('structure', {}).get('table') if isinstance(item.get('structure'), dict) else None,
-                }
+            allowed[key] = {
+                'key': key,
+                'knowledge_base_id': str(item['knowledge_base_id']),
+                'knowledge_base_name': str(item.get('knowledge_base_name') or ''),
+                'document_id': str(item['document_id']),
+                'filename': str(item.get('filename') or ''),
+                'chunk_id': item.get('chunk_id'),
+                'kind': self.source_kind(item),
+                'location': self.source_location(item),
+                'page': item.get('page'),
+                'end_page': item.get('end_page'),
+                'excerpt': str(item.get('content') or '')[:8000],
+                'image_id': (str(item['image_id']) if item.get('image_id') else
+                             str(item.get('structure', {}).get('table', {}).get('image_id'))
+                             if isinstance(item.get('structure'), dict) and isinstance(item['structure'].get('table'), dict)
+                             and item['structure']['table'].get('image_id') else None),
+                'table': item.get('structure', {}).get('table') if isinstance(item.get('structure'), dict) else None,
+            }
         used: list[dict[str, Any]] = []
 
         def replace_reference(match: re.Match[str]) -> str:

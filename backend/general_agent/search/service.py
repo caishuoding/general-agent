@@ -345,7 +345,8 @@ class SearchService:
             }
         else:
             body = {'url': query}
-        with self.calls.bind(operation).call(settings, 'credits', assistant_message_id=answer['id'] if answer else None) as call_id:
+        with self.calls.bind(operation).call(settings, 'credits', assistant_message_id=answer['id'] if answer else None,
+                                             web_kind=kind) as call_id:
             try:
                 with httpx.Client(transport=self.transport, timeout=30, follow_redirects=False, trust_env=False) as client:
                     response = client.post(endpoint, headers={'Authorization': 'Bearer ' + settings.api_key}, json=body)
