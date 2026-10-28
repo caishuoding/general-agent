@@ -56,7 +56,7 @@ def test_upgrade_backs_up_then_clears_legacy_business_data(database_url: str, tm
     Database(database_url).migrate()
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         assert connection.execute(
-            "SELECT count(*) AS count FROM users WHERE username = 'admin'"
+                "SELECT count(*) AS count FROM admin_accounts WHERE username = 'admin'"
         ).fetchone() == {"count": 1}
 
 

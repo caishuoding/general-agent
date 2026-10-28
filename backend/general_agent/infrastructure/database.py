@@ -36,13 +36,13 @@ class Database:
     def ensure_bootstrap_admin(self, connection: psycopg.Connection[dict[str, Any]]) -> None:
         """幂等预置必须改密的初始管理员，已有账号时保持原密码不变。"""
         existing = connection.execute(
-            "SELECT id FROM users WHERE username = %s", ("admin",)
+            "SELECT id FROM admin_accounts WHERE username = %s", ("admin",)
         ).fetchone()
         if existing is not None:
             return
         connection.execute(
-            "INSERT INTO users (id, username, password_hash, role, status, must_change_password) "
-            "VALUES (%s, %s, %s, 'admin', 'active', TRUE)",
+            "INSERT INTO admin_accounts (id, username, password_hash, must_change_password) "
+            "VALUES (%s, %s, %s, TRUE)",
             (uuid4(), "admin", hash_password(BOOTSTRAP_ADMIN_PASSWORD)),
         )
 

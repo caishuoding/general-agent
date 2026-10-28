@@ -20,7 +20,7 @@ def test_migration_seeds_bootstrap_admin_and_auth_tables(
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         admin = connection.execute(
             "SELECT username, password_hash, role, status, must_change_password "
-            "FROM users WHERE username = 'admin'"
+            "FROM admin_accounts WHERE username = 'admin'"
         ).fetchone()
         assert admin is not None
         assert admin["role"] == "admin"
@@ -36,7 +36,7 @@ def test_migration_seeds_bootstrap_admin_and_auth_tables(
                 "WHERE table_schema = 'public'"
             ).fetchall()
         }
-        assert {"users", "sessions", "admin_audit_log"} <= table_names
+        assert {"users", "sessions", "admin_accounts", "admin_sessions", "admin_audit_log"} <= table_names
 
         user_id = connection.execute(
             "SELECT data_type, is_nullable FROM information_schema.columns "

@@ -1,38 +1,57 @@
 import { loginAdmin } from "./auth";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
-// 每个用例先通过 API 登录管理员。
-test.beforeEach(async ({ page }) => {
-  await loginAdmin(page);
+/** 每个浏览器用例先通过独立入口登录唯一管理员，输入页面并建立管理端会话。 */
+async function logInBeforeTest({ page }: { page: Page }) { await loginAdmin(page); }
+test.beforeEach(logInBeforeTest);
+
+/** 从用户界面验证账号创建、会话入口和临时密码只显示一次。 */
+test("管理端只创建普通用户并展示一次临时密码", async ({ page }) => {
+  await page.goto("/admin");
+  await expect(page.getByRole("heading", { name: "用户账号" })).toBeVisible();
+  await expect(page.getByText("仅查看，不会替用户发送消息")).toHaveCount(0);
+  await page.getByRole("button", { name: "创建用户" }).click();
+  await page.getByLabel("用户名", { exact: true }).fill("ui_user");
+  await page.getByLabel("临时密码").fill("ui-temp-pass");
+  await page.getByRole("button", { name: "创建账号" }).click();
+  const card = page.locator(".admin-account-card").filter({ hasText: "ui_user" });
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: "查看数据" }).click();
+  await expect(page.getByRole("heading", { name: "ui_user" })).toBeVisible();
+  await page.getByRole("button", { name: "返回账号列表" }).click();
+  await card.getByRole("button", { name: "重置密码" }).click();
+  await page.getByRole("button", { name: "生成临时密码" }).click();
+  await expect(page.locator(".admin-temporary-password")).not.toBeEmpty();
+  await page.getByRole("button", { name: "完成" }).click();
+  await expect(page.locator(".admin-temporary-password")).toHaveCount(0);
 });
 
-// 验证管理员后台的账号创建、停用和临时密码重置。
-test("管理员可以在后台创建、停用和重置账号", async ({ page }) => {
+/** 延迟第一个账号的会话响应，验证切换后不会在第二个账号标题下展示旧账号内容。 */
+test("快速切换账号时只显示当前账号的会话", async ({ page }) => {
+  const first = await page.request.post("/api/admin/users", { data: { username: "race_first", password: "race-first-password" } });
+  const second = await page.request.post("/api/admin/users", { data: { username: "race_second", password: "race-second-password" } });
+  const firstId = (await first.json()).id as string;
+  const secondId = (await second.json()).id as string;
+  /** 按账号标识返回不同会话，并延迟第一个账号以触发切换竞态。 */
+  async function handleConversationRoute(route: Route) {
+    if (route.request().url().includes(firstId)) {
+      await page.waitForTimeout(700);
+      await route.fulfill({ json: [{ id: "11111111-1111-4111-8111-111111111111", title: "第一个账号的会话", created_at: "2026-10-28T00:00:00Z" }] });
+      return;
+    }
+    if (route.request().url().includes(secondId)) {
+      await route.fulfill({ json: [{ id: "22222222-2222-4222-8222-222222222222", title: "第二个账号的会话", created_at: "2026-10-28T00:00:00Z" }] });
+      return;
+    }
+    await route.continue();
+  }
+  await page.route("**/api/admin/users/*/conversations*", handleConversationRoute);
   await page.goto("/admin");
-  await expect(page.getByRole("heading", { name: "账号管理" })).toBeVisible();
-
-  await page.getByRole("button", { name: "创建账号", exact: true }).click();
-
-  await page.getByLabel("用户名").fill("ui_user");
-  await page.getByLabel("临时密码").fill("ui-temp-pass");
-  await page.getByRole("button", { name: "创建用户" }).click();
-  await expect(page.getByText("ui_user", { exact: true })).toBeVisible();
-
-  const row = page.locator(".admin-user").filter({ hasText: "ui_user" });
-  await row.getByRole("button", { name: "查看用户数据" }).click();
-  await expect(page.getByRole("heading", { name: "ui_user 的数据" })).toBeVisible();
-
-  await row.locator(".admin-user-menu summary").click();
-  page.once("dialog", async (dialog) => {
-    expect(dialog.type()).toBe("confirm");
-    await dialog.accept();
-  });
-  await row.getByRole("button", { name: "停用账号" }).click();
-  await expect(row.getByText("已停用")).toBeVisible();
-
-  await row.getByRole("button", { name: "设置临时密码" }).click();
-  await expect(page.getByRole("dialog")).toContainText("为 ui_user 设置临时密码");
-  await page.getByRole("dialog").getByRole("textbox", { name: "临时密码" }).fill("ui-reset-pass");
-  await page.getByRole("button", { name: "保存临时密码" }).click();
-  await expect(page.getByRole("status")).toContainText("临时密码已设置");
+  await page.locator(".admin-account-card").filter({ hasText: "race_first" }).getByRole("button", { name: "查看数据" }).click();
+  await page.getByRole("button", { name: "返回账号列表" }).click();
+  await page.locator(".admin-account-card").filter({ hasText: "race_second" }).getByRole("button", { name: "查看数据" }).click();
+  await expect(page.getByRole("heading", { name: "race_second" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /第二个账号的会话/ })).toBeVisible();
+  await page.waitForTimeout(800);
+  await expect(page.getByText("第一个账号的会话")).toHaveCount(0);
 });

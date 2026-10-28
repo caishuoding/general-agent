@@ -9,7 +9,7 @@ from psycopg.rows import dict_row
 from pytest import MonkeyPatch
 
 from general_agent.app import create_app
-from general_agent.auth.api import COOKIE_NAME
+from general_agent.auth.api import ADMIN_COOKIE_NAME
 from general_agent.auth.passwords import hash_password
 
 
@@ -18,69 +18,62 @@ def test_bootstrap_admin_forces_password_change_and_blocks_public_login(
 ) -> None:
     """初始管理员必须本机登录并先改密，完成后旧会话失效。"""
     with TestClient(create_app(database_url, tmp_path), base_url="http://127.0.0.1:8000") as client:
-        wrong = client.post("/api/auth/login", json={"username": "admin", "password": "wrong"})
+        wrong = client.post("/api/admin/auth/login", json={"username": "admin", "password": "wrong"})
         assert wrong.status_code == 401
         assert wrong.json()["detail"] == "用户名或密码错误。"
 
         public = client.post(
-            "/api/auth/login",
+            "/api/admin/auth/login",
             json={"username": "admin", "password": "123456"},
             headers={"X-Forwarded-For": "203.0.113.10"},
         )
         assert public.status_code == 403
 
-        local = client.post("/api/auth/login", json={"username": "admin", "password": "123456"})
+        local = client.post("/api/admin/auth/login", json={"username": "admin", "password": "123456"})
         assert local.status_code == 200
         assert local.json()["must_change_password"] is True
-        old_token = client.cookies.get(COOKIE_NAME)
+        old_token = client.cookies.get(ADMIN_COOKIE_NAME)
         assert old_token
 
-        assert client.get("/api/auth/me").status_code == 200
+        assert client.get("/api/admin/auth/me").status_code == 200
         blocked = client.get("/api/conversations")
-        assert blocked.status_code == 403
-        assert blocked.json()["detail"] == "请先修改密码。"
+        assert blocked.status_code == 401
 
         weak = client.post(
-            "/api/auth/password",
+            "/api/admin/auth/password",
             json={"current_password": "123456", "new_password": "short"},
         )
         assert weak.status_code == 422
 
         changed = client.post(
-            "/api/auth/password",
+            "/api/admin/auth/password",
             json={"current_password": "123456", "new_password": "new-strong-pass"},
         )
         assert changed.status_code == 200
         assert changed.json()["must_change_password"] is False
         assert client.get("/api/admin/users").status_code == 200
         user_area = client.get("/api/conversations")
-        assert user_area.status_code == 403
-        assert user_area.json()["detail"] == "管理员请使用管理端。"
+        assert user_area.status_code == 401
 
-        client.cookies.set(COOKIE_NAME, old_token)
-        assert client.get("/api/auth/me").status_code == 401
+        client.cookies.set(ADMIN_COOKIE_NAME, old_token)
+        assert client.get("/api/admin/auth/me").status_code == 401
 
 
-def test_logout_expiry_and_disabled_account(database_url: str, tmp_path: Path) -> None:
-    """退出、过期会话和停用账号都不能继续访问业务接口。"""
+def test_admin_session_expiry(database_url: str, tmp_path: Path) -> None:
+    """管理员登录会话过期后不能继续访问管理端。"""
     with TestClient(create_app(database_url, tmp_path), base_url="http://127.0.0.1:8000") as client:
-        login = client.post("/api/auth/login", json={"username": "admin", "password": "123456"})
+        login = client.post("/api/admin/auth/login", json={"username": "admin", "password": "123456"})
         assert login.status_code == 200
-        token = client.cookies.get(COOKIE_NAME)
+        token = client.cookies.get(ADMIN_COOKIE_NAME)
         assert token
 
         with psycopg.connect(database_url, row_factory=dict_row) as connection:
             connection.execute(
-                "UPDATE sessions SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'"
+                "UPDATE admin_sessions SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'"
             )
-        assert client.get("/api/auth/me").status_code == 401
-
-        client.cookies.set(COOKIE_NAME, token)
-        with psycopg.connect(database_url, row_factory=dict_row) as connection:
-            connection.execute(
-                "UPDATE users SET status = 'disabled' WHERE username = 'admin'"
-            )
-        assert client.post("/api/auth/login", json={"username": "admin", "password": "123456"}).status_code == 401
+        assert client.get("/api/admin/auth/me").status_code == 401
+        client.cookies.set(ADMIN_COOKIE_NAME, token)
+        assert client.get("/api/admin/auth/me").status_code == 401
 
 
 def test_non_bootstrap_user_can_login_public_and_must_change_password(
@@ -112,7 +105,7 @@ def test_non_bootstrap_user_can_login_public_and_must_change_password(
         assert client.get("/api/conversations").status_code == 200
 
 
-def test_admin_reset_to_non_default_temp_password_can_login_public(
+def test_admin_non_default_temp_password_can_login_public(
     database_url: str, tmp_path: Path
 ) -> None:
     """管理员临时密码不是默认引导密码时，公网登录应进入强制改密页。"""
@@ -120,14 +113,14 @@ def test_admin_reset_to_non_default_temp_password_can_login_public(
         pass
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         connection.execute(
-            "UPDATE users SET password_hash=%s, must_change_password=TRUE, "
+            "UPDATE admin_accounts SET password_hash=%s, must_change_password=TRUE, "
             "password_changed_at=NULL WHERE username='admin'",
             (hash_password("admin-reset-temp-pass"),),
         )
 
     with TestClient(create_app(database_url, tmp_path), base_url="http://127.0.0.1:8000") as client:
         login = client.post(
-            "/api/auth/login",
+            "/api/admin/auth/login",
             json={"username": "admin", "password": "admin-reset-temp-pass"},
             headers={"X-Forwarded-For": "203.0.113.10"},
         )
@@ -142,7 +135,7 @@ def test_https_login_uses_secure_httponly_cookie(database_url: str, tmp_path: Pa
         base_url="https://127.0.0.1:8000",
     ) as client:
         response = client.post(
-            "/api/auth/login", json={"username": "admin", "password": "123456"}
+            "/api/admin/auth/login", json={"username": "admin", "password": "123456"}
         )
         assert response.status_code == 200
         cookie = response.headers["set-cookie"]

@@ -75,7 +75,7 @@ export async function api<T>(
   );
   if (!response.ok) {
     // 登录接口会正常返回 401 表示密码错误，其余 401 视为会话已失效。
-    if (response.status === 401 && path !== "/auth/login") {
+    if (response.status === 401 && path !== "/auth/login" && path !== "/admin/auth/login") {
       window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
     }
     throw new Error(

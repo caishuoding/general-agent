@@ -17,22 +17,17 @@ from tests.auth.support import (
 )
 
 
-def test_admin_creates_disables_resets_and_protects_last_admin(
+def test_admin_creates_disables_resets_and_cannot_create_second_admin(
     database_url: str, tmp_path: Path
 ) -> None:
-    """管理员可管理账号，但停用或降级最后一个管理员会被拒绝。"""
+    """唯一管理员只管理普通用户，重置密码使旧会话失效。"""
     with admin_client(database_url, tmp_path) as admin:
-        admin_id = admin.get("/api/auth/me").json()["id"]
-        self_reset = admin.post(
-            f"/api/admin/users/{admin_id}/reset-password",
-            json={"password": "should-not-apply"},
-        )
-        assert self_reset.status_code == 409
+        admin_id = admin.get("/api/admin/auth/me").json()["id"]
         assert admin.get("/api/admin/users").status_code == 200
 
         created = admin.post(
             "/api/admin/users",
-            json={"username": "alice", "password": "alice-temp-pass", "role": "user"},
+            json={"username": "alice", "password": "alice-temp-pass"},
         )
         assert created.status_code == 201
         alice_id = created.json()["id"]
@@ -40,18 +35,18 @@ def test_admin_creates_disables_resets_and_protects_last_admin(
 
         duplicate = admin.post(
             "/api/admin/users",
-            json={"username": "alice", "password": "another", "role": "user"},
+            json={"username": "alice", "password": "another"},
         )
         assert duplicate.status_code == 422
         invalid = admin.post(
             "/api/admin/users",
-            json={"username": "Alice!", "password": "another", "role": "user"},
+            json={"username": "Alice!", "password": "another"},
         )
         assert invalid.status_code == 422
 
         with TestClient(create_app(database_url, tmp_path), base_url="http://127.0.0.1:8000") as alice:
             login_and_change_password(alice, "alice", "alice-temp-pass", "alice-strong-pass")
-            assert alice.get("/api/admin/users").status_code == 403
+            assert alice.get("/api/admin/users").status_code == 401
 
             disabled = admin.patch(
                 f"/api/admin/users/{alice_id}", json={"status": "disabled"}
@@ -74,14 +69,14 @@ def test_admin_creates_disables_resets_and_protects_last_admin(
 
             reset = admin.post(
                 f"/api/admin/users/{alice_id}/reset-password",
-                json={"password": "alice-reset-pass"},
             )
             assert reset.status_code == 200
             assert reset.json()["must_change_password"] is True
+            temporary_password = reset.json()["temporary_password"]
             assert alice.get("/api/auth/me").status_code == 401
             relogin = alice.post(
                 "/api/auth/login",
-                json={"username": "alice", "password": "alice-reset-pass"},
+                json={"username": "alice", "password": temporary_password},
             )
             assert relogin.status_code == 200
             assert relogin.json()["must_change_password"] is True
@@ -90,17 +85,13 @@ def test_admin_creates_disables_resets_and_protects_last_admin(
             "/api/admin/users",
             json={"username": "ops_admin", "password": "ops-temp-pass", "role": "admin"},
         )
-        assert ops.status_code == 201
-        ops_id = ops.json()["id"]
-        assert admin.patch(
-            f"/api/admin/users/{ops_id}", json={"status": "disabled"}
-        ).status_code == 200
+        assert ops.status_code == 422
         assert admin.patch(
             f"/api/admin/users/{admin_id}", json={"status": "disabled"}
-        ).status_code == 409
+        ).status_code == 404
         assert admin.patch(
             f"/api/admin/users/{admin_id}", json={"role": "user"}
-        ).status_code == 409
+        ).status_code == 422
 
 
 def test_admin_can_view_all_user_content_read_only_and_audit_it(
@@ -120,7 +111,7 @@ def test_admin_can_view_all_user_content_read_only_and_audit_it(
         )
         created = admin.post(
             "/api/admin/users",
-            json={"username": "bob", "password": "bob-temp-pass", "role": "user"},
+            json={"username": "bob", "password": "bob-temp-pass"},
         )
         assert created.status_code == 201
         bob_id = created.json()["id"]
@@ -150,6 +141,10 @@ def test_admin_can_view_all_user_content_read_only_and_audit_it(
         conversations = admin.get(f"/api/admin/users/{bob_id}/conversations")
         assert conversations.status_code == 200
         assert [item["id"] for item in conversations.json()] == [conversation]
+        found = admin.get(f"/api/admin/users/{bob_id}/conversations", params={"query": "请回答"})
+        assert found.status_code == 200
+        assert found.json()[0]["matched_message_id"] is not None
+        assert admin.get(f"/api/admin/users/{bob_id}/conversations", params={"query": "不存在的内容"}).json() == []
         detail = admin.get(
             f"/api/admin/users/{bob_id}/conversations/{conversation}"
         )
@@ -161,6 +156,21 @@ def test_admin_can_view_all_user_content_read_only_and_audit_it(
         )
         assert download.status_code == 200
         assert download.content == b"bob private attachment"
+        assert admin.get(
+            f"/api/admin/users/{bob_id}/conversations/{conversation}"
+            f"/attachments/{uploaded['id']}/preview"
+        ).status_code == 415
+        with psycopg.connect(database_url) as connection:
+            connection.execute(
+                "UPDATE attachments SET expires_at=CURRENT_TIMESTAMP-INTERVAL '1 second' WHERE id=%s",
+                (uploaded["id"],),
+            )
+        expired_detail = admin.get(f"/api/admin/users/{bob_id}/conversations/{conversation}").json()
+        assert all(not message["attachments"] for message in expired_detail["messages"])
+        assert admin.get(
+            f"/api/admin/users/{bob_id}/conversations/{conversation}"
+            f"/attachments/{uploaded['id']}/file"
+        ).status_code == 404
         assert admin.get(f"/api/admin/users/{bob_id}/memories").status_code == 200
         assert admin.get(f"/api/admin/users/{bob_id}/search").status_code == 200
         assert admin.get(f"/api/admin/users/{bob_id}/usage").status_code == 200
@@ -178,3 +188,6 @@ def test_admin_can_view_all_user_content_read_only_and_audit_it(
         assert audit
         assert all(row["admin_user_id"] is not None and row["action"] in {"view", "download"} for row in audit)
         assert any(row["resource_type"] == "conversation" for row in audit)
+        visible_audit = admin.get("/api/admin/audit", params={"target_user_id": bob_id, "action": "download"})
+        assert visible_audit.status_code == 200
+        assert any(row["resource_type"] == "attachment" for row in visible_audit.json())

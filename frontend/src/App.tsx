@@ -247,10 +247,6 @@ export function App() {
         try {
           const current = await api<AuthUser>("/auth/me");
           if (!mounted) return;
-          if (current.role === "admin") {
-            window.location.replace("/admin");
-            return;
-          }
           setLoading(true);
           setUser(current);
         } catch {
@@ -449,10 +445,6 @@ export function App() {
   // 登录成功后先进入工作区加载态，再保存账号，避免暴露未初始化的聊天控件。
   function handleAuthenticated(next: AuthUser) {
     setError("");
-    if (next.role === "admin") {
-      window.location.replace("/admin");
-      return;
-    }
     setLoading(true);
     setUser(next);
   }

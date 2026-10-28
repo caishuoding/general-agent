@@ -22,7 +22,7 @@ from starlette.responses import Response
 
 from general_agent.memory.source_deletion import SourceDeletion
 from general_agent.memory.source_deletion_api import source_deletion_router
-from general_agent.auth.api import COOKIE_NAME, auth_router
+from general_agent.auth.api import ADMIN_COOKIE_NAME, COOKIE_NAME, auth_router
 from general_agent.auth.admin_api import admin_router
 from general_agent.auth.dependencies import current_user, require_admin
 from general_agent.auth.service import AuthService, AuthenticatedUser
@@ -125,6 +125,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         else os.environ.get("COOKIE_SECURE", "false").lower() == "true"
     )
     auth = AuthService(database)
+    admin_auth = AuthService(database, "admin")
     settings = SettingsStore(data_dir or Path(os.environ.get("APP_DATA_DIR", ".local")))
     configure_agent_logging(settings.directory)
     configure_tracing(settings.directory)
@@ -178,7 +179,8 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
     app.include_router(auth_router(auth, cookie_secure))
-    app.include_router(admin_router(auth, database, attachments, memory))
+    app.include_router(auth_router(admin_auth, cookie_secure))
+    app.include_router(admin_router(auth, database, attachments, memory, knowledge))
     app.include_router(attachment_router(attachments))
     app.include_router(knowledge_router(knowledge))
     app.include_router(source_deletion_router(source_deletion))
@@ -224,23 +226,23 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     async def require_login(request: Request, call_next: RequestResponseEndpoint) -> Response:
         """保护业务接口，并在必须改密时只放行账号与密码相关接口。"""
         path = request.url.path
-        public = path in {"/api/health", "/api/auth/login"} or not path.startswith("/api/")
+        public = path in {"/api/health", "/api/auth/login", "/api/admin/auth/login"} or not path.startswith("/api/")
         if public:
             return await call_next(request)
-        user = auth.user_for_token(request.cookies.get(COOKIE_NAME))
+        admin_path = path.startswith("/api/admin/") or path.startswith("/api/settings")
+        service = admin_auth if admin_path else auth
+        cookie_name = ADMIN_COOKIE_NAME if admin_path else COOKIE_NAME
+        user = service.user_for_token(request.cookies.get(cookie_name))
         if user is None:
             return JSONResponse(status_code=401, content={"detail": "请先登录。"})
         request.state.user = user
+        auth_prefix = "/api/admin/auth" if admin_path else "/api/auth"
         if user.must_change_password and path not in {
-            "/api/auth/me",
-            "/api/auth/logout",
-            "/api/auth/password",
+            f"{auth_prefix}/me",
+            f"{auth_prefix}/logout",
+            f"{auth_prefix}/password",
         }:
             return JSONResponse(status_code=403, content={"detail": "请先修改密码。"})
-        if user.role == "admin" and not path.startswith(
-            ("/api/auth/", "/api/admin/", "/api/settings", "/api/health")
-        ):
-            return JSONResponse(status_code=403, content={"detail": "管理员请使用管理端。"})
         return await call_next(request)
 
     @app.get("/api/health")

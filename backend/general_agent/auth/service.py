@@ -30,24 +30,29 @@ class AuthenticatedUser:
 class AuthService:
     """封装账号验证、会话签发和密码变更。"""
 
-    def __init__(self, database: Database) -> None:
-        """绑定业务数据库，不在构造时读取账号数据。"""
+    def __init__(self, database: Database, realm: str = "user") -> None:
+        """绑定业务数据库和固定认证入口，不在构造时读取账号数据。"""
+        if realm not in {"user", "admin"}:
+            raise ValueError("认证入口无效。")
         self.database = database
+        self.realm = realm
+        self.account_table = "admin_accounts" if realm == "admin" else "users"
+        self.session_table = "admin_sessions" if realm == "admin" else "sessions"
 
     def authenticate(self, username: str, password: str) -> AuthenticatedUser | None:
         """验证有效账号的用户名与密码，成功时更新最近登录时间。"""
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT id, username, password_hash, role, status, must_change_password "
-                "FROM users WHERE username = %s",
-                (username.strip().lower(),),
+                f"FROM {self.account_table} WHERE username = %s AND role = %s",
+                (username.strip().lower(), self.realm),
             ).fetchone()
             if row is None or row["status"] != "active":
                 return None
             if not verify_password(row["password_hash"], password):
                 return None
             connection.execute(
-                "UPDATE users SET last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP "
+                f"UPDATE {self.account_table} SET last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP "
                 "WHERE id = %s",
                 (row["id"],),
             )
@@ -58,7 +63,7 @@ class AuthService:
         token = secrets.token_urlsafe(32)
         with self.database.connect() as connection:
             connection.execute(
-                "INSERT INTO sessions (id, user_id, token_hash, expires_at) "
+                f"INSERT INTO {self.session_table} (id, user_id, token_hash, expires_at) "
                 "VALUES (%s, %s, %s, %s)",
                 (uuid4(), user_id, self._token_hash(token), datetime.now(timezone.utc) + SESSION_LIFETIME),
             )
@@ -71,7 +76,7 @@ class AuthService:
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT u.id, u.username, u.role, u.must_change_password "
-                "FROM sessions s JOIN users u ON u.id = s.user_id "
+                f"FROM {self.session_table} s JOIN {self.account_table} u ON u.id = s.user_id "
                 "WHERE s.token_hash = %s AND s.expires_at > CURRENT_TIMESTAMP "
                 "AND u.status = 'active'",
                 (self._token_hash(token),),
@@ -84,7 +89,7 @@ class AuthService:
             return
         with self.database.connect() as connection:
             connection.execute(
-                "DELETE FROM sessions WHERE token_hash = %s", (self._token_hash(token),)
+                f"DELETE FROM {self.session_table} WHERE token_hash = %s", (self._token_hash(token),)
             )
 
     def change_password(
@@ -93,7 +98,7 @@ class AuthService:
         """校验当前密码后更新密码、吊销旧会话并签发新会话。"""
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT password_hash FROM users WHERE id = %s AND status = 'active'",
+                f"SELECT password_hash FROM {self.account_table} WHERE id = %s AND status = 'active'",
                 (user.id,),
             ).fetchone()
             if row is None or not verify_password(row["password_hash"], current_password):
@@ -102,12 +107,12 @@ class AuthService:
                 raise ValueError("新密码不能与当前密码相同。")
             validate_new_password(new_password, user.username)
             connection.execute(
-                "UPDATE users SET password_hash = %s, must_change_password = FALSE, "
+                f"UPDATE {self.account_table} SET password_hash = %s, must_change_password = FALSE, "
                 "password_changed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP "
                 "WHERE id = %s",
                 (hash_password(new_password), user.id),
             )
-            connection.execute("DELETE FROM sessions WHERE user_id = %s", (user.id,))
+            connection.execute(f"DELETE FROM {self.session_table} WHERE user_id = %s", (user.id,))
         return self.create_session(user.id)
 
     def list_users(self) -> list[dict[str, Any]]:
@@ -115,7 +120,7 @@ class AuthService:
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT id, username, role, status, must_change_password, "
-                "created_at, updated_at, last_login_at FROM users "
+                "created_at, updated_at, last_login_at FROM users WHERE role='user' "
                 "ORDER BY created_at, id"
             ).fetchall()
         return [self._account_view(row) for row in rows]
@@ -125,7 +130,7 @@ class AuthService:
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT id, username, role, status, must_change_password, "
-                "created_at, updated_at, last_login_at FROM users WHERE id = %s",
+                "created_at, updated_at, last_login_at FROM users WHERE id = %s AND role='user'",
                 (user_id,),
             ).fetchone()
         if row is None:
@@ -137,7 +142,7 @@ class AuthService:
         normalized = username.strip().lower()
         if not USERNAME_PATTERN.fullmatch(normalized):
             raise ValueError("用户名需为 3–32 位小写字母、数字或下划线。")
-        if role not in {"admin", "user"}:
+        if self.realm != "user" or role != "user":
             raise ValueError("账号角色无效。")
         if not password:
             raise ValueError("请填写临时密码。")
@@ -155,47 +160,35 @@ class AuthService:
         assert row is not None
         return self._account_view(row)
 
-    def update_user(self, user_id: UUID, status: str | None, role: str | None) -> dict[str, Any]:
-        """更新账号状态或角色，并阻止最后一个有效管理员被停用或降级。"""
+    def update_user(self, user_id: UUID, status: str | None) -> dict[str, Any]:
+        """仅更新普通用户账号状态，输入账号标识和状态并返回公开资料。"""
         with self.database.connect() as connection:
             target = connection.execute(
-                "SELECT id, username, role, status FROM users WHERE id = %s FOR UPDATE",
+                "SELECT id FROM users WHERE id = %s AND role='user' FOR UPDATE",
                 (user_id,),
             ).fetchone()
             if target is None:
                 raise LookupError("账号不存在。")
             if status is not None and status not in {"active", "disabled"}:
                 raise ValueError("账号状态无效。")
-            if role is not None and role not in {"admin", "user"}:
-                raise ValueError("账号角色无效。")
-            removes_admin = target["role"] == "admin" and target["status"] == "active" and (
-                status == "disabled" or role == "user"
-            )
-            if removes_admin:
-                active_admins = connection.execute(
-                    "SELECT id FROM users WHERE role='admin' AND status='active' FOR UPDATE"
-                ).fetchall()
-                if len(active_admins) <= 1:
-                    raise ValueError("不能停用或降级最后一个有效管理员。")
             row = connection.execute(
-                "UPDATE users SET status=COALESCE(%s,status), role=COALESCE(%s,role), "
+                "UPDATE users SET status=COALESCE(%s,status), "
                 "updated_at=CURRENT_TIMESTAMP WHERE id=%s RETURNING "
                 "id, username, role, status, must_change_password, created_at, updated_at, last_login_at",
-                (status, role, user_id),
+                (status, user_id),
             ).fetchone()
             if status == "disabled":
                 connection.execute("DELETE FROM sessions WHERE user_id=%s", (user_id,))
         assert row is not None
         return self._account_view(row)
 
-    def reset_password(self, user_id: UUID, password: str) -> dict[str, Any]:
-        """由管理员设置临时密码、强制下次改密并吊销全部旧会话。"""
-        if not password:
-            raise ValueError("请填写临时密码。")
+    def reset_password(self, user_id: UUID) -> dict[str, Any]:
+        """生成临时密码并重置普通用户账号，返回一次性展示的密码和公开资料。"""
+        password = secrets.token_urlsafe(24)
         with self.database.connect() as connection:
             row = connection.execute(
                 "UPDATE users SET password_hash=%s, must_change_password=TRUE, "
-                "password_changed_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=%s "
+                "password_changed_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=%s AND role='user' "
                 "RETURNING id, username, role, status, must_change_password, "
                 "created_at, updated_at, last_login_at",
                 (hash_password(password), user_id),
@@ -203,7 +196,7 @@ class AuthService:
             if row is None:
                 raise LookupError("账号不存在。")
             connection.execute("DELETE FROM sessions WHERE user_id=%s", (user_id,))
-        return self._account_view(row)
+        return {**self._account_view(row), "temporary_password": password}
 
     def _view(self, row: dict[str, Any]) -> AuthenticatedUser:
         """把数据库行转换为不包含密码哈希的账号视图。"""

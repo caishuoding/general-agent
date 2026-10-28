@@ -141,16 +141,16 @@ function citationPlugin(message: RenderedMessage, citationNumbers: Map<string, s
   };
 }
 
-/** 返回知识库原件的受保护下载地址。 */
-function knowledgeDocumentUrl(source: Message["knowledge_sources"][number]) {
-  const base = `/api/knowledge-bases/${encodeURIComponent(source.knowledge_base_id)}/documents/${encodeURIComponent(source.document_id)}/file`;
+/** 根据知识库来源和认证入口根路径返回受保护的原件下载地址。 */
+function knowledgeDocumentUrl(source: Message["knowledge_sources"][number], resourceRoot = '/api') {
+  const base = `${resourceRoot}/knowledge-bases/${encodeURIComponent(source.knowledge_base_id)}/documents/${encodeURIComponent(source.document_id)}/file`;
   return source.filename.toLowerCase().endsWith('.pdf') && source.page ? `${base}#page=${source.page}` : base;
 }
 
-/** 返回知识库引用所绑定原图的受保护内联地址。 */
-function knowledgeImageUrl(source: Message["knowledge_sources"][number]) {
+/** 根据知识库来源和认证入口根路径返回原图的受保护内联地址。 */
+function knowledgeImageUrl(source: Message["knowledge_sources"][number], resourceRoot = '/api') {
   return source.image_id
-    ? `/api/knowledge-bases/${encodeURIComponent(source.knowledge_base_id)}/documents/${encodeURIComponent(source.document_id)}/images/${encodeURIComponent(source.image_id)}/file`
+    ? `${resourceRoot}/knowledge-bases/${encodeURIComponent(source.knowledge_base_id)}/documents/${encodeURIComponent(source.document_id)}/images/${encodeURIComponent(source.image_id)}/file`
     : null;
 }
 
@@ -223,14 +223,14 @@ function SourceDetails({ id, source }: {
 }
 
 /** 输出只含文件与原文位置的紧凑参考来源链接。 */
-function KnowledgeSourceLink({ id, source, number }: { id: string; source: KnowledgeSource; number: string }) {
+function KnowledgeSourceLink({ id, source, number, resourceRoot }: { id: string; source: KnowledgeSource; number: string; resourceRoot: string }) {
   const label = source.filename || '知识库文档';
   const kind = knowledgeSourceKind(source);
   /** 返回可定位原文位置的简单来源条目。 */
   return <div className="knowledge-source-link" id={id} tabIndex={-1}>
     <div className="knowledge-source-summary">
       <span>[{number}]</span>
-      <a href={knowledgeDocumentUrl(source)} target="_blank" rel="noopener noreferrer">{label}</a>
+      <a href={knowledgeDocumentUrl(source, resourceRoot)} target="_blank" rel="noopener noreferrer">{label}</a>
       <small className="knowledge-source-location">{source.location}</small>
     </div>
     {kind === 'text' && <p className="knowledge-source-excerpt" title={source.excerpt}>{source.excerpt}</p>}
@@ -238,9 +238,9 @@ function KnowledgeSourceLink({ id, source, number }: { id: string; source: Knowl
 }
 
 /** 在模型指定段落之后嵌入真实召回的图片或表格。 */
-function InlineKnowledgeMedia({ source }: { source: KnowledgeSource }) {
+function InlineKnowledgeMedia({ source, resourceRoot }: { source: KnowledgeSource; resourceRoot: string }) {
   const label = source.filename || '知识库文档';
-  const image = knowledgeImageUrl(source);
+  const image = knowledgeImageUrl(source, resourceRoot);
   const kind = knowledgeSourceKind(source);
   /** 返回与正文融为一体的行内媒体，来源由底部参考列表统一提供。 */
   return <figure className="inline-knowledge-media" data-media={source.key}>
@@ -274,7 +274,7 @@ const components: Components = {
 };
 
 /** 为当前回答提供引用定位、行内媒体和普通 Markdown 的组合渲染器。 */
-function answerComponents(message: RenderedMessage, onCitationClick: (identifier: string) => void): Components {
+function answerComponents(message: RenderedMessage, onCitationClick: (identifier: string) => void, resourceRoot: string): Components {
   const knowledge = new Map((message.knowledge_sources || []).map(function indexSource(source) { return [source.key, source]; }));
   return {
     ...components,
@@ -283,7 +283,7 @@ function answerComponents(message: RenderedMessage, onCitationClick: (identifier
       if (!href) return <span>{children}</span>;
       if (href.startsWith('#media-')) {
         const source = knowledge.get(href.slice('#media-'.length));
-        return source ? <InlineKnowledgeMedia source={source} /> : <span>{children}</span>;
+        return source ? <InlineKnowledgeMedia source={source} resourceRoot={resourceRoot} /> : <span>{children}</span>;
       }
       if (href.startsWith('#answer-source-')) {
         const identifier = href.slice(1);
@@ -315,11 +315,12 @@ function answerComponents(message: RenderedMessage, onCitationClick: (identifier
   };
 }
 
-/** 使用统一安全组件渲染一段可带真实引用的 Markdown 正文。 */
-export function AnswerMarkdown({ message, onCitationClick, className = '' }: {
+/** 使用消息与认证入口根路径渲染安全 Markdown，输出可定位的真实引用。 */
+export function AnswerMarkdown({ message, onCitationClick, className = '', resourceRoot = '/api' }: {
   message: RenderedMessage;
   onCitationClick?: (identifier: string) => void;
   className?: string;
+  resourceRoot?: string;
 }) {
   const citationNumbers = new Map((message.knowledge_sources || []).map(function numberSource(source, index) {
     // 为知识库来源分配面向用户的连续编号。
@@ -331,13 +332,14 @@ export function AnswerMarkdown({ message, onCitationClick, className = '' }: {
     else scrollToSource(identifier);
   }
   return <div className={`message-content answer-markdown ${className}`.trim()}>
-    <Markdown skipHtml remarkPlugins={[remarkGfm, lineBreakPlugin(), citationPlugin(message, citationNumbers)]} rehypePlugins={[[rehypeHighlight, { detect: false }]]} components={answerComponents(message, reveal)}>{message.content}</Markdown>
+    <Markdown skipHtml remarkPlugins={[remarkGfm, lineBreakPlugin(), citationPlugin(message, citationNumbers)]} rehypePlugins={[[rehypeHighlight, { detect: false }]]} components={answerComponents(message, reveal, resourceRoot)}>{message.content}</Markdown>
   </div>;
 }
 
-/** 接收助手消息及所属会话，输出安全 Markdown、复制入口与可定位的真实来源。 */
-export function AnswerContent({ message }: {
+/** 接收助手消息和认证入口根路径，输出安全 Markdown、复制入口与可定位的真实来源。 */
+export function AnswerContent({ message, resourceRoot = '/api' }: {
   message: Message;
+  resourceRoot?: string;
 }) {
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const pendingSource = useRef<string | null>(null);
@@ -379,7 +381,7 @@ export function AnswerContent({ message }: {
   }
 
   return <>
-    <AnswerMarkdown message={message} onCitationClick={revealSource} />
+    <AnswerMarkdown message={message} onCitationClick={revealSource} resourceRoot={resourceRoot} />
     {sourceCount > 0 && <div className="answer-source-toggle">
       <button type="button" aria-expanded={sourcesOpen} aria-controls={sourceSectionId} onClick={toggleSources}>
         参考来源 · {sourceCount}
@@ -391,7 +393,7 @@ export function AnswerContent({ message }: {
         })}
         {knowledgeSources.map(function renderKnowledgeSource(source) {
           /** 知识库来源只展示文件、位置和定位链接，不重复切片正文。 */
-          return <KnowledgeSourceLink key={source.key} id={sourceId(message.id, source.key)} source={source}
+          return <KnowledgeSourceLink key={source.key} id={sourceId(message.id, source.key)} source={source} resourceRoot={resourceRoot}
             number={citationNumbers.get(source.key) || '?'} />;
         })}
       </section>}
