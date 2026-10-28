@@ -94,6 +94,10 @@ class ModelFailure(Exception):
         self.usage = usage or TokenUsage()
 
 
+class ModelConnectionFailure(ModelFailure):
+    """表示模型流在完整结束前断开，可由上层保留正文并进行有限续写。"""
+
+
 class ModelClient:
     """通过可替换的 HTTP 传输调用已配置模型。"""
 
@@ -136,7 +140,7 @@ class ModelClient:
 
     @traceable(name="chat.stream", run_type="llm", process_inputs=model_inputs, reduce_fn=stream_outputs)
     def stream(self, settings: StoredSettings, messages: list[ModelMessage], tools: list[dict[str, Any]] | None = None) -> Iterator[StreamChunk]:
-        """逐段解析并追踪文字、推理和工具调用 SSE，密钥排除且用量按真实尾帧汇总。"""
+        """用配置、消息和可用工具发起流式请求；逐段返回文字与工具调用，追踪真实用量。"""
         usage = TokenUsage()
         has_content = False
         has_tool_calls = False
@@ -144,7 +148,8 @@ class ModelClient:
         incomplete = False
         body: dict[str, object] = {"model": settings.model, "messages": messages, "stream": True, "stream_options": {"include_usage": True}}
         if tools is not None:
-            body.update(tools=tools, tool_choice="auto", parallel_tool_calls=False)
+            # 流式请求允许一轮返回多个工具调用；派工工具执行时会分别启动后台任务。
+            body.update(tools=tools, tool_choice="auto", parallel_tool_calls=True)
         try:
             with httpx.Client(transport=self.transport, timeout=60, follow_redirects=False, trust_env=False) as client:
                 with client.stream(
@@ -226,9 +231,9 @@ class ModelClient:
                             elif reason is not None:
                                 incomplete = True
         except httpx.TimeoutException:
-            raise ModelFailure("模型流式响应超时，已保留部分内容，可以重试。", usage) from None
+            raise ModelConnectionFailure("模型流式响应超时，已保留部分内容，可以重试。", usage) from None
         except httpx.RequestError:
-            raise ModelFailure("模型连接中断，已保留部分内容，可以重试。", usage) from None
+            raise ModelConnectionFailure("模型连接中断，已保留部分内容，可以重试。", usage) from None
         except (ValueError, TypeError, KeyError, AttributeError):
             raise ModelFailure("模型流式响应格式无效，已保留部分内容，可以重试。", usage) from None
         if raw_lines and not saw_data:
@@ -238,7 +243,7 @@ class ModelClient:
             except (ValueError, AttributeError):
                 pass
             raise ModelFailure("模型未返回有效流式回答，请检查模型是否支持流式工具调用。", usage)
-        raise ModelFailure("模型回答流中断，已保留部分内容，可以重试。", usage)
+        raise ModelConnectionFailure("模型回答流中断，已保留部分内容，可以重试。", usage)
 
     def request(self, settings: StoredSettings, endpoint: str, body: dict[str, object]) -> tuple[dict[str, object], TokenUsage]:
         """发送非流式协议请求，屏蔽原始错误正文并携带可取得的用量。"""

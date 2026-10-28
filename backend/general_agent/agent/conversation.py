@@ -28,6 +28,7 @@ class ConversationState(TypedDict):
     answer: str
     failure: str | None
     used_tools: bool
+    knowledge_source_candidates: list[dict[str, Any]]
     web_sources: list[dict[str, object]]
     knowledge_sources: list[dict[str, object]]
 
@@ -78,6 +79,7 @@ class ConversationGraph:
             'answer': '',
             'failure': None,
             'used_tools': False,
+            'knowledge_source_candidates': [],
             'web_sources': [],
             'knowledge_sources': [],
         }
@@ -194,6 +196,7 @@ class ConversationGraph:
                 raise ValueError('模型没有返回最终回答。')
             LOGGER.info('event=node agent message_id=%s used_tools=%s characters=%s', context.assistant_message_id, outcome.used_tools, len(answer))
             return {'answer': answer, 'used_tools': outcome.used_tools,
+                    'knowledge_source_candidates': outcome.knowledge_source_candidates,
                     'messages': outcome.messages if outcome.messages is not None else self.answered_messages(state['messages'], answer)}
         except (ValueError, ModelFailure) as error:
             return self.failure_update(context, str(error), ''.join(chunks))
@@ -208,7 +211,7 @@ class ConversationGraph:
         if failure:
             self.execution.search.fail(context.operation, failure)
         answer, web_sources = self.execution.search.resolve(context.operation, state['answer'])
-        answer, knowledge_sources = self.execution.resolve_knowledge_citations(state['messages'], answer)
+        answer, knowledge_sources = self.execution.resolve_knowledge_citations(state['knowledge_source_candidates'], answer)
         with self.database.connect() as connection:
             connection.execute(
                 "UPDATE messages SET content=%s,status=%s,error=%s,web_sources=%s,knowledge_sources=%s,progress=NULL "

@@ -31,10 +31,10 @@ def test_users_and_admin_are_separated_and_conversations_are_isolated(
                 f"/api/conversations/{own['id']}/attachments",
                 files={"files": ("private.txt", b"normal only")},
             ).json()[0]
-            assert normal.get("/api/settings").status_code == 403
-            assert normal.get("/api/admin/users").status_code == 403
+            assert normal.get("/api/settings").status_code == 401
+            assert normal.get("/api/admin/users").status_code == 401
 
-        assert admin.get("/api/conversations").status_code == 403
+        assert admin.get("/api/conversations").status_code == 401
         assert admin.get("/api/settings").status_code == 200
         admin_view = admin.get(
             f"/api/admin/users/{normal_id}/conversations/{own['id']}"
@@ -49,17 +49,17 @@ def test_users_and_admin_are_separated_and_conversations_are_isolated(
         assert download.content == b"normal only"
 
         wrong_entry = admin.post(
-            "/api/auth/login",
+            "/api/admin/auth/login",
             json={
                 "username": "normal_user",
                 "password": "normal-user-pass-2",
                 "expected_role": "admin",
             },
         )
-        assert wrong_entry.status_code == 403
-        assert wrong_entry.json()["detail"] == "该账号不能登录此入口。"
+        assert wrong_entry.status_code == 401
+        assert wrong_entry.json()["detail"] == "用户名或密码错误。"
 
-        assert admin.post("/api/auth/logout").status_code == 200
+        assert admin.post("/api/admin/auth/logout").status_code == 200
         user_entry = admin.post(
             "/api/auth/login",
             json={
@@ -68,4 +68,4 @@ def test_users_and_admin_are_separated_and_conversations_are_isolated(
                 "expected_role": "user",
             },
         )
-        assert user_entry.status_code == 403
+        assert user_entry.status_code == 401

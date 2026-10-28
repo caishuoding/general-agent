@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+from general_agent.prompts.tools import TOOL_DESCRIPTIONS
 
 from general_agent.attachments.knowledge import ChunkPolicy
 from general_agent.attachments.retrieval import DocumentRetrieval, chunk_key, hybrid_retrieve
@@ -40,10 +41,10 @@ class ReadDocumentInput(BaseModel):
 
 
 def document_tools() -> list[dict[str, Any]]:
-    """描述检索与按页读取完整切片的能力，不规定模型调用时机和顺序。"""
+    """返回会话文档检索和读取工具的模型定义；无需输入，不在此执行文档操作。"""
     definitions: list[tuple[str, str, type[BaseModel]]] = [
-        ('search_documents', '检索当前会话文档，返回匹配的完整切片、原文位置及可选 image_id；可限定 document_ids。每轮最多五次。', SearchDocumentsInput),
-        ('read_document', '按页定位 PDF／Word 的全部匹配切片并按原文顺序返回完整正文及 image_id；TXT／Markdown 按段落定位。省略范围读取全部切片；超限按整片返回 next_cursor，续读保持原范围。最多 10000 Token 且不超过剩余上下文，每轮最多五次。', ReadDocumentInput),
+        ('search_documents', TOOL_DESCRIPTIONS['search_documents'], SearchDocumentsInput),
+        ('read_document', TOOL_DESCRIPTIONS['read_document'], ReadDocumentInput),
     ]
     return [{'type': 'function', 'function': {'name': name, 'description': description,
              'parameters': schema.model_json_schema()}} for name, description, schema in definitions]

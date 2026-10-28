@@ -10,6 +10,7 @@ from general_agent.auth.passwords import BOOTSTRAP_ADMIN_PASSWORD
 from general_agent.auth.service import AuthService, AuthenticatedUser
 
 COOKIE_NAME = "general_agent_session"
+ADMIN_COOKIE_NAME = "general_agent_admin_session"
 
 
 class LoginInput(BaseModel):
@@ -29,8 +30,10 @@ class PasswordChangeInput(BaseModel):
 
 
 def auth_router(service: AuthService, secure_cookies: bool) -> APIRouter:
-    """创建认证路由，Cookie 安全属性由部署环境决定。"""
-    router = APIRouter(prefix="/api/auth")
+    """按服务所属入口创建认证路由，Cookie 安全属性由部署环境决定。"""
+    admin = service.realm == "admin"
+    cookie_name = ADMIN_COOKIE_NAME if admin else COOKIE_NAME
+    router = APIRouter(prefix="/api/admin/auth" if admin else "/api/auth")
 
     @router.post("/login")
     def login(body: LoginInput, request: Request, response: Response) -> dict[str, Any]:
@@ -39,7 +42,7 @@ def auth_router(service: AuthService, secure_cookies: bool) -> APIRouter:
         if user is None:
             raise HTTPException(401, "用户名或密码错误。")
         if body.expected_role is not None and user.role != body.expected_role:
-            raise HTTPException(403, "该账号不能登录此入口。")
+            raise HTTPException(401, "用户名或密码错误。")
         if (
             user.username == "admin"
             and user.must_change_password
@@ -48,15 +51,15 @@ def auth_router(service: AuthService, secure_cookies: bool) -> APIRouter:
         ):
             raise HTTPException(403, "请在服务器本机完成首次改密后再从公网登录。")
         token = service.create_session(user.id)
-        _set_session_cookie(response, token, _cookie_secure(request, secure_cookies))
+        _set_session_cookie(response, token, _cookie_secure(request, secure_cookies), cookie_name)
         return _public_user(user)
 
     @router.post("/logout")
     def logout(request: Request, response: Response) -> dict[str, str]:
         """删除当前服务端会话并清除浏览器 Cookie。"""
-        service.logout(request.cookies.get(COOKIE_NAME))
+        service.logout(request.cookies.get(cookie_name))
         response.delete_cookie(
-            COOKIE_NAME,
+            cookie_name,
             path="/",
             secure=_cookie_secure(request, secure_cookies),
             httponly=True,
@@ -78,7 +81,7 @@ def auth_router(service: AuthService, secure_cookies: bool) -> APIRouter:
             token = service.change_password(user, body.current_password, body.new_password)
         except ValueError as error:
             raise HTTPException(422, str(error)) from None
-        _set_session_cookie(response, token, _cookie_secure(request, secure_cookies))
+        _set_session_cookie(response, token, _cookie_secure(request, secure_cookies), cookie_name)
         updated = service.user_for_token(token)
         assert updated is not None
         return _public_user(updated)
@@ -99,10 +102,10 @@ def _public_user(user: AuthenticatedUser) -> dict[str, Any]:
     return {**asdict(user), "id": str(user.id)}
 
 
-def _set_session_cookie(response: Response, token: str, secure: bool) -> None:
-    """写入 HttpOnly、SameSite=Lax 的 7 天登录 Cookie。"""
+def _set_session_cookie(response: Response, token: str, secure: bool, cookie_name: str) -> None:
+    """为指定入口写入 HttpOnly、SameSite=Lax 的 7 天登录 Cookie。"""
     response.set_cookie(
-        COOKIE_NAME,
+        cookie_name,
         token,
         max_age=7 * 24 * 60 * 60,
         httponly=True,

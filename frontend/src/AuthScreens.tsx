@@ -8,6 +8,7 @@ type LoginProps = {
   kicker?: string;
   title?: string;
   description?: string;
+  showStory?: boolean;
   initialError?: string;
 };
 
@@ -47,6 +48,7 @@ export function LoginScreen({
   kicker = "个人对话空间",
   title = "登录",
   description = "使用管理员为你创建的账号登录。",
+  showStory = true,
   initialError = "",
 }: LoginProps) {
   const [username, setUsername] = useState("");
@@ -60,9 +62,9 @@ export function LoginScreen({
     setError("");
     setSubmitting(true);
     try {
-      const user = await api<AuthUser>("/auth/login", {
+      const user = await api<AuthUser>(expectedRole === "admin" ? "/admin/auth/login" : "/auth/login", {
         method: "POST",
-        body: JSON.stringify({ username, password, expected_role: expectedRole }),
+        body: JSON.stringify({ username, password }),
       });
       onAuthenticated(user);
     } catch (failure) {
@@ -73,12 +75,12 @@ export function LoginScreen({
   }
 
   return (
-    <main className="auth-shell">
-      <AuthStory />
+    <main className={`auth-shell ${showStory ? "" : "admin-auth-shell"}`}>
+      {showStory && <AuthStory />}
       <section className="auth-card" aria-labelledby="login-title">
         <p className="auth-kicker">{kicker}</p>
         <h1 id="login-title">{title}</h1>
-        <p className="auth-description">{description}</p>
+        {description && <p className="auth-description">{description}</p>}
         <form className="auth-form" onSubmit={submit}>
           <label className="auth-field">
             <span>用户名</span>
@@ -134,7 +136,7 @@ export function PasswordChangeScreen({
     }
     setSubmitting(true);
     try {
-      const changed = await api<AuthUser>("/auth/password", {
+      const changed = await api<AuthUser>(user.role === "admin" ? "/admin/auth/password" : "/auth/password", {
         method: "POST",
         body: JSON.stringify({
           current_password: currentPassword,
@@ -150,14 +152,14 @@ export function PasswordChangeScreen({
   }
 
   return (
-    <main className="auth-shell">
-      <AuthStory />
+    <main className={`auth-shell ${user.role === "admin" ? "admin-auth-shell" : ""}`}>
+      {user.role !== "admin" && <AuthStory />}
       <section className="auth-card" aria-labelledby="change-password-title">
         <p className="auth-kicker">{forced ? "首次登录" : "账号安全"}</p>
         <h1 id="change-password-title">{forced ? "设置新密码" : "修改密码"}</h1>
         <p className="auth-description">
           {forced
-            ? `${user.username}，先设置一个至少 10 个字符的新密码，然后就可以开始对话。`
+            ? `${user.username}，先设置一个至少 10 个字符的新密码。`
             : `${user.username}，输入当前密码并设置一个新的登录密码。`}
         </p>
         <form className="auth-form" onSubmit={submit}>

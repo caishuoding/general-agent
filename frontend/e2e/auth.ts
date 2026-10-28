@@ -7,18 +7,18 @@ const TEST_USER_TEMP_PASSWORD = "browser-chat-temp";
 
 // 通过 API 登录管理员并在首次运行时完成强制改密。
 export async function loginAdmin(page: Page) {
-  let response = await page.request.post("/api/auth/login", {
+  let response = await page.request.post("/api/admin/auth/login", {
     data: { username: "admin", password: "123456", expected_role: "admin" },
   });
   if (!response.ok()) {
-    response = await page.request.post("/api/auth/login", {
+    response = await page.request.post("/api/admin/auth/login", {
       data: { username: "admin", password: TEST_ADMIN_PASSWORD, expected_role: "admin" },
     });
   }
   if (!response.ok()) throw new Error("浏览器测试管理员登录失败");
   const user = await response.json();
   if (user.must_change_password) {
-    const changed = await page.request.post("/api/auth/password", {
+    const changed = await page.request.post("/api/admin/auth/password", {
       data: {
         current_password: "123456",
         new_password: TEST_ADMIN_PASSWORD,
@@ -50,7 +50,7 @@ export async function loginUser(page: Page) {
   if (![201, 422].includes(created.status())) {
     throw new Error("浏览器测试普通用户创建失败");
   }
-  await page.request.post("/api/auth/logout");
+  await page.request.post("/api/admin/auth/logout");
   response = await page.request.post("/api/auth/login", {
     data: {
       username: TEST_USER_NAME,
@@ -86,7 +86,7 @@ export async function configureChatModel(
     },
   });
   if (!saved.ok()) throw new Error("浏览器测试模型配置失败");
-  await page.request.post("/api/auth/logout");
+  await page.request.post("/api/admin/auth/logout");
   await loginUser(page);
 }
 
@@ -110,6 +110,6 @@ export async function configureSearchModel(
   if (!modelSaved.ok() || !searchSaved.ok()) {
     throw new Error("浏览器测试搜索配置失败");
   }
-  await page.request.post("/api/auth/logout");
+  await page.request.post("/api/admin/auth/logout");
   await loginUser(page);
 }

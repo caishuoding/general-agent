@@ -28,7 +28,7 @@ def login(
     if expected_role is not None:
         payload["expected_role"] = expected_role
     response = client.post(
-        "/api/auth/login", json=payload
+        "/api/admin/auth/login" if expected_role == "admin" else "/api/auth/login", json=payload
     )
     return cast(dict[str, Any], response.json()) if response.status_code == 200 else None
 
@@ -38,7 +38,7 @@ def complete_forced_change(client: TestClient, user: dict[str, Any]) -> dict[str
     if not user.get("must_change_password"):
         return user
     response = client.post(
-        "/api/auth/password",
+        "/api/admin/auth/password" if user["role"] == "admin" else "/api/auth/password",
         json={
             "current_password": "123456",
             "new_password": TEST_ADMIN_PASSWORD,
@@ -61,18 +61,18 @@ def login_admin(client: TestClient) -> dict[str, Any]:
 def login_admin_http(client: httpx.Client) -> dict[str, Any]:
     """为独立进程测试登录管理员，必要时完成首次改密。"""
     response = client.post(
-        "/api/auth/login",
+        "/api/admin/auth/login",
         json={"username": "admin", "password": "123456", "expected_role": "admin"},
     )
     if response.status_code == 200 and response.json().get("must_change_password"):
         changed = client.post(
-            "/api/auth/password",
+            "/api/admin/auth/password",
             json={"current_password": "123456", "new_password": TEST_ADMIN_PASSWORD},
         )
         assert changed.status_code == 200, changed.text
         return cast(dict[str, Any], changed.json())
     response = client.post(
-        "/api/auth/login",
+        "/api/admin/auth/login",
         json={"username": "admin", "password": TEST_ADMIN_PASSWORD, "expected_role": "admin"},
     )
     assert response.status_code == 200, response.text
@@ -87,10 +87,10 @@ def switch_to_normal_user(
     """在已登录管理员会话下创建普通用户，切换为普通用户并完成首次改密。"""
     created = client.post(
         "/api/admin/users",
-        json={"username": username, "password": temporary_password, "role": "user"},
+        json={"username": username, "password": temporary_password},
     )
     assert created.status_code in {201, 422}, created.text
-    client.post("/api/auth/logout")
+    client.post("/api/admin/auth/logout")
     login_response = client.post(
         "/api/auth/login",
         json={"username": username, "password": temporary_password, "expected_role": "user"},

@@ -38,7 +38,7 @@ def test_time_tool_rejects_timezone_override() -> None:
 def test_agent_tools_register_web_search_as_a_normal_model_tool() -> None:
     """验证网页、文档、记忆和北京时间工具注册在同一个模型自主调用循环中。"""
     memory_names = {item['function']['name'] for item in memory_tools()}
-    names = {item['function']['name'] for item in agent_tools()}
+    names = {item['function']['name'] for item in agent_tools(documents=True)}
 
     assert {'add_memory', 'search_memories', 'update_memory', 'delete_memory'} == memory_names
     assert names == memory_names | {'search_web', 'fetch_web', 'search_documents', 'read_document', 'get_current_time'}

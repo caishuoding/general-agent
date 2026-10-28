@@ -27,13 +27,13 @@ export function AdminApp() {
   const [error, setError] = useState("");
 
   useEffect(
-    // 首次进入管理端时读取共享登录会话。
+    // 首次进入管理端时只读取管理员登录会话。
     function restoreSession() {
       let mounted = true;
       // 只在组件仍有效时应用会话结果。
       async function load() {
         try {
-          const current = await api<AuthUser>("/auth/me");
+          const current = await api<AuthUser>("/admin/auth/me");
           if (mounted) setUser(current);
         } catch {
           if (mounted) setUser(null);
@@ -104,7 +104,7 @@ export function AdminApp() {
   // 退出管理端会话并回到管理员登录页。
   async function logout() {
     try {
-      await api("/auth/logout", { method: "POST" });
+      await api("/admin/auth/logout", { method: "POST" });
     } catch {
       /* 网络失败也回到登录页，由下一次请求确认会话状态。 */
     } finally {
@@ -124,11 +124,8 @@ export function AdminApp() {
         expectedRole="admin"
         kicker="管理端"
         title="管理员登录"
-        description={
-          user
-            ? "当前登录的是普通用户，请使用管理员账号进入管理端。"
-            : "管理员账号只用于账号管理和系统配置。"
-        }
+        description=""
+        showStory={false}
         initialError={error}
         onAuthenticated={handleAuthenticated}
       />
@@ -189,7 +186,7 @@ export function AdminApp() {
       </nav>
       {error && <div className="global-error" role="alert">{error}</div>}
       {tab === "accounts" ? (
-        <AdminPanel currentUserId={user.id} />
+        <AdminPanel />
       ) : (
         <div className="page-scroll">
           <SettingsPanel settings={settings} onSaved={setSettings} />

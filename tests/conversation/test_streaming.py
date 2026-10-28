@@ -11,7 +11,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
-from general_agent.conversation.progress import tool_progress
+from general_agent.conversation.progress import connection_retry_progress, tool_progress
 from tests.auth.support import authenticated_client, set_global_settings
 
 
@@ -48,9 +48,10 @@ def configure_global_model(database_url: str, tmp_path: Path) -> None:
     )
 
 
-def wait_message(client: TestClient, conversation_id: str, status: str, content: str | None = None) -> dict[str, Any]:
-    """轮询应用接口直到最后一条回答满足外部可见条件，超时提供当前状态。"""
-    deadline = monotonic() + 5
+def wait_message(client: TestClient, conversation_id: str, status: str, content: str | None = None,
+                 timeout: float = 5) -> dict[str, Any]:
+    """按会话、目标状态和超时轮询回答；返回公开消息，超时时附上当前状态。"""
+    deadline = monotonic() + timeout
     detail: dict[str, Any] = {}
     while monotonic() < deadline:
         detail = client.get(f"/api/conversations/{conversation_id}").json()
@@ -71,6 +72,8 @@ def test_stream_is_visible_before_completion_and_survives_restart(database_url: 
         payload = json.loads(request.content)
         assert payload["stream"] is True
         assert payload["stream_options"] == {"include_usage": True}
+        assert payload["parallel_tool_calls"] is True
+        assert len([item for item in payload["messages"] if item["role"] == "system"]) == 1
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ControlledStream(release))
 
     transport = httpx.MockTransport(provider)
@@ -128,6 +131,8 @@ def test_only_key_tools_have_user_facing_progress() -> None:
     assert searching is not None and searching["label"] == "正在联网搜索…"
     assert fetching is not None and fetching["label"] == "正在读取网页…"
     assert tool_progress("get_current_time") is None
+    reconnecting = connection_retry_progress(1, 3)
+    assert reconnecting == {"code": "connection_retrying", "label": "连接中断，正在自动恢复（1/3）…"}
 
 
 def test_stop_freezes_partial_answer_and_keeps_late_usage(database_url: str, tmp_path: Path) -> None:
@@ -164,37 +169,43 @@ def test_stop_freezes_partial_answer_and_keeps_late_usage(database_url: str, tmp
         assert len(client.get(f"/api/conversations/{conversation_id}").json()["messages"]) == 2
 
 
-def test_interrupted_answer_retries_without_duplicate_user_message(database_url: str, tmp_path: Path) -> None:
-    """断流保存部分内容和独立费用，重试保留旧尝试且只发送一次原用户消息。"""
+def test_interrupted_answer_automatically_resumes_from_visible_prefix(database_url: str, tmp_path: Path) -> None:
+    """断流保存部分内容和独立费用，自动续写时携带前缀且只保留一条用户消息。"""
     release = Event()
     release.set()
     attempts = 0
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """第一次模拟断流，第二次验证重试上下文并正常完成。"""
+        """第一次模拟断流，第二次验证续写上下文并从正文末尾正常完成。"""
         nonlocal attempts
         payload = json.loads(request.content)
         attempts += 1
         dialogue = [message for message in payload["messages"] if message["role"] in ("user", "assistant")]
-        assert dialogue == [{"role": "user", "content": "hello"}]
-        return httpx.Response(200, stream=ControlledStream(release, interrupted=attempts == 1))
+        if attempts == 1:
+            assert dialogue == [{"role": "user", "content": "hello"}]
+            return httpx.Response(200, stream=ControlledStream(release, interrupted=True))
+        assert dialogue[:2] == [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "first "},
+        ]
+        assert dialogue[-1]["role"] == "user" and "不要重复已经输出的内容" in dialogue[-1]["content"]
+        body = (
+            'data: {"choices":[{"delta":{"content":"second"},"finish_reason":"stop"}],'
+            '"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}}\n\n'
+            'data: [DONE]\n\n'
+        )
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
 
     configure_global_model(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation_id = configure(client)
         client.post(f"/api/conversations/{conversation_id}/runs", json={"content": "hello"})
-        failed = wait_message(client, conversation_id, "failed", "first ")
-        assert "中断" in failed["error"]
-        retried = client.post(f"/api/conversations/{conversation_id}/messages/{failed['id']}/retry")
-        assert retried.status_code == 202
-        complete = wait_message(client, conversation_id, "complete", "first second")
-        assert complete["reply_to"] == failed["reply_to"]
+        complete = wait_message(client, conversation_id, "complete", "first [[STREAM_RESUMED]]second")
         detail = client.get(f"/api/conversations/{conversation_id}").json()
-        assert [(item["role"], item["status"]) for item in detail["messages"]] == [("user", "complete"), ("assistant", "failed"), ("assistant", "complete")]
+        assert [(item["role"], item["status"]) for item in detail["messages"]] == [("user", "complete"), ("assistant", "complete")]
         calls = [item for item in client.get("/api/usage").json() if item["total_tokens"] is not None]
-        assert [(call["status"], call["total_tokens"]) for call in calls] == [("complete", 17), ("failed", 17)]
-        assert calls[0]["id"] != calls[1]["id"]
-        assert client.post(f"/api/conversations/{conversation_id}/messages/{failed['id']}/retry").status_code == 409
+        assert sorted((call["status"], call["total_tokens"]) for call in calls) == [("complete", 10), ("failed", 17)]
+        assert calls[0]["id"] != calls[1]["id"] and attempts == 2
 
 
 def test_other_send_interfaces_cannot_overlap_live_answer(database_url: str, tmp_path: Path) -> None:
