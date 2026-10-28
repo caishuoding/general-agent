@@ -136,7 +136,7 @@ class ModelClient:
 
     @traceable(name="chat.stream", run_type="llm", process_inputs=model_inputs, reduce_fn=stream_outputs)
     def stream(self, settings: StoredSettings, messages: list[ModelMessage], tools: list[dict[str, Any]] | None = None) -> Iterator[StreamChunk]:
-        """逐段解析并追踪文字、推理和工具调用 SSE，密钥排除且用量按真实尾帧汇总。"""
+        """用配置、消息和可用工具发起流式请求；逐段返回文字与工具调用，追踪真实用量。"""
         usage = TokenUsage()
         has_content = False
         has_tool_calls = False
@@ -144,7 +144,8 @@ class ModelClient:
         incomplete = False
         body: dict[str, object] = {"model": settings.model, "messages": messages, "stream": True, "stream_options": {"include_usage": True}}
         if tools is not None:
-            body.update(tools=tools, tool_choice="auto", parallel_tool_calls=False)
+            # 流式请求允许一轮返回多个工具调用；派工工具执行时会分别启动后台任务。
+            body.update(tools=tools, tool_choice="auto", parallel_tool_calls=True)
         try:
             with httpx.Client(transport=self.transport, timeout=60, follow_redirects=False, trust_env=False) as client:
                 with client.stream(

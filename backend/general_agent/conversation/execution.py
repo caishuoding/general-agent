@@ -25,6 +25,7 @@ from general_agent.prompts import (
     attachment_context_fragment,
     compose_system_prompt,
     memory_context_fragment,
+    main_agent_prompt,
 )
 
 
@@ -84,12 +85,12 @@ class ChatExecution:
         reserved: UUID | None,
         rows: list[dict[str, Any]],
     ) -> AnswerPreparation:
-        """组合附件和记忆；知识库范围只保存在会话绑定中，不向模型暴露库清单。"""
+        """按会话、用户消息和配置准备附件与记忆；返回含单条系统提示的回答材料。"""
         content = str(rows[-1]['content'])
         chat_reserved = self.chat_reservation(content, reserved)
         material = self.search.attachments.prepare(conversation_id, account_id)
         memory_material = self.prepare_answer(user_id, content, operation, reserved)
-        context_fragments = []
+        context_fragments = [main_agent_prompt()]
         if memory_material:
             context_fragments.append(memory_context_fragment())
         if material.messages:

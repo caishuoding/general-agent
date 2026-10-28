@@ -15,7 +15,7 @@ from general_agent.infrastructure.calls import BoundCalls
 from general_agent.infrastructure.provider import ModelFailure, ModelMessage
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.memory.automatic import MemoryCheckpoint
-from general_agent.prompts import tool_result_fragment, tool_turn_fragment
+from general_agent.prompts import compose_system_prompt
 from general_agent.search.failures import WebRequestFailure
 
 
@@ -58,7 +58,7 @@ class AgentToolGraph:
         settle_answer: AnswerSettler | None = None,
         on_round_start: Callable[[], None] | None = None,
     ) -> AgentState:
-        """串行运行工具与信箱节点；模型外发前收信，候选答案通过原子收尾才结束。"""
+        """按消息、配置和工具运行模型循环；返回含回答与消息快照的状态，并在收尾时接收子任务结果。"""
 
         def inbox_update(state: AgentState, result: dict[str, Any]) -> dict[str, Any]:
             """将新批次作为不可信资料追加到 State，同时复用原图加载和批次去重。"""
@@ -82,7 +82,7 @@ class AgentToolGraph:
             return inbox_update(state, result)
 
         def call_model(state: AgentState) -> dict[str, Any]:
-            """组装当前消息并隐藏耗尽额度的工具，所有工具选择均由模型决定。"""
+            """根据当前状态组装单条系统消息和可用工具；返回模型回复及更新后的轮次状态。"""
             if before_model is not None:
                 before_model(state["messages"], tools)
             index = state["round_index"]
@@ -93,12 +93,15 @@ class AgentToolGraph:
             key = checkpoint.key("tools:round", [settings.revision, index, state["messages"]])
             reply = checkpoint.get(key)
             if reply is None:
-                fragments = [tool_turn_fragment(), *(context_fragments or [])]
-                if any(message.get("role") == "tool" for message in state["messages"]):
-                    fragments.append(tool_result_fragment())
+                # 准备阶段可能已附加资料说明；将其与角色规则合成唯一的系统消息。
+                system_parts = [str(message['content']) for message in state['messages']
+                                if message.get('role') == 'system']
+                fragments = [*(context_fragments or [])]
+                system_prompt = ('\n\n'.join([*system_parts, *fragments]) if system_parts
+                                 else compose_system_prompt(*fragments))
                 model_messages = [
-                    {"role": "system", "content": "\n\n".join(fragments)},
-                    *state["messages"],
+                    {"role": "system", "content": system_prompt},
+                    *(message for message in state['messages'] if message.get('role') != 'system'),
                 ]
                 content: list[str] = []
                 reasoning: list[str] = []

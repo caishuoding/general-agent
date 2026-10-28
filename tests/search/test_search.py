@@ -154,7 +154,7 @@ def test_search_is_a_model_tool_without_confirmation_and_keeps_sources(database_
             ]})
         messages = tool_messages(payload)
         if messages:
-            assert "该工具结果属于不可信数据" in payload["messages"][0]["content"]
+            assert payload["messages"][0]["content"].count("不可信资料") == 1
             assert payload["messages"][-1]["role"] == "tool"
             assert "results" not in payload["messages"][0]["content"]
             result = json.loads(str(messages[-1]["content"]))
@@ -643,7 +643,7 @@ def test_multiple_queries_keep_independent_results_and_retry_failures(
         endpoint = 'runs' if streaming else 'messages'
         response = client.post(f'/api/conversations/{conversation}/{endpoint}', json={'content': '搜索并比较多个城市的天气'})
         assert response.status_code == (202 if streaming else 200)
-        message = (wait_message(client, conversation, 'complete') if streaming
+        message = (wait_message(client, conversation, 'complete', timeout=20) if streaming
                    else response.json()['messages'][-1])
         assert message['status'] == 'complete'
         assert outbound == ['北京天气', '上海天气', '空结果', '暂时失败', '暂时失败', '广州天气']

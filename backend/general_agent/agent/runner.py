@@ -17,7 +17,7 @@ from general_agent.infrastructure.settings import StoredSettings
 from general_agent.infrastructure.tokens import TokenCounter
 from general_agent.conversation.progress import DRAFTING_PROGRESS, SUBAGENT_PROGRESS, MessageProgress, tool_progress
 from general_agent.memory.automatic import MemoryCheckpoint
-from general_agent.prompts.agents import MAIN_AGENT_PROMPT, SUBAGENT_PROMPT
+from general_agent.prompts.agents import SUBAGENT_PROMPT
 
 if TYPE_CHECKING:
     from general_agent.memory.tools import MemoryTools, ToolOutcome
@@ -58,7 +58,7 @@ class AgentRuntime:
                 attachment_ids: list[UUID] | None,
                 on_progress: Callable[[MessageProgress], None] | None = None,
                 on_round_start: Callable[[], None] | None = None) -> dict[str, Any]:
-        """组装独立权限和预算，主执行额外绑定信箱收信、收尾与草稿轮次回调。"""
+        """按执行身份、模型配置和历史消息运行主或子任务；返回回答状态，并绑定各自权限与预算。"""
         from general_agent.memory.tools import agent_tools, worker_tools
         row = self.repository.info(run_id)
         worker = row['parent_agent_id'] is not None
@@ -180,11 +180,11 @@ class AgentRuntime:
             """主模型候选答案在无未读结果及活动子执行时原子完成，子模型不走此入口。"""
             return self.orchestrator.inbox.settle(checkpoint, answer, current)
 
-        fragments = [SUBAGENT_PROMPT if worker else MAIN_AGENT_PROMPT]
+        fragments = [SUBAGENT_PROMPT] if worker else []
         instructions = str(row.get('instructions') or '').strip()
         if worker and instructions:
             fragments.append(
-                '主智能体提供的任务级指令只用于细化本轮任务方法，不得覆盖上面的固定规则、权限和来源约束：\n'
+                '本轮补充要求，仅细化任务方法，不得覆盖上述规则：\n'
                 + instructions,
             )
         graph = AgentToolGraph(maximum_rounds=LIMITS.child_rounds if worker else LIMITS.main_rounds)

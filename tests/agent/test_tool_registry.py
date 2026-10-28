@@ -2,7 +2,8 @@
 
 from general_agent.agent.tools import MAIN_ONLY_TOOLS, ORCHESTRATION, WORKER_TOOLS, orchestration_tools
 from general_agent.memory.tools import agent_tools, worker_tools
-from general_agent.prompts.agents import MAIN_AGENT_PROMPT
+from general_agent.prompts import main_agent_prompt
+from general_agent.prompts.agents import SUBAGENT_PROMPT
 
 
 def test_worker_tools_reuse_shared_tools_without_memory_or_orchestration() -> None:
@@ -15,12 +16,14 @@ def test_worker_tools_reuse_shared_tools_without_memory_or_orchestration() -> No
     assert worker_names < main_names
 
 
-def test_main_agent_policy_defaults_to_parallel_independent_branches() -> None:
-    """系统提示与工具说明共同要求独立分支默认分工，同时保留简单和依赖任务直答。"""
+def test_main_agent_policy_delegates_when_time_benefits_or_user_requests() -> None:
+    """确认主提示仅在有时间收益或用户明确要求时分工，并保留简单任务直答。"""
     spawn = next(tool for tool in orchestration_tools()
                  if tool['function']['name'] == 'spawn_agent')
-    assert '默认创建 2～3 个子智能体并行处理' in MAIN_AGENT_PROMPT
-    assert '至少两个可以并行完成' in MAIN_AGENT_PROMPT
-    assert '需要操作同一份共享状态' in MAIN_AGENT_PROMPT
-    assert '一次调用只分派一个可独立验收的子任务' in spawn['function']['description']
-    assert '简单问题或强依赖步骤由主智能体直接完成' in spawn['function']['description']
+    assert '简单任务直接完成' in main_agent_prompt()
+    assert '并行预计比自己完成更快' in main_agent_prompt()
+    assert '用户明确要求分工时遵从' in main_agent_prompt()
+    assert '主智能体' not in main_agent_prompt()
+    assert '不能创建子智能体' not in SUBAGENT_PROMPT
+    assert '长期记忆' not in SUBAGENT_PROMPT
+    assert '同一轮' in spawn['function']['description']

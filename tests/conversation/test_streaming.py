@@ -48,9 +48,10 @@ def configure_global_model(database_url: str, tmp_path: Path) -> None:
     )
 
 
-def wait_message(client: TestClient, conversation_id: str, status: str, content: str | None = None) -> dict[str, Any]:
-    """轮询应用接口直到最后一条回答满足外部可见条件，超时提供当前状态。"""
-    deadline = monotonic() + 5
+def wait_message(client: TestClient, conversation_id: str, status: str, content: str | None = None,
+                 timeout: float = 5) -> dict[str, Any]:
+    """按会话、目标状态和超时轮询回答；返回公开消息，超时时附上当前状态。"""
+    deadline = monotonic() + timeout
     detail: dict[str, Any] = {}
     while monotonic() < deadline:
         detail = client.get(f"/api/conversations/{conversation_id}").json()
@@ -71,6 +72,8 @@ def test_stream_is_visible_before_completion_and_survives_restart(database_url: 
         payload = json.loads(request.content)
         assert payload["stream"] is True
         assert payload["stream_options"] == {"include_usage": True}
+        assert payload["parallel_tool_calls"] is True
+        assert len([item for item in payload["messages"] if item["role"] == "system"]) == 1
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ControlledStream(release))
 
     transport = httpx.MockTransport(provider)

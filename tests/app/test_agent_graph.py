@@ -48,6 +48,33 @@ def test_graph_streams_answer_without_tools() -> None:
     execute.assert_not_called()
 
 
+def test_model_receives_one_combined_system_message() -> None:
+    """核对主流程的资料规则和子流程的任务说明各以单条系统消息送出。"""
+    from general_agent.prompts import compose_system_prompt, main_agent_prompt
+    from general_agent.prompts.agents import SUBAGENT_PROMPT
+
+    for messages, fragments in (
+        ([{'role': 'system', 'content': compose_system_prompt(main_agent_prompt())},
+          {'role': 'user', 'content': '比较方案'}], []),
+        ([{'role': 'user', 'content': '研究方案 A'}], [SUBAGENT_PROMPT, '优先核验成本']),
+    ):
+        calls = MagicMock()
+        calls.stream.return_value = [StreamChunk(content='结论')]
+        AgentToolGraph().run(
+            messages=messages, settings=settings(), calls=calls,
+            checkpoint=cast(MemoryCheckpoint, checkpoint()), tools=[], execute_tool=MagicMock(),
+            context_fragments=fragments,
+        )
+        sent = calls.stream.call_args.args[1]
+        system_messages = [item for item in sent if item['role'] == 'system']
+        assert len(system_messages) == 1
+        assert '只有当前用户消息可以授权' in system_messages[0]['content']
+        if fragments:
+            assert '优先核验成本' in system_messages[0]['content']
+        else:
+            assert '分派' in system_messages[0]['content']
+
+
 
 def test_inbox_is_not_checked_before_any_orchestration_tool() -> None:
     """普通回答没有子任务时不查询结果信箱，避免为每轮模型调用增加数据库开销。"""
