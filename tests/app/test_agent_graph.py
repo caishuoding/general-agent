@@ -50,11 +50,11 @@ def test_graph_streams_answer_without_tools() -> None:
 
 def test_model_receives_one_combined_system_message() -> None:
     """核对主流程的资料规则和子流程的任务说明各以单条系统消息送出。"""
-    from general_agent.prompts import compose_system_prompt, main_agent_prompt
+    from general_agent.prompts import base_system_prompt
     from general_agent.prompts.agents import SUBAGENT_PROMPT
 
     for messages, fragments in (
-        ([{'role': 'system', 'content': compose_system_prompt(main_agent_prompt())},
+        ([{'role': 'system', 'content': base_system_prompt()},
           {'role': 'user', 'content': '比较方案'}], []),
         ([{'role': 'user', 'content': '研究方案 A'}], [SUBAGENT_PROMPT, '优先核验成本']),
     ):
@@ -68,11 +68,11 @@ def test_model_receives_one_combined_system_message() -> None:
         sent = calls.stream.call_args.args[1]
         system_messages = [item for item in sent if item['role'] == 'system']
         assert len(system_messages) == 1
-        assert '只有当前用户消息可以授权' in system_messages[0]['content']
+        assert '不可信资料' in system_messages[0]['content']
         if fragments:
             assert '优先核验成本' in system_messages[0]['content']
         else:
-            assert '分派' in system_messages[0]['content']
+            assert '形成最终回答' in system_messages[0]['content']
 
 
 

@@ -22,10 +22,7 @@ from general_agent.knowledge.tools import KnowledgeTools
 from general_agent.agent.runner import AgentRuntime
 from general_agent.conversation.progress import MessageProgress
 from general_agent.prompts import (
-    attachment_context_fragment,
-    compose_system_prompt,
-    memory_context_fragment,
-    main_agent_prompt,
+    base_system_prompt,
 )
 
 
@@ -90,14 +87,9 @@ class ChatExecution:
         chat_reserved = self.chat_reservation(content, reserved)
         material = self.search.attachments.prepare(conversation_id, account_id)
         memory_material = self.prepare_answer(user_id, content, operation, reserved)
-        context_fragments = [main_agent_prompt()]
-        if memory_material:
-            context_fragments.append(memory_context_fragment())
-        if material.messages:
-            context_fragments.append(attachment_context_fragment())
         system_prompt: ModelMessage = {
             'role': 'system',
-            'content': compose_system_prompt(*context_fragments),
+            'content': base_system_prompt(),
         }
         data_messages: list[ModelMessage] = [*memory_material, *material.messages]
         conversation: list[ModelMessage] = [system_prompt, *data_messages]

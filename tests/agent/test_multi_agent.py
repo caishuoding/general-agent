@@ -80,7 +80,7 @@ def test_main_creates_waits_and_summarizes_without_exposing_child_text(database_
             child_inputs.append(payload)
             system_messages = [item for item in payload['messages'] if item.get('role') == 'system']
             assert len(system_messages) == 1
-            assert '你负责完成指定子任务' in system_messages[0]['content']
+            assert '你是负责指定子任务的子智能体' in system_messages[0]['content']
             assert '优先比较成本和可维护性' in system_messages[0]['content']
             assert names == {'get_current_time', 'search_documents', 'read_document', 'search_knowledge', 'search_web', 'fetch_web'}
             return response('子任务结论：方案 A 可行。')

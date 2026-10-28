@@ -15,7 +15,7 @@ from general_agent.infrastructure.calls import BoundCalls
 from general_agent.infrastructure.provider import ModelFailure, ModelMessage
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.memory.automatic import MemoryCheckpoint
-from general_agent.prompts import compose_system_prompt
+from general_agent.prompts import base_system_prompt
 from general_agent.search.failures import WebRequestFailure
 
 
@@ -93,12 +93,12 @@ class AgentToolGraph:
             key = checkpoint.key("tools:round", [settings.revision, index, state["messages"]])
             reply = checkpoint.get(key)
             if reply is None:
-                # 准备阶段可能已附加资料说明；将其与角色规则合成唯一的系统消息。
+                # 主流程已有完整系统提示；子流程只有固定子任务提示，均只发送一条。
                 system_parts = [str(message['content']) for message in state['messages']
                                 if message.get('role') == 'system']
-                fragments = [*(context_fragments or [])]
-                system_prompt = ('\n\n'.join([*system_parts, *fragments]) if system_parts
-                                 else compose_system_prompt(*fragments))
+                fragments = [fragment.strip() for fragment in (context_fragments or []) if fragment.strip()]
+                system_prompt = ('\n\n'.join([*system_parts, *fragments]) if system_parts or fragments
+                                 else base_system_prompt())
                 model_messages = [
                     {"role": "system", "content": system_prompt},
                     *(message for message in state['messages'] if message.get('role') != 'system'),

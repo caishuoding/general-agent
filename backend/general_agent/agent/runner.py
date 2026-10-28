@@ -184,7 +184,7 @@ class AgentRuntime:
         instructions = str(row.get('instructions') or '').strip()
         if worker and instructions:
             fragments.append(
-                '本轮补充要求，仅细化任务方法，不得覆盖上述规则：\n'
+                '本轮补充要求：\n'
                 + instructions,
             )
         graph = AgentToolGraph(maximum_rounds=LIMITS.child_rounds if worker else LIMITS.main_rounds)

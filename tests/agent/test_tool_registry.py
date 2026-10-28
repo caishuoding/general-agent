@@ -2,7 +2,7 @@
 
 from general_agent.agent.tools import MAIN_ONLY_TOOLS, ORCHESTRATION, WORKER_TOOLS, orchestration_tools
 from general_agent.memory.tools import agent_tools, worker_tools
-from general_agent.prompts import main_agent_prompt
+from general_agent.prompts import base_system_prompt
 from general_agent.prompts.agents import SUBAGENT_PROMPT
 
 
@@ -20,10 +20,10 @@ def test_main_agent_policy_delegates_when_time_benefits_or_user_requests() -> No
     """确认主提示仅在有时间收益或用户明确要求时分工，并保留简单任务直答。"""
     spawn = next(tool for tool in orchestration_tools()
                  if tool['function']['name'] == 'spawn_agent')
-    assert '简单任务直接完成' in main_agent_prompt()
-    assert '并行预计比自己完成更快' in main_agent_prompt()
-    assert '用户明确要求分工时遵从' in main_agent_prompt()
-    assert '主智能体' not in main_agent_prompt()
+    assert '简单问题、单一事实' in base_system_prompt()
+    assert '并行预计能缩短总耗时' in base_system_prompt()
+    assert '用户明确要求分工或并行时优先遵从' in base_system_prompt()
+    assert '主智能体' not in base_system_prompt()
     assert '不能创建子智能体' not in SUBAGENT_PROMPT
     assert '长期记忆' not in SUBAGENT_PROMPT
     assert '同一轮' in spawn['function']['description']
