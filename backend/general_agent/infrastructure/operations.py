@@ -23,7 +23,7 @@ WebKind = Literal["search", "fetch"]
 
 
 class CallBudgetExceeded(ValueError):
-    """表示根回答的共享请求预算已耗尽，后续相同类型请求不得继续外发。"""
+    """表示模型共享预算或当前智能体的分类联网额度已耗尽，后续同类请求不得继续外发。"""
 
 
 @dataclass(frozen=True)
@@ -104,14 +104,15 @@ class OperationService:
                 if unit_row['unit'] == 'credits':
                     if web_kind not in ('search', 'fetch'):
                         raise ValueError('联网请求缺少搜索或抓取类别。')
-                    # 搜索与抓取共享同一智能体额度，避免两类请求各自接近上限造成总成本失控。
-                    field = 'web_count'
-                    limit = LIMITS.web_calls
+                    # 分类额度按智能体身份累计，耗尽搜索不影响抓取，补充执行也不重置计数。
+                    field = 'search_count' if web_kind == 'search' else 'fetch_count'
+                    limit = LIMITS.search_calls if web_kind == 'search' else LIMITS.fetch_calls
+                    label = '搜索' if web_kind == 'search' else '抓取'
                     agent = (root if run['agent_id'] == root['id'] else
                              connection.execute(f'SELECT {field} FROM agents WHERE id=%s FOR UPDATE', (run['agent_id'],)).fetchone())
                     assert agent is not None
                     if agent[field] >= limit:
-                        raise CallBudgetExceeded(f'当前智能体已达到{limit}次联网工具请求上限。')
+                        raise CallBudgetExceeded(f'当前智能体已达到{limit}次{label}请求上限。')
                     connection.execute(f'UPDATE agents SET {field}={field}+1 WHERE id=%s', (run['agent_id'],))
                 else:
                     if root['model_count'] >= LIMITS.model_calls:

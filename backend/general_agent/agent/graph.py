@@ -211,7 +211,7 @@ class AgentToolGraph:
             return "execute_tools" if state["tool_calls"] else "settle_answer"
 
         def execute_tools(state: AgentState) -> dict[str, Any]:
-            """检查限额并缓存最终联网失败；后端已处理重试的结果不再套用模型重试循环。"""
+            """按输入状态执行工具批次，返回工具消息与额度状态；联网最终失败缓存，分类耗尽只禁用同类工具。"""
             tool_messages: list[dict[str, Any]] = []
             executed_results: list[dict[str, Any]] = []
             failures = dict(state["tool_failures"])
@@ -298,9 +298,8 @@ class AgentToolGraph:
                     checkpoint.put(web_key, result)
                     if result.get('tool_disabled'):
                         if result.get('failure_scope') == 'execution':
-                            # 搜索与抓取共享额度，任一工具耗尽后两者都必须停止外发。
-                            for tool_name in ('search_web', 'fetch_web'):
-                                failures[tool_name] = self.maximum_tool_retries + 1
+                            # 分类额度仅禁用当前工具，另一类联网请求继续使用自己的额度。
+                            failures[name] = self.maximum_tool_retries + 1
                         else:
                             checkpoint.put(provider_key, result)
                             for tool_name in ('search_web', 'fetch_web'):
