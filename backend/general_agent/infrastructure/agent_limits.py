@@ -16,7 +16,9 @@ class AgentLimits:
     child_rounds: int = 12
     tool_retries: int = 5
     model_calls: int = 96
-    search_calls: int = 24
+    stream_attempts: int = 3
+    search_calls: int = 5
+    fetch_calls: int = 10
     answer_seconds: int = 600
     run_seconds: int = 180
 

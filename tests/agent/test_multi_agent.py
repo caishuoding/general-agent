@@ -3,11 +3,36 @@
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import httpx
 
+from general_agent.agent.runner import AgentRuntime
 from tests.auth.support import authenticated_client
 from tests.attachments.test_attachments import configure_settings
+
+
+def test_final_source_handoff_keeps_trace_messages_tied_to_real_tool_calls() -> None:
+    """主执行交回可信来源时保留原模型消息，知识库候选独立传递且不生成无调用者的工具消息。"""
+    runtime = AgentRuntime.__new__(AgentRuntime)
+    runtime.repository = MagicMock()
+    root_id, answer_id = uuid4(), uuid4()
+    runtime.repository.start.return_value = {'id': root_id}
+    runtime.repository.info.return_value = {'status': 'completed'}
+    knowledge_source = {'key': 'K7', 'knowledge_base_id': 'base', 'document_id': 'document'}
+    runtime.repository.sources.return_value = [
+        {'key': 'W39', 'url': 'https://example.org/weather'}, knowledge_source,
+    ]
+    messages = [{'role': 'assistant', 'content': '回答[K7]'}]
+    with patch.object(AgentRuntime, 'execute', return_value={
+        'answer': '回答[K7]', 'used_tools': True, 'messages': messages,
+    }):
+        outcome = runtime.run(uuid4(), uuid4(), uuid4(), answer_id, MagicMock(), MagicMock(), [], None, None)
+
+    assert outcome.messages == messages
+    assert outcome.knowledge_source_candidates == [knowledge_source]
+    runtime.repository.close.assert_called_once_with(answer_id)
 
 
 def agent_deliveries(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -82,7 +107,7 @@ def test_main_creates_waits_and_summarizes_without_exposing_child_text(database_
             assert len(system_messages) == 1
             assert '你是负责指定子任务的子智能体' in system_messages[0]['content']
             assert '优先比较成本和可维护性' in system_messages[0]['content']
-            assert names == {'get_current_time', 'search_documents', 'read_document', 'search_knowledge', 'search_web', 'fetch_web'}
+            assert names == {'get_current_time', 'search_web', 'fetch_web'}
             return response('子任务结论：方案 A 可行。')
         tools = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
         if not tools:
@@ -361,6 +386,7 @@ def test_child_knowledge_evidence_and_revocation_clear_task_details(database_url
         payload = json.loads(request.content)
         tools = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
         if 'spawn_agent' not in {tool['function']['name'] for tool in payload.get('tools', [])}:
+            assert 'search_knowledge' in {tool['function']['name'] for tool in payload.get('tools', [])}
             if not tools:
                 return response(name='search_knowledge', arguments={'query': 'maintenance'})
             source = tools[-1]['results'][0]

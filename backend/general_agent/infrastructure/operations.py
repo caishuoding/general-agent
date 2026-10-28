@@ -19,10 +19,11 @@ from general_agent.infrastructure.settings import StoredSettings
 
 
 Unit = Literal["chat_tokens", "embedding_tokens", "credits"]
+WebKind = Literal["search", "fetch"]
 
 
 class CallBudgetExceeded(ValueError):
-    """表示根回答的共享请求预算已耗尽，后续相同类型请求不得继续外发。"""
+    """表示模型共享预算或当前智能体的分类联网额度已耗尽，后续同类请求不得继续外发。"""
 
 
 @dataclass(frozen=True)
@@ -85,8 +86,9 @@ class OperationService:
             connection.execute("INSERT INTO model_calls(id,operation_id,conversation_id,user_id,purpose,base_url,model,revision,unit,status) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,'reserved')", (call_id, context.operation_id, context.conversation_id, context.account_id, context.purpose, settings.base_url.rstrip('/'), settings.model, settings.revision, unit))
         return call_id
 
-    def begin(self, context: OperationContext, call_id: UUID, settings: StoredSettings, assistant_message_id: UUID | None = None) -> None:
-        """外发前原子检查根回答、执行时限和共享预算，并关联智能体用量。"""
+    def begin(self, context: OperationContext, call_id: UUID, settings: StoredSettings, assistant_message_id: UUID | None = None,
+              web_kind: WebKind | None = None) -> None:
+        """输入操作、预留、配置及联网类别，外发前核验期限与分类额度；成功后无返回值。"""
         with self.database.connect() as connection:
             run = connection.execute('SELECT r.id,r.agent_id,r.deadline,r.status,a.answer_attempt_id,a.parent_agent_id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE r.operation_id=%s', (context.operation_id,)).fetchone()
             if run:
@@ -99,11 +101,23 @@ class OperationService:
                     raise ValueError('回答或智能体执行已停止或超时。')
                 unit_row = connection.execute('SELECT unit FROM model_calls WHERE id=%s', (call_id,)).fetchone()
                 assert unit_row is not None
-                field = 'search_count' if unit_row['unit'] == 'credits' else 'model_count'
-                limit = LIMITS.search_calls if field == 'search_count' else LIMITS.model_calls
-                if root[field] >= limit:
-                    raise CallBudgetExceeded('本次回答已达到共享调用预算。')
-                connection.execute(f'UPDATE agents SET {field}={field}+1 WHERE id=%s', (root['id'],))
+                if unit_row['unit'] == 'credits':
+                    if web_kind not in ('search', 'fetch'):
+                        raise ValueError('联网请求缺少搜索或抓取类别。')
+                    # 分类额度按智能体身份累计，耗尽搜索不影响抓取，补充执行也不重置计数。
+                    field = 'search_count' if web_kind == 'search' else 'fetch_count'
+                    limit = LIMITS.search_calls if web_kind == 'search' else LIMITS.fetch_calls
+                    label = '搜索' if web_kind == 'search' else '抓取'
+                    agent = (root if run['agent_id'] == root['id'] else
+                             connection.execute(f'SELECT {field} FROM agents WHERE id=%s FOR UPDATE', (run['agent_id'],)).fetchone())
+                    assert agent is not None
+                    if agent[field] >= limit:
+                        raise CallBudgetExceeded(f'当前智能体已达到{limit}次{label}请求上限。')
+                    connection.execute(f'UPDATE agents SET {field}={field}+1 WHERE id=%s', (run['agent_id'],))
+                else:
+                    if root['model_count'] >= LIMITS.model_calls:
+                        raise CallBudgetExceeded('本次回答已达到共享调用预算。')
+                    connection.execute('UPDATE agents SET model_count=model_count+1 WHERE id=%s', (root['id'],))
                 connection.execute('UPDATE model_calls SET agent_id=%s,agent_run_id=%s,assistant_message_id=%s WHERE id=%s', (run['agent_id'],run['id'],run['answer_attempt_id'],call_id))
                 assistant_message_id = run['answer_attempt_id']
             row = connection.execute("SELECT cancelled FROM cloud_operations WHERE id=%s FOR UPDATE", (context.operation_id,)).fetchone()

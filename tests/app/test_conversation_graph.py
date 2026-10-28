@@ -47,7 +47,7 @@ def graph_dependencies() -> tuple[ConversationGraph, MagicMock, MagicMock]:
         return answer, []
 
     execution.search.resolve.side_effect = resolve
-    execution.resolve_knowledge_citations.side_effect = lambda _messages, answer: (answer, [])
+    execution.resolve_knowledge_citations.side_effect = lambda _sources, answer: (answer, [])
     execution.material_attachment_ids.return_value = []
     graph = ConversationGraph(database, execution)
     return graph, database, execution
@@ -119,7 +119,7 @@ def initial_state() -> ConversationState:
     """提供节点追踪测试的实际图输入，身份及私密配置只由 context 注入。"""
     return {'messages': [{'role': 'user', 'content': '你好'}], 'source_attachment_ids': [],
             'reserved_call_id': None, 'answer': '', 'failure': None, 'used_tools': False,
-            'web_sources': [], 'knowledge_sources': []}
+            'knowledge_source_candidates': [], 'web_sources': [], 'knowledge_sources': []}
 
 
 def test_nodes_share_preparation_tools_and_final_answer_through_state() -> None:
@@ -133,7 +133,8 @@ def test_nodes_share_preparation_tools_and_final_answer_through_state() -> None:
         {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'call-1'}]},
         {'role': 'tool', 'tool_call_id': 'call-1', 'content': '实际工具结果'},
         {'role': 'assistant', 'content': '待核验回答'}]
-    execution.prepare.return_value = ToolOutcome('待核验回答', True, tool_messages)
+    knowledge_candidate = {'key': 'K1', 'knowledge_base_id': 'base', 'document_id': 'document'}
+    execution.prepare.return_value = ToolOutcome('待核验回答', True, tool_messages, [knowledge_candidate])
     execution.search.resolve.side_effect = None
     sources = [{'key': 'W1', 'url': 'https://example.com', 'title': '实际来源'}]
     execution.search.resolve.return_value = ('核验后的回答', sources)
@@ -151,6 +152,8 @@ def test_nodes_share_preparation_tools_and_final_answer_through_state() -> None:
     assert execution.prepare.call_args.kwargs['messages'] == prepared
     assert execution.prepare.call_args.kwargs['source_attachment_ids'] == [source]
     assert agent['messages'] == tool_messages and agent['used_tools'] is True
+    assert agent['knowledge_source_candidates'] == [knowledge_candidate]
+    execution.resolve_knowledge_citations.assert_called_once_with([knowledge_candidate], '核验后的回答')
     assert final['answer'] == '核验后的回答' and final['web_sources'] == sources
     assert final['messages'][-1]['content'] == '核验后的回答'
     assert len(final['messages']) == len(tool_messages)

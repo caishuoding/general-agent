@@ -10,6 +10,38 @@ const labels: Record<string, string> = { queued: "排队中", running: "执行�
 // 返回稳定的中文状态标签，未知状态保留后端原文便于诊断。
 function statusLabel(status: string) { return labels[status] || status; }
 
+/**
+ * 从子智能体标题提取一至两个首字，生成紧凑且可区分的圆形头像内容。
+ *
+ * @param title 子智能体显示标题。
+ * @returns 中文字符优先取前两字，英文标题取词首，缺少有效字符时返回 `AI`。
+ */
+function agentInitials(title: string) {
+  const characters = Array.from(title.trim());
+  const hanCharacters = characters.filter(function isHanCharacter(character) {
+    // 中文字符优先取前两个字，便于“深圳核查”“上海核查”等任务快速识别。
+    const codePoint = character.codePointAt(0) || 0;
+    return codePoint >= 0x3400 && codePoint <= 0x9fff;
+  });
+  if (hanCharacters.length) return hanCharacters.slice(0, 2).join("");
+  const words = title.trim().split(/\s+/).filter(Boolean);
+  // 英文标题使用前两个单词首字母；只有一个单词时保留两个字符以维持头像平衡。
+  if (words.length >= 2) return words.slice(0, 2).map(function firstLetter(word) { return word[0]; }).join("").toUpperCase();
+  return words[0]?.slice(0, 2).toUpperCase() || "AI";
+}
+
+/**
+ * 根据稳定 agent ID 选择头像配色。
+ *
+ * @param agentId 子智能体持久化身份。
+ * @returns 零到五之间的稳定色板序号，使同一智能体刷新后保持相同外观。
+ */
+function agentTone(agentId: string) {
+  let hash = 0;
+  for (const character of agentId) hash = (hash * 31 + (character.codePointAt(0) || 0)) >>> 0;
+  return hash % 6;
+}
+
 // 只为后端登记且权限有效的来源生成可打开地址，网页限制为 HTTP(S)。
 function sourceHref(source: Source) {
   if (source.knowledge_base_id && source.document_id)
@@ -191,7 +223,10 @@ function AgentConversation({ task, conversationId, answerId, onClose }: { task: 
   return <div className="agent-conversation-backdrop" onMouseDown={closeFromBackdrop}>
     <aside className="agent-conversation" role="dialog" aria-modal="true" aria-label={title} onMouseDown={keepOpen}>
       <header className="agent-conversation-header">
-        <div><p className="agent-conversation-kicker">子智能体会话</p><h2>{title}</h2></div>
+        <div className="agent-conversation-title">
+          <span className={`agent-conversation-avatar agent-task-tone-${agentTone(task.agent_id)}`} aria-hidden="true">{agentInitials(title)}</span>
+          <div><p className="agent-conversation-kicker">子智能体会话</p><h2>{title}</h2></div>
+        </div>
         <div><span className={`agent-status agent-status-${status}`}>{statusLabel(status)}</span><button type="button" className="agent-conversation-close" aria-label="关闭子任务会话" onClick={onClose}>关闭</button></div>
       </header>
       <div className="agent-conversation-body">
@@ -207,10 +242,19 @@ function AgentConversation({ task, conversationId, answerId, onClose }: { task: 
   </div>;
 }
 
-// 显示回答下的轻量子任务入口，打开后提供只读会话而不混入主回答正文。
+/**
+ * 显示主回答下的横向子智能体头像入口。
+ *
+ * @param tasks 当前回答尝试中可展示的子智能体摘要。
+ * @param conversationId 所属会话 ID。
+ * @param answerId 所属回答尝试 ID。
+ * @returns 头像栏及按需打开的只读子智能体会话；没有子智能体时不渲染。
+ */
 export function AgentTasks({ tasks, conversationId, answerId }: { tasks: AgentTask[]; conversationId: string; answerId: string }) {
   const [selected, setSelected] = useState<AgentTask | null>(null);
   if (!tasks.length) return null;
+  // 统计已完成任务，供栏头展示整体进度并避免用户逐个头像确认状态。
+  const completedCount = tasks.filter(function isCompleted(task) { return task.status === "completed"; }).length;
   let active: AgentTask | null = null;
   if (selected) {
     for (const task of tasks) {
@@ -221,19 +265,40 @@ export function AgentTasks({ tasks, conversationId, answerId }: { tasks: AgentTa
   function openTask(task: AgentTask) { setSelected(task); }
   // 清空当前只读会话选择。
   function closeTask() { setSelected(null); }
-  return <section className="agent-tasks" aria-label="子任务">
-    <div className="agent-tasks-title">子任务 · {tasks.length}</div>
-    {tasks.map(
-      // 为每个子 Agent 保留稳定入口和当前执行轮次。
-      function renderTask(task) {
-        // 打开当前任务对应的只读子会话。
-        function activateTask() { openTask(task); }
-        return <div className="agent-task-card" key={task.agent_id}>
-          <button type="button" className="agent-task-button" onClick={activateTask} aria-label={`${task.title} · ${statusLabel(task.status)}`}><span>{task.title}</span><span className={`agent-status agent-status-${task.status}`}>{statusLabel(task.status)}</span></button>
-          {task.result && <div className="agent-task-result"><AnswerMarkdown message={{ id: `agent-card-${task.agent_id}`, content: task.result, web_sources: [], knowledge_sources: [] }} /></div>}
-        </div>;
-      },
-    )}
+  return <section className="agent-tasks" aria-label="子智能体">
+    <div className="agent-tasks-heading">
+      <span className="agent-tasks-title">子智能体</span>
+      <span className="agent-tasks-summary" aria-live="polite">
+        {completedCount === tasks.length ? (tasks.length === 1 ? "已完成" : `${tasks.length} 个均已完成`) : `${completedCount} / ${tasks.length} 已完成`}
+      </span>
+    </div>
+    <div className="agent-task-avatar-row" role="list" aria-label="子智能体">
+      {tasks.map(
+        // 为每个子智能体保留稳定头像入口，并通过标题和状态说明其当前执行情况。
+        function renderTask(task) {
+          // 打开当前任务对应的只读子会话。
+          function activateTask() { openTask(task); }
+          const label = `${task.title} · ${statusLabel(task.status)}`;
+          return <div className="agent-task-item" role="listitem" key={task.agent_id}>
+            <button
+              type="button"
+              className={`agent-task-avatar-button agent-task-tone-${agentTone(task.agent_id)}`}
+              onClick={activateTask}
+              aria-label={label}
+              aria-haspopup="dialog"
+              aria-expanded={active?.agent_id === task.agent_id}
+              title={label}
+            >
+              <span className="agent-task-avatar" aria-hidden="true">
+                <span className="agent-task-avatar-initials">{agentInitials(task.title)}</span>
+                <span className={`agent-task-state-dot agent-task-state-${task.status}`} />
+              </span>
+              <span className="agent-task-avatar-label">{task.title}</span>
+            </button>
+          </div>;
+        },
+      )}
+    </div>
     {active && <AgentConversation task={active} conversationId={conversationId} answerId={answerId} onClose={closeTask} />}
   </section>;
 }

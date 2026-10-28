@@ -10,7 +10,9 @@ import pytest
 from general_agent.agent.orchestration import AgentOrchestrator
 from general_agent.agent.repository import AgentRepository, RunCheckpoint
 from general_agent.infrastructure.database import Database
-from general_agent.infrastructure.operations import OperationService
+from general_agent.infrastructure.operations import CallBudgetExceeded, OperationContext, OperationService, WebKind
+from general_agent.infrastructure.provider import TokenUsage
+from general_agent.infrastructure.settings import StoredSettings
 
 
 @pytest.fixture
@@ -62,6 +64,63 @@ def test_creation_is_idempotent_and_cancel_is_terminal(orchestration: tuple[Agen
     again = service.execute(checkpoint, 'wait_agents', {}, execute)
     assert again['status'] == 'idle'
     assert again['agents'] == []
+
+
+def test_each_agent_has_separate_search_and_fetch_budgets(orchestration: tuple[AgentOrchestrator, RunCheckpoint, Event]) -> None:
+    """输入隔离回答与子执行，核验主从各有五次搜索和十次抓取且补充执行沿用额度；无返回值。"""
+    service, checkpoint, _ = orchestration
+    repository = service.repository
+    main = repository.info(checkpoint.run_id)
+    children = []
+    for index in range(2):
+        # 直接创建并启动不同子身份，复用真实回答与调用账本，避免线程调度影响额度断言。
+        child = repository.create(checkpoint.run_id, f'budget:{index}', '核查资料', f'研究员{index}')
+        assert repository.transition(UUID(child['run_id']), 'running')
+        children.append(repository.info(UUID(child['run_id'])))
+    operations = OperationService(repository.database)
+    settings = StoredSettings(base_url='https://search.example', model='deepseek-search', api_key='test-key')
+
+    def context(run: dict[str, Any], purpose: str) -> OperationContext:
+        """按执行轮次构造真实操作身份，输入为运行记录和用途，输出为调用账本上下文。"""
+        return OperationContext(run['operation_id'], purpose, run['conversation_id'], run['account_id'])
+
+    def spend(request: OperationContext, kind: WebKind, count: int) -> None:
+        """输入操作、联网类别及次数，逐次模拟真实外发并完成计量；无返回值。"""
+        for _ in range(count):
+            call_id = operations.reserve(request, settings, 'credits')
+            operations.begin(request, call_id, settings, web_kind=kind)
+            operations.record(call_id, TokenUsage(), 'complete')
+
+    main_context = context(main, 'chat')
+    first_context = context(children[0], 'agent_worker')
+    second_context = context(children[1], 'agent_worker')
+    spend(main_context, 'search', 5)
+    spend(first_context, 'search', 5)
+    # 搜索额度用尽不应阻挡同一智能体抓取，也不应占用其他子智能体的搜索额度。
+    spend(main_context, 'fetch', 10)
+    spend(first_context, 'fetch', 10)
+    spend(second_context, 'search', 5)
+    spend(second_context, 'fetch', 10)
+    budgets: tuple[tuple[WebKind, str, int], ...] = (('search', '搜索', 5), ('fetch', '抓取', 10))
+    for request in (main_context, first_context, second_context):
+        for kind, label, limit in budgets:
+            call_id = operations.reserve(request, settings, 'credits')
+            with pytest.raises(CallBudgetExceeded, match=f'智能体.*{limit}次{label}请求'):
+                operations.begin(request, call_id, settings, web_kind=kind)
+            operations.cancel_reservation(call_id)
+    # 同一子智能体再次接任务不能借新执行轮次重置分类额度。
+    assert repository.transition(children[0]['id'], 'completed', '首次核查完成')
+    followup = repository.create(checkpoint.run_id, 'budget:followup', '补充核查', agent_id=children[0]['agent_id'])
+    assert repository.transition(UUID(followup['run_id']), 'running')
+    followup_context = context(repository.info(UUID(followup['run_id'])), 'agent_worker')
+    for kind, label, limit in budgets:
+        call_id = operations.reserve(followup_context, settings, 'credits')
+        with pytest.raises(CallBudgetExceeded, match=f'智能体.*{limit}次{label}请求'):
+            operations.begin(followup_context, call_id, settings, web_kind=kind)
+        operations.cancel_reservation(call_id)
+    with repository.database.connect() as connection:
+        counts = connection.execute('SELECT search_count,fetch_count FROM agents WHERE answer_attempt_id=%s ORDER BY id', (main['answer_attempt_id'],)).fetchall()
+    assert [(row['search_count'], row['fetch_count']) for row in counts] == [(5, 10)] * 3
 
 
 def test_unknown_identity_and_busy_followup_are_rejected(orchestration: tuple[AgentOrchestrator, RunCheckpoint, Event]) -> None:

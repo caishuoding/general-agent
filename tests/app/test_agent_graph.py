@@ -5,9 +5,11 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pytest
+
 from general_agent.agent import AgentToolGraph
 from general_agent.infrastructure.agent_limits import LIMITS
-from general_agent.infrastructure.provider import StreamChunk, ToolCallDelta
+from general_agent.infrastructure.provider import ModelConnectionFailure, StreamChunk, ToolCallDelta
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.memory.automatic import MemoryCheckpoint
 
@@ -46,6 +48,58 @@ def test_graph_streams_answer_without_tools() -> None:
     assert result["answer"] == "你好，有什么需要？"
     assert emitted == ["你好", "，有什么需要？"]
     execute.assert_not_called()
+
+
+def test_connection_interruption_resumes_from_visible_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """连接中断后保留已出现正文，自动续写并写入可持久化的断点标记。"""
+    monkeypatch.setattr('general_agent.agent.graph.time.sleep', lambda _: None)
+
+    def interrupted():
+        """先返回一段正文，再模拟底层连接提前断开。"""
+        yield StreamChunk(content='前文')
+        raise ModelConnectionFailure('模型连接中断。')
+
+    calls = MagicMock()
+    calls.stream.side_effect = [interrupted(), [StreamChunk(content='续文')]]
+    emitted: list[str] = []
+    statuses: list[tuple[str, int, int]] = []
+
+    result = AgentToolGraph().run(
+        messages=[{'role': 'user', 'content': '继续说明'}],
+        settings=settings(),
+        calls=calls,
+        checkpoint=cast(MemoryCheckpoint, checkpoint()),
+        tools=[],
+        execute_tool=MagicMock(),
+        on_content=emitted.append,
+        on_stream_status=lambda kind, attempt, total: statuses.append((kind, attempt, total)),
+    )
+
+    assert result['answer'] == '前文[[STREAM_RESUMED]]续文'
+    assert emitted == ['前文', '[[STREAM_RESUMED]]', '续文']
+    assert statuses == [('retrying', 1, 3), ('resumed', 1, 3)]
+    retry_messages = calls.stream.call_args_list[1].args[1]
+    assert retry_messages[-2] == {'role': 'assistant', 'content': '前文'}
+    assert retry_messages[-1]['role'] == 'user'
+    assert '不要重复已经输出的内容' in retry_messages[-1]['content']
+
+
+def test_connection_retry_exhaustion_has_specific_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """连续断线时仅进行配置允许的自动尝试，并返回明确的恢复失败说明。"""
+    monkeypatch.setattr('general_agent.agent.graph.time.sleep', lambda _: None)
+    calls = MagicMock()
+    calls.stream.side_effect = [ModelConnectionFailure('连接中断。') for _ in range(LIMITS.stream_attempts)]
+
+    with pytest.raises(ModelConnectionFailure, match='自动恢复 2 次后仍未成功'):
+        AgentToolGraph().run(
+            messages=[{'role': 'user', 'content': '回答'}],
+            settings=settings(),
+            calls=calls,
+            checkpoint=cast(MemoryCheckpoint, checkpoint()),
+            tools=[],
+            execute_tool=MagicMock(),
+        )
+    assert calls.stream.call_count == LIMITS.stream_attempts == 3
 
 
 def test_model_receives_one_combined_system_message() -> None:

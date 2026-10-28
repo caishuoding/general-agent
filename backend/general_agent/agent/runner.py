@@ -15,7 +15,14 @@ from general_agent.infrastructure.operations import OperationContext
 from general_agent.infrastructure.provider import ModelMessage, ModelFailure
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.infrastructure.tokens import TokenCounter
-from general_agent.conversation.progress import DRAFTING_PROGRESS, SUBAGENT_PROGRESS, MessageProgress, tool_progress
+from general_agent.conversation.progress import (
+    CONNECTION_RESUMED_PROGRESS,
+    DRAFTING_PROGRESS,
+    SUBAGENT_PROGRESS,
+    MessageProgress,
+    connection_retry_progress,
+    tool_progress,
+)
 from general_agent.memory.automatic import MemoryCheckpoint
 from general_agent.prompts.agents import SUBAGENT_PROMPT
 
@@ -44,12 +51,11 @@ class AgentRuntime:
             result = self.execute(root['id'], user_id, answer_id, settings, cast(list[dict[str, Any]], messages), on_content, attachment_ids, on_progress, on_round_start)
             if self.repository.info(root['id'])['status'] != 'completed':
                 raise ValueError('主回答尚未完成子任务收尾。')
+            # 只把已登记、已交付的知识库来源传给引用核验，不伪造工具消息污染追踪。
             sources = self.repository.sources(root['id'])
-            # 收尾只读取可信登记；这条本地证据快照不再发给模型。
-            final_messages = result['messages']
-            if sources:
-                final_messages = [*final_messages[:-1], {'role': 'tool', 'content': json.dumps({'results': sources}, ensure_ascii=False)}, final_messages[-1]]
-            return ToolOutcome(result['answer'], bool(result['used_tools']), final_messages)
+            knowledge_sources = [source for source in sources
+                                 if isinstance(source.get('key'), str) and source['key'].startswith('K')]
+            return ToolOutcome(result['answer'], bool(result['used_tools']), result['messages'], knowledge_sources)
         finally:
             self.repository.close(answer_id)
 
@@ -64,8 +70,13 @@ class AgentRuntime:
         worker = row['parent_agent_id'] is not None
         checkpoint = RunCheckpoint(self.repository, run_id, user_id)
         counter = TokenCounter.for_settings(settings, self.tools.memory.directory)
-        shared = worker_tools(self.tools.knowledge is not None)
-        tools = shared if worker else [*agent_tools(self.tools.knowledge is not None), *orchestration_tools()]
+        # 仅在当前会话实际选中知识库时向模型提供召回工具；执行时仍重新核验选择范围。
+        knowledge_enabled = (self.tools.knowledge is not None and
+                             bool(self.tools.knowledge.service.selected(row['conversation_id'], row['account_id'])))
+        # 上下文准备已筛出当前会话的有效文字文档；纯图片和无附件时都不提供文档工具。
+        documents_enabled = self.tools.attachments is not None and bool(attachment_ids)
+        shared = worker_tools(knowledge_enabled, documents_enabled)
+        tools = shared if worker else [*agent_tools(knowledge_enabled, documents_enabled), *orchestration_tools()]
         injected: set[UUID] = set()
         document_budget = 0
 
@@ -82,6 +93,13 @@ class AgentRuntime:
             checkpoint.current_tool = name
             if on_progress is not None and not worker:
                 on_progress(SUBAGENT_PROGRESS if name in ORCHESTRATION else tool_progress(name) or DRAFTING_PROGRESS)
+
+        def stream_status(kind: str, attempt: int, total: int) -> None:
+            """把当前智能体的断线恢复状态投影为主回答的临时进度。"""
+            if on_progress is None or worker:
+                return
+            on_progress(connection_retry_progress(attempt, total) if kind == 'retrying'
+                        else CONNECTION_RESUMED_PROGRESS)
 
         def budget(current: list[dict[str, Any]], definitions: list[dict[str, Any]]) -> None:
             """按本执行的实际消息核算读取预算，不借用其他子智能体用量。"""
@@ -110,8 +128,10 @@ class AgentRuntime:
                 self.repository.guard(child_run)
                 clean = [{key: value for key, value in item.items() if key != 'reasoning_content'} for item in output['messages']]
                 self.repository.transition(child_run, 'completed', output['answer'], clean)
-            except Exception:
-                self.repository.transition(child_run, 'failed', error='子任务未完成，已保留真实调用用量。')
+            except Exception as error:
+                # 保留可公开的模型、预算或连接错误，避免前端只剩无法诊断的泛化提示。
+                detail = str(error) if isinstance(error, (ValueError, LookupError, ModelFailure)) else '子任务未完成，已保留真实调用用量。'
+                self.repository.transition(child_run, 'failed', error=detail)
                 raise
 
         def execute_tool(current: MemoryCheckpoint, name: str, arguments: dict[str, Any], configured: StoredSettings) -> dict[str, Any]:
@@ -192,6 +212,7 @@ class AgentRuntime:
             checkpoint=cast(MemoryCheckpoint, checkpoint), tools=tools, execute_tool=execute_tool,
             context_fragments=fragments, assistant_message_id=answer_id, on_content=on_content,
             on_tool_context=budget, on_tool_results=images, before_model=before_model, before_tool=before_tool,
+            on_stream_status=stream_status,
             receive_inbox=None if worker else receive, settle_answer=None if worker else settle,
             on_round_start=None if worker else on_round_start)
         return dict(output)

@@ -250,43 +250,66 @@ def test_new_answer_does_not_reuse_previous_non_retryable_failure(database_url: 
         assert '现在可读取' in answer['content']
 
 
-def test_backend_retry_checks_shared_budget_and_finishes_reservation(
-    database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize('exhausted_kind', ['search', 'fetch'])
+def test_backend_retry_checks_agent_budget_and_finishes_reservation(
+    database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exhausted_kind: str,
 ) -> None:
-    """每个自动重试仍受根回答预算约束，被拒绝的请求不会外发或遗留 reserved 记录。"""
+    """输入独立分类额度，核验重试耗尽后仅禁用对应工具、另一工具仍可用且预留终结；无返回值。"""
     from general_agent.infrastructure.agent_limits import LIMITS
 
-    monkeypatch.setattr('general_agent.infrastructure.operations.LIMITS', replace(LIMITS, search_calls=1))
+    monkeypatch.setattr('general_agent.infrastructure.operations.LIMITS', replace(LIMITS, search_calls=2, fetch_calls=2))
     attempts = 0
+    other_attempts = 0
+    exhausted_tool = exhausted_kind + '_web'
+    other_tool = 'search_web' if exhausted_kind == 'fetch' else 'fetch_web'
+    exhausted_arguments = ({'url': 'https://news.example'} if exhausted_kind == 'fetch'
+                           else {'query': '核查资料', 'ori_question': '核查资料'})
+    repeated_arguments = ({'url': 'https://news.example/another'} if exhausted_kind == 'fetch'
+                          else {'query': '换个查询', 'ori_question': '核查资料'})
+    other_arguments = ({'query': '可用来源', 'ori_question': '查询可用来源'} if other_tool == 'search_web'
+                       else {'url': 'https://news.example/available'})
+    label = '抓取' if exhausted_kind == 'fetch' else '搜索'
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """首次请求消耗唯一名额，重试在发出 HTTP 之前被共享预算拒绝。"""
-        nonlocal attempts
+        """输入模型或联网请求，模拟分类额度耗尽、强行重开同类请求及另一工具成功的响应。"""
+        nonlocal attempts, other_attempts
         payload = json.loads(request.content)
         if request.url.host == 'search.example':
-            attempts += 1
-            return httpx.Response(503, json={'error': {'code': 'temporary'}})
+            kind = 'fetch' if 'url' in payload else 'search'
+            if kind == exhausted_kind:
+                attempts += 1
+                return httpx.Response(503, json={'error': {'code': 'temporary'}})
+            other_attempts += 1
+            if kind == 'fetch':
+                return httpx.Response(200, json={'title': '可用来源', 'content': '已核验'})
+            return httpx.Response(200, json={'results': [{'url': 'https://news.example/available',
+                                                          'title': '可用来源', 'summary': '已核验'}]})
         messages = tool_messages(payload)
         if not messages:
-            return tool_call('fetch_web', {'url': 'https://news.example'}, 'fetch')
-        assert '共享调用预算' in messages[-1]['content']
+            return tool_call(exhausted_tool, exhausted_arguments, 'first')
+        if len(messages) == 1:
+            assert f'智能体已达到2次{label}请求上限' in messages[-1]['content']
+            result = json.loads(messages[-1]['content'])
+            assert result['tool_disabled'] is True and result['error_code'] == 'call_budget_exhausted'
+            names = {tool['function']['name'] for tool in payload['tools']}
+            assert exhausted_tool not in names and other_tool in names
+            return tool_call(exhausted_tool, repeated_arguments, 'over-limit')
+        if len(messages) == 2:
+            blocked = json.loads(messages[-1]['content'])
+            assert '已达到最大重试次数' in blocked['error']
+            return tool_call(other_tool, other_arguments, 'other')
         result = json.loads(messages[-1]['content'])
-        assert result['tool_disabled'] is True and result['error_code'] == 'call_budget_exhausted'
-        assert result['attempt_count'] == 1
-        names = {tool['function']['name'] for tool in payload['tools']}
-        assert not names.intersection({'search_web', 'fetch_web'})
-        return structured_text('本次查询已达到请求上限。')
+        return structured_text(f"另一类联网工具仍可用。[{result['results'][0]['key']}]")
 
     configure_search_settings(database_url, tmp_path, 'https://search.example')
     with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure(client)
         answer = client.post(f'/api/conversations/{conversation}/messages', json={'content': '读取网页'}).json()['messages'][-1]
-        assert answer['status'] == 'complete' and attempts == 1
+        assert answer['status'] == 'complete' and attempts == 2 and other_attempts == 1
         usage = [item for item in client.get('/api/usage').json() if item['unit'] == 'credits']
         # 用量公开接口只显示真实已发请求，未外发的 cancelled 记录不会伪装成计费请求。
-        assert len(usage) == 1
-        assert usage[0]['status'] == 'failed'
-        assert all(Decimal(item['credits']) == 0 for item in usage)
+        assert len(usage) == 3
+        assert sorted(Decimal(item['credits']) for item in usage) == [0, 0, 1]
 
 
 def test_parallel_subagents_receive_errors_and_independently_block_repeated_fetches(
@@ -350,34 +373,45 @@ def test_parallel_subagents_receive_errors_and_independently_block_repeated_fetc
         assert len(answer['web_sources']) == 2
 
 
-def test_six_different_404s_do_not_disable_fetch_for_a_valid_url(database_url: str, tmp_path: Path) -> None:
-    """六个不同页面的 404 不再累积为整个抓取工具禁用，随后仍能读取有效来源。"""
+def test_five_different_404s_do_not_disable_fetch_for_a_valid_url(database_url: str, tmp_path: Path) -> None:
+    """输入五个失效页面，核验第六次仍可抓取且搜索使用独立额度；无返回值。"""
     outbound: list[str] = []
+    search_attempts = 0
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """让模型依次核验六个不可读页面后，再读取一个可用页面。"""
+        """输入模型或联网请求，依次返回五次 404、有效正文及独立搜索结果。"""
+        nonlocal search_attempts
         payload = json.loads(request.content)
         if request.url.host == 'search.example':
+            if 'url' not in payload:
+                search_attempts += 1
+                return httpx.Response(200, json={'results': []})
             outbound.append(payload['url'])
             if '/missing/' in payload['url']:
                 return httpx.Response(404, json={'error': {'code': 'not_found'}})
             return httpx.Response(200, json={'title': '可用页面', 'content': '真实正文'})
         messages = tool_messages(payload)
-        if len(messages) < 7:
+        if len(messages) < 6:
             names = {tool['function']['name'] for tool in payload['tools']}
             assert 'fetch_web' in names
             if messages:
                 error = json.loads(messages[-1]['content'])
                 assert error['http_status'] == 404 and error['retry_limit'] == 0
-            url = f'https://news.example/missing/{len(messages)}' if len(messages) < 6 else 'https://news.example/good'
+            url = f'https://news.example/missing/{len(messages)}' if len(messages) < 5 else 'https://news.example/good'
             return tool_call('fetch_web', {'url': url}, f'fetch-{len(messages)}')
         result = json.loads(messages[-1]['content'])
-        return structured_text(f"已读到可用页面。[{result['results'][0]['key']}]")
+        if len(messages) == 6:
+            assert {'search_web', 'fetch_web'}.issubset({tool['function']['name'] for tool in payload['tools']})
+            return tool_call('search_web', {'query': '补充搜索', 'ori_question': '验证独立额度'}, 'search')
+        assert result['results'] == []
+        assert {'search_web', 'fetch_web'}.issubset({tool['function']['name'] for tool in payload['tools']})
+        source = json.loads(messages[-2]['content'])['results'][0]['key']
+        return structured_text(f'已读到可用页面。[{source}]')
 
     configure_search_settings(database_url, tmp_path, 'https://search.example')
     with authenticated_client(database_url, tmp_path, streaming_transport(provider)) as client:
         conversation = configure(client)
         answer = client.post(f'/api/conversations/{conversation}/messages', json={'content': '核查这些网页'}).json()['messages'][-1]
         assert answer['status'] == 'complete'
-        assert len(outbound) == 7 and outbound[-1] == 'https://news.example/good'
-        assert len(answer['web_sources']) == 1
+        assert len(outbound) == 6 and outbound[-1] == 'https://news.example/good' and search_attempts == 1
+        assert answer['content'].startswith('已读到可用页面。') and len(answer['web_sources']) == 1

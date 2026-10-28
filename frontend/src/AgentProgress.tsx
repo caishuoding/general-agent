@@ -35,8 +35,9 @@ export function AgentProgress({ progress, startedAt }: Props) {
 
   const started = new Date(startedAt).getTime();
   const elapsed = Number.isFinite(started) ? Math.max(0, Math.floor((now - started) / 1000)) : 0;
+  const reconnecting = progress?.code?.startsWith("connection_") ?? false;
   return (
-    <div className="agent-progress" role="status" aria-live="polite">
+    <div className={`agent-progress${reconnecting ? " agent-progress-reconnecting" : ""}`} role="status" aria-live="polite">
       <span className="agent-progress-dot" aria-hidden="true" />
       <span className="agent-progress-label">{progress?.label || "正在准备回答…"}</span>
       <span className="agent-progress-time">已用时 {formatElapsed(elapsed)}</span>

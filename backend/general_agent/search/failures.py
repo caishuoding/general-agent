@@ -34,9 +34,9 @@ class WebRequestFailure(ModelFailure):
         self.attempt_count = 1
 
     def tool_result(self) -> dict[str, Any]:
-        """返回最终工具失败；临时故障的有限重试已由后端处理，不让模型重开重试循环。"""
+        """无需额外输入，返回带失败范围和停止指引的工具结果；后端已完成有限重试，不让模型重开循环。"""
         guidance = ('请检查联网服务密钥或余额，本次执行已禁用搜索与抓取。' if self.scope == 'provider'
-                    else '本次回答联网请求额度已耗尽，请根据已有资料回答。' if self.scope == 'execution'
+                    else '当前智能体的该类联网请求额度已耗尽，请使用已有资料或其他仍有额度的工具完成回答。' if self.scope == 'execution'
                     else '请更换 URL 或搜索条件，或根据已有资料说明限制；不要原样重复本次请求。')
         result: dict[str, Any] = {
             'error': str(self), 'retryable': False, 'upstream_retryable': self.retryable,
