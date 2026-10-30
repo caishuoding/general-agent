@@ -10,6 +10,8 @@ test('技能卡片选择保留真实输入，发送名称并保存描述快照',
   const input = page.getByRole('textbox', { name: '消息', exact: true });
   const card = page.getByRole('button', { name: '选择技能 ppt-master', exact: true });
   await expect(card).toBeVisible();
+  await expect(card.locator('.skill-choice-name')).toHaveText('ppt-master');
+  await expect(card).not.toContainText('AI-driven presentation workflow');
   await expect(card).toHaveAttribute('aria-pressed', 'false');
   await card.click();
   await expect(card).toHaveAttribute('aria-pressed', 'true');
@@ -41,16 +43,16 @@ test('手机技能卡片和输入法交互保持可用', async function mobileCa
   await page.setViewportSize({ width: 390, height: 844 });
   await loginUser(page);
   await page.goto('/');
-  await page.getByRole('button', { name: '打开会话列表' }).click();
-  await page.getByRole('button', { name: '开始新对话' }).click();
   const input = page.getByRole('textbox', { name: '消息', exact: true });
   const card = page.getByRole('button', { name: '选择技能 ppt-master', exact: true });
+  await expect(input).toBeEnabled();
   await expect(card).toBeVisible();
+  const messagesBefore = await page.locator('.message.user').count();
   await input.fill('准备中文汇报');
   await input.dispatchEvent('compositionstart');
   await page.keyboard.press('Enter');
   await expect(input).toHaveValue(/准备中文汇报/);
-  await expect(page.locator('.message.user')).toHaveCount(0);
+  await expect(page.locator('.message.user')).toHaveCount(messagesBefore);
   await input.dispatchEvent('compositionend');
   await card.click();
   await expect(input).toBeFocused();
