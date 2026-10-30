@@ -20,6 +20,7 @@ from general_agent.memory.automatic import AutomaticMemory
 from general_agent.memory.tools import MemoryTools, ToolOutcome
 from general_agent.knowledge.tools import KnowledgeTools
 from general_agent.agent.runner import AgentRuntime
+from general_agent.skills.selection import user_skill_content
 from general_agent.conversation.progress import MessageProgress
 from general_agent.prompts import (
     base_system_prompt,
@@ -82,7 +83,7 @@ class ChatExecution:
         reserved: UUID | None,
         rows: list[dict[str, Any]],
     ) -> AnswerPreparation:
-        """按会话、用户消息和配置准备附件与记忆；返回含单条系统提示的回答材料。"""
+        """按用户原文准备记忆与附件；仅在模型消息边界展开保存的技能描述快照。"""
         content = str(rows[-1]['content'])
         chat_reserved = self.chat_reservation(content, reserved)
         material = self.search.attachments.prepare(conversation_id, account_id)
@@ -93,7 +94,8 @@ class ChatExecution:
         }
         data_messages: list[ModelMessage] = [*memory_material, *material.messages]
         conversation: list[ModelMessage] = [system_prompt, *data_messages]
-        conversation.extend({'role': str(row['role']), 'content': str(row['content'])} for row in rows)
+        conversation.extend({'role': str(row['role']), 'content': user_skill_content(str(row['content']), row.get('skill_selections') or [])
+            if row['role'] == 'user' else str(row['content'])} for row in rows)
         return AnswerPreparation(conversation, material, chat_reserved)
 
     def chat_reservation(self, content: str, reserved: UUID | None) -> UUID | None:

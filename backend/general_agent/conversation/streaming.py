@@ -14,6 +14,7 @@ from general_agent.infrastructure.operations import OperationContext
 from general_agent.conversation.execution import ChatExecution
 from general_agent.infrastructure.calls import CallGateway
 from general_agent.infrastructure.settings import StoredSettings
+from general_agent.skills.selection import SkillSnapshot
 
 
 class StreamingChat:
@@ -43,8 +44,9 @@ class StreamingChat:
             connection.execute("UPDATE memory_actions SET status='failed',error='应用重启中断了记忆同步，请重试核对已有写入。' WHERE status='saving'")
             connection.execute("UPDATE memory_native_runs SET status='failed',detail='应用重启中断了自动记忆，可重试原来源；已完成步骤会先核对。' WHERE status='pending' AND operation_id IN (SELECT id FROM cloud_operations WHERE cancelled)")
 
-    def start(self, conversation_id: UUID, account_id: UUID, content: str, settings: StoredSettings, operation: OperationContext) -> UUID:
-        """仅在有效会话登记消息并标记附件展示位置，随后执行完整附件回答。"""
+    def start(self, conversation_id: UUID, account_id: UUID, content: str, settings: StoredSettings, operation: OperationContext,
+              skill_selections: list[SkillSnapshot] | None = None) -> UUID:
+        """在有效会话登记原文、技能描述快照和附件位置，再启动统一回答流程。"""
         message_id = uuid4()
         with self.database.connect() as connection:
             found = connection.execute("SELECT id FROM conversations WHERE id = %s AND user_id = %s AND NOT deleting FOR NO KEY UPDATE", (conversation_id, account_id)).fetchone()
@@ -54,7 +56,7 @@ class StreamingChat:
                 raise ValueError("本会话正在生成回答，请先停止或等待完成。")
             call_id = self.execution.reserve_first(content, settings, operation)
             user_id = uuid4()
-            connection.execute("INSERT INTO messages (id, conversation_id, role, content, status) VALUES (%s, %s, 'user', %s, 'complete')", (user_id, conversation_id, content))
+            connection.execute("INSERT INTO messages (id, conversation_id, role, content, status,skill_selections) VALUES (%s, %s, 'user', %s, 'complete',%s)", (user_id, conversation_id, content,Jsonb(skill_selections or [])))
             self.attachments.bind_to_user_message(connection, conversation_id, user_id)
             connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to, operation_id, progress) VALUES (%s, %s, 'assistant', '', 'generating', %s, %s, %s)", (message_id, conversation_id, user_id, operation.operation_id, Jsonb(PREPARING_PROGRESS)))
             connection.execute("UPDATE conversations SET title = %s WHERE id = %s AND title = '新会话'", (content[:40], conversation_id))
@@ -96,10 +98,10 @@ class StreamingChat:
         return new_id
 
     def execute(self, conversation_id: UUID, account_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
-        """将历史作为初始 State 交给统一回答图，固定身份和配置经不可变上下文注入。"""
+        """读取截至原用户消息的历史与技能快照，重试仍复用当时描述而非最新目录。"""
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT role, content FROM messages WHERE conversation_id = %s AND status = 'complete' AND position <= (SELECT position FROM messages WHERE id = %s) ORDER BY position",
+                "SELECT role, content,skill_selections FROM messages WHERE conversation_id = %s AND status = 'complete' AND position <= (SELECT position FROM messages WHERE id = %s) ORDER BY position",
                 (conversation_id, user_id),
             ).fetchall()
         context = ConversationContext(

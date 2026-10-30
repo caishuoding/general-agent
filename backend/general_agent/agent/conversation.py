@@ -71,9 +71,10 @@ class ConversationGraph:
         self.compiled = builder.compile(name='conversation')
 
     def run(self, context: ConversationContext, rows: list[dict[str, Any]], reserved_call_id: UUID | None = None) -> ConversationResult:
-        """把历史及当前用户消息作为初始 State，固定配置通过 context 注入。"""
+        """把原始历史及技能快照作为初始 State，描述只在统一上下文准备时展开。"""
         initial: ConversationState = {
-            'messages': [{'role': str(row['role']), 'content': str(row['content'])} for row in rows],
+            'messages': [{'role': str(row['role']), 'content': str(row['content']),
+                **({'skill_selections': row['skill_selections']} if row.get('skill_selections') else {})} for row in rows],
             'source_attachment_ids': [],
             'reserved_call_id': reserved_call_id,
             'answer': '',

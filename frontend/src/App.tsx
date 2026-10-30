@@ -24,13 +24,14 @@ import {
 } from "./api";
 import { AttachmentPanel } from "./AttachmentPanel";
 import { SkillTasks } from "./SkillTasks";
+import { SkillCards, MessageSkills } from "./SkillCards";
 import { LoginScreen, PasswordChangeScreen } from "./AuthScreens";
 import { KnowledgePanel, KnowledgeSelector } from './KnowledgePanel';
 
 type Screen = "chat" | "password" | "knowledge";
 
 // 展示响应式会话与独立知识库入口，保持附件和知识库选择各自的业务边界。
-/** 管理会话、资料与制作任务显示，复用当前账号的受保护聊天接口。 */
+/** 管理会话、技能卡片选择、资料与制作任务，草稿只保存真实需求。 */
 export function App() {
   const [mobile, setMobile] = useState(window.matchMedia("(max-width: 800px)").matches);
   const [navigationOpen, setNavigationOpen] = useState(false);
@@ -44,6 +45,8 @@ export function App() {
   );
   const [screen, setScreen] = useState<Screen>("chat");
   const [draft, setDraft] = useState("");
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  const draftRevision = useRef(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -66,6 +69,9 @@ export function App() {
   const followLatest = useRef(true);
   const [showLatest, setShowLatest] = useState(false);
   const composer = useRef<HTMLFormElement>(null);
+
+  /** 账号变化或退出时清除显式选择，使其他账号不能继承旧草稿状态。 */
+  useEffect(function resetSkillAccount() { setSelectedSkills([]); draftRevision.current += 1; }, [user?.id]);
 
   useEffect(
     // 手机聊天区跟随可视视口高度和偏移，阻止软键盘把整个文档推离屏幕。
@@ -218,7 +224,7 @@ export function App() {
     [generatingId, conversationId],
   );
 
-  // 切换时关闭手机导航并隔离旧响应与附件，避免过期请求覆盖当前会话。
+  // 切换时隔离旧响应、附件与技能选择，避免草稿被其他会话的迟到响应覆盖。
   async function selectConversation(id: string) {
     setNavigationOpen(false);
     const current = ++selection.current;
@@ -229,6 +235,8 @@ export function App() {
     setScreen("chat");
     setConversation(null);
     setDraft("");
+    setSelectedSkills([]);
+    draftRevision.current += 1;
     setError("");
     try {
       const result = await api<ConversationDetail>(`/conversations/${id}`);
@@ -405,6 +413,7 @@ export function App() {
   function useExamplePrompt(event: MouseEvent<HTMLButtonElement>) {
     const prompt = event.currentTarget.dataset.prompt;
     if (!prompt) return;
+    draftRevision.current += 1;
     setDraft(prompt);
     // 等草稿写入后聚焦输入框，方便用户继续修改。
     requestAnimationFrame(function focusComposer() {
@@ -459,10 +468,17 @@ export function App() {
     setScreen("chat");
   }
 
-  // 更新草稿并让输入框随内容增高；长草稿在输入框内部滚动。
+  // 更新真实需求并登记手动编辑版本，旧发送失败不能覆盖新的草稿。
   function editDraft(event: ChangeEvent<HTMLTextAreaElement>) {
+    draftRevision.current += 1;
     setDraft(event.target.value);
     resizeDraft(event.currentTarget);
+  }
+
+  /** 只更新当前草稿的技能名称集合，完整描述由后端在发送时读取。 */
+  function chooseSkills(names: string[]) {
+    draftRevision.current += 1;
+    setSelectedSkills(names);
   }
 
   // 以实际内容测量输入高度，最多占用 120px，给消息区保留阅读空间。
@@ -514,10 +530,11 @@ export function App() {
     }
   }
 
-  // 启动流式生成；当前会话附件会自动进入后端上下文，失败时保留草稿。
+  // 发送真实需求与显式选择，旧失败响应只恢复尚未被用户编辑的同一份草稿。
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
+    const skills = [...selectedSkills];
     if (
       !content ||
       pending ||
@@ -531,15 +548,17 @@ export function App() {
     if (!id) id = (await createConversation())?.id ?? null;
     if (!id) return;
     const targetId = id;
+    const revision = draftRevision.current;
     followLatest.current = true;
     setShowLatest(false);
     setPending({ id: targetId, content, startedAt: new Date().toISOString() });
     setDraft("");
+    setSelectedSkills([]);
     setError("");
     try {
       const result = await api<ConversationDetail>(
         `/conversations/${targetId}/runs`,
-        { method: "POST", body: JSON.stringify({ content }) },
+        { method: "POST", body: JSON.stringify({ content, skills }) },
       );
       if (activeId.current === targetId) {
         selection.current += 1;
@@ -552,10 +571,10 @@ export function App() {
     } catch (failure) {
       if (activeId.current === targetId) {
         setError(errorMessage(failure));
-        setDraft(
-          // 失败时恢复已提交问题，但不覆盖用户在等待期间输入的新草稿。
-          (current) => current || content,
-        );
+        if (draftRevision.current === revision) {
+          setDraft(content);
+          setSelectedSkills(skills);
+        }
       }
       try {
         const result = await api<ConversationDetail>(
@@ -646,7 +665,7 @@ export function App() {
     );
   }
 
-  /** 接收持久化消息并返回消息界面；助手显示 Markdown，用户保留原始输入。 */
+  /** 助手显示 Markdown，用户显示原始需求及可展开的技能描述快照。 */
   // 展示主回答、子任务状态及失败重试，子任务详情按需授权加载。
   function renderMessage(message: Message) {
     return (
@@ -668,6 +687,7 @@ export function App() {
         {message.role === "assistant"
           ? <AnswerContent message={message} />
           : <div className="message-content">
+              <MessageSkills skills={message.skill_selections || []} />
               <span>{message.content}</span>
               {!!message.attachments.length && renderMessageAttachments(message.attachments)}
             </div>}
@@ -856,6 +876,7 @@ export function App() {
             <div className="composer-wrap">
               {streamNotice && <p className="stream-notice" role="status">{streamNotice}</p>}
               <form className="composer" ref={composer} onSubmit={send}>
+                {user && <SkillCards key={user.id} selected={selectedSkills} onChange={chooseSkills} disabled={!!pending || !!activeRun || changingRun || creating || loading} />}
                 {conversation && <KnowledgeSelector key={conversation.id} conversationId={conversation.id} disabled={!!pending || !!generating || changingRun} />}
                 <AttachmentPanel revision={sourceRevision} resetToken={attachmentReset} onDelete={deleteAttachment} conversationId={activeId.current} disabled={!!pending || !!generating || changingRun || creating || loading} />
                 <textarea

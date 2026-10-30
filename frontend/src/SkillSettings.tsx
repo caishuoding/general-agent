@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { api, errorMessage } from './api';
+import { api, errorMessage, type SkillDescription } from './api';
 
-type ProviderStatus = { configured: string[]; skills: { name: string; description: string; version: string }[] };
+type ProviderStatus = { configured: string[]; skills: SkillDescription[] };
 
 /** 管理完整 Skill 清单和可选媒体提供商配置，服务端不回显变量值。 */
 export function SkillSettings() {

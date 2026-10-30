@@ -12,6 +12,8 @@ export type AuthUser = {
   must_change_password: boolean;
 };
 export type Conversation = { id: string; title: string; created_at: string };
+export type SkillDescription = { name: string; description: string; version: string };
+export type SkillSelection = SkillDescription & { digest: string };
 export type DocumentParseInfo = { format?: string; skill_source?: boolean; total_units?: number; readable_units?: number; coverage?: string; missing_units?: string[]; limitations?: string[] };
 export type Attachment = { id: string; filename: string; size: number; status: "processing" | "ready" | "failed" | "deleting"; error: string | null; parse_info?: DocumentParseInfo; image_metadata: { format: string; mime: string; width: number; height: number } | null };
 export type MessageAttachment = Pick<Attachment, "id" | "filename" | "size" | "status" | "error">;
@@ -21,6 +23,7 @@ export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  skill_selections?: SkillSelection[];
   status: "generating" | "complete" | "stopped" | "failed";
   attachments: MessageAttachment[];
   agent_tasks?: AgentTask[];
