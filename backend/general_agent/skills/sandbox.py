@@ -11,7 +11,7 @@ from uuid import UUID
 
 
 class DockerSandbox:
-    """任务仅挂载自己的工作目录，使用内部网络与公网代理，不接触应用凭据。"""
+    """任务只挂载自己的工作文件及模板库，使用内部网络和公网代理。"""
 
     def __init__(self, data_directory: Path) -> None:
         """读取部署级固定镜像和宿主数据路径，不接受模型提供 Docker 参数。"""

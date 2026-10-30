@@ -171,7 +171,7 @@ def test_agent_exports_native_pptx_and_user_can_annotate_preview(database_url: s
             assert client.get(confirm_root).status_code == 200
             recommendations = client.get(confirm_root + 'api/recommendations')
             assert recommendations.status_code == 200, recommendations.text
-            assert '管理层' in recommendations.text
+            assert recommendations.json()['audience']['value'] == '管理层'
     finally:
         if task_id:
             DockerSandbox(tmp_path).stop(UUID(task_id))

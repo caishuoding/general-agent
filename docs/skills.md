@@ -2,6 +2,8 @@
 
 上游固定版本见 `skills/ppt-master.lock.json`，完整发行目录位于 `skills/ppt-master/`，保持原样；本项目新增代码遵循中文函数注释规范，上游文件保留其原有注释及 MIT/资源归属。镜像包含 PDF、Office、Excel、图像、旁白、视频和视觉检查依赖，外部服务仍需要真实配置。
 
+Python 运行依赖固定在 `deploy/skills/requirements.lock`，来自已实际构建和验收的完整镜像；构建运行 `pip check`、系统 Chromium 截图和上游归属完整性检查。升级上游时需重新解析、验证并更新该锁文件。
+
 ## 准备运行环境
 
 本机已经启动 Docker 后执行：

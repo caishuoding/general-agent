@@ -6,8 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY skills /opt/skills
 COPY deploy/skills/prepare_browser.py /opt/prepare_browser.py
-RUN pip install --no-cache-dir -r /opt/skills/ppt-master/requirements.txt \
-    playwright cairosvg httpx python-dotenv
+COPY deploy/skills/requirements.lock /opt/runtime-requirements.lock
+RUN pip install --no-cache-dir -r /opt/runtime-requirements.lock && pip check
 RUN python /opt/prepare_browser.py \
     && python /opt/skills/ppt-master/scripts/attribution_guard.py
 WORKDIR /workspace

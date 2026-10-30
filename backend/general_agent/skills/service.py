@@ -55,7 +55,7 @@ class SkillService:
         return row
 
     def activate(self, account: UUID, conversation: UUID, skill: str, task: UUID | None) -> dict[str, Any]:
-        """新建或显式续接固定版本任务；不根据用户关键词自动选择 Skill。"""
+        """新建或显式续接固定版本任务；续接从入口重建活动指令并保留原阶段。"""
         self.conversation(account, conversation)
         entry = self.catalog.read(skill, 'SKILL.md')
         if task is not None:
@@ -90,7 +90,7 @@ class SkillService:
 
     def load_file(self, task: UUID, account: UUID, conversation: UUID, path: str, instruction: bool,
                   check: Callable[[str], None] | None = None) -> dict[str, Any]:
-        """按需完整读取引用文件，仅明确选择的 Markdown 文档加入可信指令集合。"""
+        """完整读取引用文件，可信 Markdown 预检通过才保存，任务模板始终作为参考资料。"""
         row = self.get(task, account, conversation)
         if Path(path).parts and Path(path).parts[0] == 'templates':
             library = self.prepare_library(task, row['skill'])
@@ -114,7 +114,7 @@ class SkillService:
         return item
 
     def instructions(self, task: UUID, account: UUID, conversation: UUID, files: dict[str, str] | None = None) -> str:
-        """每次模型请求重读完整的活动文件，验证摘要并拒绝执行过程中静默换版。"""
+        """重读活动或候选指令集合并验证摘要；候选集合只用于预算预检，不写入状态。"""
         row = self.get(task, account, conversation)
         parts = [f'已激活 Skill {row["skill"]}，版本 {row["version"]}。SKILL_DIR=/opt/skills/{row["skill"]}；工作目录=/workspace；任务 ID={task}。']
         for path, digest in (files if files is not None else row['instruction_files']).items():

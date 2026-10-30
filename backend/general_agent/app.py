@@ -147,7 +147,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """恢复业务及子任务终态，停机取消智能体并有界等待后台线程。"""
+        """恢复对话、子任务与制作命令终态，停机取消执行并等待后台线程。"""
         database.migrate()
         execution.agent_runtime.orchestrator.recover()
         if execution.agent_runtime.skills is not None:
