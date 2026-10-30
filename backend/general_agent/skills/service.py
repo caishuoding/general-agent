@@ -4,6 +4,7 @@ import hashlib
 import json
 import mimetypes
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -13,6 +14,7 @@ from psycopg.types.json import Jsonb
 from general_agent.agent.repository import AgentRepository
 from general_agent.infrastructure.database import Database
 from general_agent.skills.catalog import SkillCatalog
+from general_agent.skills.files import SafeFiles
 
 
 class SkillService:
@@ -60,6 +62,11 @@ class SkillService:
             row = self.get(task, account, conversation)
             if row['skill'] != skill or row['entry_digest'] != entry['digest'] or row['version'] != entry['version']:
                 raise ValueError('任务 Skill 版本与安装版本不一致，不能静默升级旧任务。')
+            row['previous_instruction_paths'] = list(row['instruction_files'])
+            row['instruction_files'] = {'SKILL.md': entry['file_digest']}
+            with self.database.connect() as connection:
+                connection.execute("UPDATE skill_tasks SET status='active',updated_at=CURRENT_TIMESTAMP,instruction_files=%s WHERE id=%s", (Jsonb(row['instruction_files']), task))
+            row['status'] = 'active'
             return row
         identifier = uuid4()
         snapshot = self.repository.snapshot(conversation)
@@ -71,75 +78,65 @@ class SkillService:
         (self.directory / str(identifier) / 'workspace').mkdir(parents=True, mode=0o700)
         return created
 
-    def prepare_library(self, task: UUID, skill: str) -> Path:
+    def prepare_library(self, task: UUID, skill: str) -> Path | None:
         """按任务复制模板库，允许上游注册模板且不改写安装目录或其他用户资源。"""
-        destination = self.directory / str(task) / 'workspace' / '.skill-library'
+        source = self.catalog.directory / skill / 'templates'
+        if not source.is_dir():
+            return None
+        destination = self.directory / str(task) / 'library'
         if not destination.exists():
-            shutil.copytree(self.catalog.directory / skill / 'templates', destination)
+            shutil.copytree(source, destination)
         return destination
 
-    def load_file(self, task: UUID, account: UUID, conversation: UUID, path: str, instruction: bool) -> dict[str, Any]:
+    def load_file(self, task: UUID, account: UUID, conversation: UUID, path: str, instruction: bool,
+                  check: Callable[[str], None] | None = None) -> dict[str, Any]:
         """按需完整读取引用文件，仅明确选择的 Markdown 文档加入可信指令集合。"""
         row = self.get(task, account, conversation)
         if Path(path).parts and Path(path).parts[0] == 'templates':
             library = self.prepare_library(task, row['skill'])
-            source = self.path(task, account, conversation, '.skill-library/' + str(Path(path).relative_to('templates')))
             if instruction:
                 raise ValueError('任务模板库是可修改参考资料，请使用 instruction=false 读取。')
-            if not source.is_relative_to(library) or not source.is_file() or source.stat().st_size > 2_000_000:
-                raise ValueError('模板资料路径无效或文本过大。')
-            return {'path': path, 'absolute_path': f'/opt/skills/{row["skill"]}/{path}', 'content': source.read_text(encoding='utf-8')}
+            if library is None:
+                raise ValueError('该 Skill 没有模板库。')
+            data = SafeFiles(library).read(str(Path(path).relative_to('templates')), 0, 2_000_000)
+            if data.get('next_offset') is not None:
+                raise ValueError('模板资料过大，请按范围读取。')
+            return {'path': path, 'absolute_path': f'/opt/skills/{row["skill"]}/{path}', **data}
         item = self.catalog.read(row['skill'], path)
         if instruction:
             if Path(path).suffix.lower() != '.md':
                 raise ValueError('只有已安装的 Markdown 文档可以作为 Skill 指令加载。')
             files = {**row['instruction_files'], path: item['file_digest']}
+            if check is not None:
+                check(self.instructions(task, account, conversation, files))
             with self.database.connect() as connection:
                 connection.execute('UPDATE skill_tasks SET instruction_files=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s', (Jsonb(files), task))
         return item
 
-    def instructions(self, task: UUID, account: UUID, conversation: UUID) -> str:
+    def instructions(self, task: UUID, account: UUID, conversation: UUID, files: dict[str, str] | None = None) -> str:
         """每次模型请求重读完整的活动文件，验证摘要并拒绝执行过程中静默换版。"""
         row = self.get(task, account, conversation)
         parts = [f'已激活 Skill {row["skill"]}，版本 {row["version"]}。SKILL_DIR=/opt/skills/{row["skill"]}；工作目录=/workspace；任务 ID={task}。']
-        for path, digest in row['instruction_files'].items():
+        for path, digest in (files if files is not None else row['instruction_files']).items():
             item = self.catalog.read(row['skill'], path)
             if item['file_digest'] != digest:
                 raise ValueError('已激活 Skill 文件发生变化，请恢复固定版本后继续。')
             parts.append(f'可信 Skill 指令：{item["absolute_path"]}\n{item["content"]}')
         return '\n\n'.join(parts)
 
-    def path(self, task: UUID, account: UUID, conversation: UUID, relative: str) -> Path:
-        """解析任务工作路径并拒绝上级路径、符号链接和内部记录路径。"""
-        self.get(task, account, conversation)
-        root = self.directory / str(task) / 'workspace'
-        requested = Path(relative)
-        path = root / requested
-        if (requested.is_absolute() or '..' in requested.parts or any(part.startswith('.runtime') for part in requested.parts)
-                or not path.resolve().is_relative_to(root.resolve())):
-            raise ValueError('工作文件路径无效或越界。')
-        return path
-
     def read(self, task: UUID, account: UUID, conversation: UUID, relative: str, offset: int = 0, limit: int = 20000) -> dict[str, Any]:
         """按字符范围读取任务文本或有界列出目录，明确续读位置且不伪称完整。"""
-        path = self.path(task, account, conversation, relative)
-        if path.is_dir():
-            entries = sorted(item.name + ('/' if item.is_dir() else '') for item in path.iterdir())
-            return {'entries': entries[:500], 'has_more': len(entries) > 500}
-        if path.stat().st_size > 5_000_000:
-            raise ValueError('文本文件过大，请通过执行工具提取需要的范围。')
-        text = path.read_text(encoding='utf-8')
-        end = offset + limit
-        return {'content': text[offset:end], 'total_characters': len(text), 'next_offset': end if end < len(text) else None}
+        self.get(task, account, conversation)
+        return SafeFiles(self.directory / str(task) / 'workspace').read(relative, offset, limit)
 
     def write(self, task: UUID, account: UUID, conversation: UUID, relative: str, content: str) -> dict[str, Any]:
         """在受限工作目录保存完整 UTF-8 文本，不解释内容中的指令。"""
-        path = self.path(task, account, conversation, relative)
+        self.get(task, account, conversation)
         if len(content.encode()) > 2_000_000:
             raise ValueError('单次写入超过两百万字节。')
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding='utf-8')
-        return {'path': '/workspace/' + relative, 'bytes': path.stat().st_size}
+        with SafeFiles(self.directory / str(task) / 'workspace').file(relative, write=True) as destination:
+            destination.write(content.encode('utf-8'))
+        return {'path': '/workspace/' + relative, 'bytes': len(content.encode('utf-8'))}
 
     def update(self, task: UUID, account: UUID, conversation: UUID, status: str, stage: str, route: str) -> dict[str, Any]:
         """保存当前阶段及等待状态，供下一条用户消息显式续接。"""
@@ -152,19 +149,22 @@ class SkillService:
 
     def publish(self, task: UUID, account: UUID, conversation: UUID, answer: UUID, relative: str) -> dict[str, Any]:
         """将真实产物复制为不可变下载副本，更新工作文件不会改写已交付版本。"""
-        source = self.path(task, account, conversation, relative)
-        if not source.is_file() or source.stat().st_size > 200_000_000:
-            raise ValueError('产物不存在或超过 200 MB。')
+        self.get(task, account, conversation)
         identifier = uuid4()
         storage = self.directory / str(task) / 'artifacts'
         storage.mkdir(exist_ok=True)
         destination = storage / str(identifier)
-        shutil.copyfile(source, destination)
+        with SafeFiles(self.directory / str(task) / 'workspace').file(relative) as source:
+            data = source.read(200_000_001)
+        if len(data) > 200_000_000:
+            raise ValueError('产物超过 200 MB。')
+        destination.write_bytes(data)
         digest = hashlib.sha256(destination.read_bytes()).hexdigest()
-        mime = mimetypes.guess_type(source.name)[0] or 'application/octet-stream'
+        filename = Path(relative).name
+        mime = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
         with self.database.connect() as connection:
-            connection.execute('INSERT INTO skill_artifacts(id,task_id,answer_id,filename,digest,media_type) VALUES(%s,%s,%s,%s,%s,%s)', (identifier, task, answer, source.name, digest, mime))
-        return {'artifact_id': str(identifier), 'filename': source.name,
+            connection.execute('INSERT INTO skill_artifacts(id,task_id,answer_id,filename,digest,media_type) VALUES(%s,%s,%s,%s,%s,%s)', (identifier, task, answer, filename, digest, mime))
+        return {'artifact_id': str(identifier), 'filename': filename,
             'url': f'/api/conversations/{conversation}/skill-artifacts/{identifier}/file'}
 
     def artifact(self, artifact: UUID, account: UUID, conversation: UUID) -> tuple[Path, dict[str, Any]]:

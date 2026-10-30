@@ -12,9 +12,11 @@ from uuid import UUID, uuid4
 from general_agent.agent.repository import RunCheckpoint
 from general_agent.attachments.service import AttachmentService
 from general_agent.infrastructure.settings import StoredSettings
+from general_agent.infrastructure.tokens import TokenCounter
 from general_agent.skills.sandbox import DockerSandbox
 from general_agent.skills.service import SkillService
-from general_agent.skills.tools import validate
+from general_agent.skills.files import SafeFiles
+from general_agent.skills.tools import validate, skill_tools
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,7 +62,7 @@ class SkillRuntime:
         """定期清理删除会话的孤立容器与文件，并停止来源变化或长期闲置的任务。"""
         import shutil
         with self.service.database.connect() as connection:
-            rows = connection.execute('SELECT * FROM skill_tasks').fetchall()
+            rows = connection.execute("SELECT t.*,EXISTS(SELECT 1 FROM skill_commands c WHERE c.task_id=t.id AND c.status='running') AS running FROM skill_tasks t").fetchall()
         valid = {str(row['id']) for row in rows}
         for path in self.service.directory.iterdir():
             if path.is_dir() and path.name not in valid:
@@ -72,7 +74,7 @@ class SkillRuntime:
             except (ValueError, LookupError):
                 self.sandbox.stop(row['id'])
                 continue
-            if row['updated_at'] < datetime.now(timezone.utc) - timedelta(hours=2):
+            if not row['running'] and row['updated_at'] < datetime.now(timezone.utc) - timedelta(hours=2):
                 self.sandbox.stop(row['id'])
 
     def start(self, task: UUID, checkpoint: RunCheckpoint, command: str, seconds: int) -> dict[str, Any]:
@@ -90,6 +92,7 @@ class SkillRuntime:
             connection.execute('INSERT INTO skill_commands(id,task_id,answer_id,command,deadline) VALUES(%s,%s,%s,%s,%s)',
                 (identifier, task, checkpoint.repository.info(checkpoint.run_id)['answer_attempt_id'], command,
                  datetime.now(timezone.utc) + timedelta(seconds=seconds)))
+            connection.execute("UPDATE skill_tasks SET status='active',updated_at=CURRENT_TIMESTAMP WHERE id=%s", (task,))
         event = threading.Event()
         self.events[identifier] = event
         self.pool.submit(self.execute, identifier, task, checkpoint, command, seconds, event)
@@ -99,7 +102,6 @@ class SkillRuntime:
                 seconds: int, event: threading.Event) -> None:
         """命令输出留在宿主私有日志，持续复核回答与来源状态后发布退出码。"""
         directory = self.service.directory / str(task) / 'commands'
-        directory.mkdir(exist_ok=True)
         status, code, detail = 'failed', None, None
 
         def guard() -> None:
@@ -112,20 +114,24 @@ class SkillRuntime:
             self.service.get(task, account, checkpoint.conversation_id)
 
         try:
+            guard()
+            directory.mkdir(exist_ok=True)
             account = checkpoint.operation.account_id
             assert account is not None
             row = self.service.get(task, account, checkpoint.conversation_id)
             self.service.prepare_library(task, row['skill'])
-            code = self.sandbox.run(task, command, directory / f'{identifier}.log', guard, self.environment(), seconds)
+            code = self.sandbox.run(task, command, directory / f'{identifier}.log', guard, self.environment(), seconds, row['skill'])
             status = 'completed' if code == 0 else 'failed'
         except Exception as error:
             LOGGER.info('Skill command interrupted task=%s command=%s error_type=%s', task, identifier, type(error).__name__)
             status = 'interrupted'
             detail = str(error) if isinstance(error, (ValueError, LookupError)) else '制作命令运行失败，请检查隔离环境。'
         finally:
-            with self.service.database.connect() as connection:
-                connection.execute('UPDATE skill_commands SET status=%s,exit_code=%s,error=%s,finished_at=CURRENT_TIMESTAMP WHERE id=%s', (status, code, detail, identifier))
-            event.set()
+            try:
+                with self.service.database.connect() as connection:
+                    connection.execute('UPDATE skill_commands SET status=%s,exit_code=%s,error=%s,finished_at=CURRENT_TIMESTAMP WHERE id=%s', (status, code, detail, identifier))
+            finally:
+                event.set()
 
     def poll(self, task: UUID, identifier: UUID, offset: int, wait: int) -> dict[str, Any]:
         """短暂等待真实命令并分段读取日志，提供商密钥不进入模型上下文。"""
@@ -153,7 +159,7 @@ class SkillRuntime:
 class SkillSession:
     """本次主执行仅激活一个制作任务，普通聊天始终只获得目录和任务摘要。"""
 
-    def __init__(self, runtime: SkillRuntime, checkpoint: RunCheckpoint) -> None:
+    def __init__(self, runtime: SkillRuntime, checkpoint: RunCheckpoint, counter: TokenCounter, settings: StoredSettings) -> None:
         """绑定真实执行身份，不接受模型传账号、会话或回答标识。"""
         self.runtime, self.checkpoint = runtime, checkpoint
         self.service = runtime.service
@@ -161,42 +167,71 @@ class SkillSession:
         self.account, self.conversation = checkpoint.operation.account_id, checkpoint.conversation_id
         self.task: UUID | None = None
         self.images: list[dict[str, Any]] = []
+        self.counter, self.settings = counter, settings
+        self.request_messages: list[dict[str, Any]] = []
+        self.request_tools: list[dict[str, Any]] = []
+        self.injected_context = ''
 
-    def context(self) -> list[str]:
+    def context(self, replacement: str | None = None) -> list[str]:
         """按每次请求重建可信目录和当前活动指令，历史任务只以资料摘要提供。"""
-        result = [self.service.catalog.prompt(),
+        result = [self.service.catalog.prompt()]
+        if self.task:
+            result.append(
             'Skill 运行说明：任务文件路径均相对 /workspace。使用 read_work_file/write_work_file；'
             '按上游顺序执行脚本，命令异步启动后必须轮询真实退出码。'
             '服务器没有桌面浏览器，启动上游预览使用 --no-browser，随后 open_skill_preview。'
-            '模板库是本任务独立可写副本，路径仍为 SKILL_DIR/templates；对应 /workspace/.skill-library。'
+            '默认 Confirm UI 启动后用 open_skill_preview(surface="confirmation") 返回真实页面；'
+            '保存 waiting 并结束当前回答，用户提交页面后回到会话要求继续，再读取实际确认回执。'
+            '模板库是本任务独立可写副本，路径为 SKILL_DIR/templates。'
             '模板索引与模板规范是参考资料，read_skill_file 使用 instruction=false。'
             '用户确认环节保存 waiting 后结束回答；不能在用户确认前继续执行。'
             '需要外部图片或语音服务时使用已配置环境，不猜测配置。'
             '导出并检查后 publish_skill_file 才能提供真实下载链接。'
             '上下文不足时先保存任务和文件并请用户继续，不声称制作完成。'
-        ]
+            )
         if self.task:
-            result.append(self.service.instructions(self.task, self.account, self.conversation))
+            result.append(replacement if replacement is not None else self.service.instructions(self.task, self.account, self.conversation))
+        if replacement is None:
+            self.injected_context = '\n\n'.join(result)
         return result
+
+    def check_instructions(self, instruction: str) -> None:
+        """提交指令集合前检查完整模型请求预算，超限不保存有毒的活动上下文。"""
+        if not self.request_messages:
+            raise ValueError('尚无模型请求上下文，不能加载指令。')
+        system = str(self.request_messages[0]['content'])
+        base = system.removesuffix('\n\n' + self.injected_context)
+        prospective = '\n\n'.join(self.context(replacement=instruction))
+        messages = [{'role': 'system', 'content': base + '\n\n' + prospective}, *self.request_messages[1:]]
+        tools = {tool['function']['name']: tool for tool in [*self.request_tools, *skill_tools()]}
+        if self.counter.available(self.settings, messages, list(tools.values())) < 2048:
+            raise ValueError('完整 Skill 指令超过当前模型上下文预算；请保留当前阶段必要文件或调整模型窗口后重试。')
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """验证模型参数后执行 Skill 工具，所有文件和命令均要求本执行已显式激活任务。"""
         values = validate(name, arguments)
         if name == 'load_skill':
             row = self.service.activate(self.account, self.conversation, values['name'], values['task_id'])
+            previous = self.task
             self.task = row['id']
+            try:
+                self.check_instructions(self.service.instructions(self.task, self.account, self.conversation))
+            except ValueError:
+                self.task = previous
+                raise
             with self.service.database.connect() as connection:
                 connection.execute("UPDATE agents SET model_limit=384,deadline=GREATEST(deadline,created_at+INTERVAL '1 hour') WHERE answer_attempt_id=%s AND parent_agent_id IS NULL", (self.checkpoint.repository.info(self.checkpoint.run_id)['answer_attempt_id'],))
                 connection.execute("UPDATE agent_runs SET deadline=CURRENT_TIMESTAMP+INTERVAL '1 hour' WHERE id=%s", (self.checkpoint.run_id,))
             return {'task_id': str(self.task), 'skill': row['skill'], 'version': row['version'],
                 'stage': row['stage'], 'status': row['status'], 'skill_dir': f'/opt/skills/{row["skill"]}',
+                'previous_instruction_paths': row.get('previous_instruction_paths', []),
                 'workspace': '/workspace', 'instructions_loaded': True}
         task = values.pop('task_id')
         if task != self.task:
             raise ValueError('请先用 load_skill 显式激活这个任务。')
         self.service.get(task, self.account, self.conversation)
         if name == 'read_skill_file':
-            loaded = self.service.load_file(task, self.account, self.conversation, values['path'], values['instruction'])
+            loaded = self.service.load_file(task, self.account, self.conversation, values['path'], values['instruction'], self.check_instructions)
             return ({'path': loaded['absolute_path'], 'instructions_loaded': True}
                 if values['instruction'] else loaded)
         if name == 'set_skill_context':
@@ -229,16 +264,24 @@ class SkillSession:
                 self.checkpoint.repository.info(self.checkpoint.run_id)['answer_attempt_id'], values['path'])
         if name == 'view_work_image':
             from general_agent.attachments.images import validate_image
-            path = self.service.path(task, self.account, self.conversation, values['path'])
-            metadata = validate_image(path, path.suffix.lower())
-            remote = self.runtime.attachments.files.upload(path, path.name, metadata['mime'])
+            from tempfile import NamedTemporaryFile
+            filename = Path(values['path']).name
+            with SafeFiles(self.service.directory / str(task) / 'workspace').file(values['path']) as original:
+                data = original.read(20_000_001)
+            if len(data) > 20_000_000:
+                raise ValueError('预览图片超过 20 MB。')
+            with NamedTemporaryFile(dir=self.service.directory / str(task), suffix=Path(filename).suffix) as temporary:
+                temporary.write(data)
+                temporary.flush()
+                path = Path(temporary.name)
+                metadata = validate_image(path, path.suffix.lower())
+                remote = self.runtime.attachments.files.upload(path, filename, metadata['mime'])
             self.images.append({'role': 'user', 'content': [{'type': 'text', 'text': f'制作任务实际页面预览：{values["path"]}'}, {'type': 'file', 'file_id': remote['id']}]})
             return {'image_loaded': True, 'path': values['path']}
         if name == 'open_skill_preview':
-            path = self.service.path(task, self.account, self.conversation, values['project_path']) / 'live_preview' / 'lock.json'
-            # 锁文件也经过相同解析，避免工作目录内符号链接跳出任务。
-            self.service.path(task, self.account, self.conversation, str(path.relative_to(self.service.directory / str(task) / 'workspace')))
-            lock = json.loads(path.read_text())
+            name = '.confirm_ui.lock' if values['surface'] == 'confirmation' else 'live_preview/lock.json'
+            relative = str(Path(values['project_path']) / name)
+            lock = json.loads(self.service.read(task, self.account, self.conversation, relative)['content'])
             port = int(lock['port'])
             if not 1024 <= port <= 65535:
                 raise ValueError('预览端口无效。')
@@ -260,7 +303,6 @@ class SkillSession:
         else:
             raise ValueError('来源类型必须为 attachment 或 knowledge。')
         relative = f'inputs/{identifier}/{Path(filename).name}'
-        destination = self.service.path(task, self.account, self.conversation, relative)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+        with source.open('rb') as original, SafeFiles(self.service.directory / str(task) / 'workspace').file(relative, write=True) as destination:
+            shutil.copyfileobj(original, destination)
         return {'source_id': str(identifier), 'filename': filename, 'path': '/workspace/' + relative}

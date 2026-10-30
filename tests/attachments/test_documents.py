@@ -224,7 +224,7 @@ def test_pdf_scans_gaps_encryption_and_corruption_are_visible(database_url: str,
 
 
 def test_docx_revisions_missing_parts_and_invalid_packages(database_url: str, tmp_path: Path) -> None:
-    """Word 可读范围以分页副本为准，伪造 ZIP、损坏和空文件不能成为可读资料。"""
+    """DOCX 解析拒绝损坏文件；旧 DOC 仅作为 Skill 原件接收，不伪称正文已解析。"""
     from docx import Document
     from docx.oxml import OxmlElement
     from zipfile import ZIP_DEFLATED, ZipFile
@@ -262,8 +262,8 @@ def test_docx_revisions_missing_parts_and_invalid_packages(database_url: str, tm
             row = next(item for item in client.get(f'/api/conversations/{conversation}/attachments').json() if item['id'] == result.json()[0]['id'])
             assert row['status'] == 'failed'
             assert error in row['error']
-        for extension in ('.doc', '.docm'):
-            assert client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('wrong' + extension, docx_bytes())}).status_code == 422
+        assert client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('legacy.doc', docx_bytes())}).status_code == 201
+        assert client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('wrong.docm', docx_bytes())}).status_code == 422
         assert client.get('/api/usage').json() == []
 
 

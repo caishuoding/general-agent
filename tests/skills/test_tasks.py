@@ -33,3 +33,31 @@ def test_task_load_resume_and_file_authorization(database_url: str, tmp_path: Pa
         service.read(task['id'], uuid4(), conversation, 'draft.md')
     with pytest.raises(ValueError, match='路径'):
         service.write(task['id'], account['id'], conversation, '../secret', 'bad')
+
+
+def test_rejected_instruction_does_not_poison_resumable_task(database_url: str, tmp_path: Path) -> None:
+    """预算预检失败不持久化新指令，续接从入口恢复且保存原阶段和历史文件路径。"""
+    database = Database(database_url)
+    database.migrate()
+    ensure_normal_user(database_url)
+    with database.connect() as connection:
+        account = connection.execute("SELECT id FROM users WHERE username='test_user'").fetchone()
+    assert account is not None
+    conversation = database.create_conversation('指令预算', account['id'])['id']
+    service = SkillService(database, tmp_path, SkillCatalog(Path('skills')))
+    task = service.activate(account['id'], conversation, 'ppt-master', None)
+
+    def reject(content: str) -> None:
+        """模拟调用者在公开加载接口预检上下文预算不足。"""
+        raise ValueError('超过预算')
+
+    with pytest.raises(ValueError, match='预算'):
+        service.load_file(task['id'], account['id'], conversation, 'workflows/routing.md', True, reject)
+    assert 'workflows/routing.md' not in service.get(task['id'], account['id'], conversation)['instruction_files']
+    service.load_file(task['id'], account['id'], conversation, 'workflows/routing.md', True)
+    service.update(task['id'], account['id'], conversation, 'waiting', '等待第二阶段确认', 'generate')
+    resumed = service.activate(account['id'], conversation, 'ppt-master', task['id'])
+    assert resumed['status'] == 'active'
+    assert resumed['stage'] == '等待第二阶段确认'
+    assert 'workflows/routing.md' in resumed['previous_instruction_paths']
+    assert list(resumed['instruction_files']) == ['SKILL.md']

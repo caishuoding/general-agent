@@ -1,6 +1,6 @@
 """公开 Skill 选择和制作任务工具，所有身份由后端绑定。"""
 
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -77,6 +77,7 @@ class PathInput(TaskInput):
 class PreviewInput(TaskInput):
     """通过真实项目预览锁发现端口，不允许模型指定任意主机。"""
     project_path: str
+    surface: Literal['preview', 'confirmation'] = 'preview'
 
 
 DEFINITIONS: list[tuple[str, str, type[BaseModel]]] = [
@@ -91,7 +92,7 @@ DEFINITIONS: list[tuple[str, str, type[BaseModel]]] = [
     ('import_skill_source', '将本会话有效 attachment 原件或当前已选知识库 knowledge 原件复制到工作目录；返回原文件名和实际路径。', ImportInput),
     ('view_work_image', '将任务内真实 PNG/JPEG 图片发送给视觉模型检查；SVG/PDF 先在隔离环境渲染为 PNG。', PathInput),
     ('publish_skill_file', '将真实工作文件保存为不可变交付副本并返回下载地址；必须实际导出并通过上游检查后发布，不能伪造链接。', PathInput),
-    ('open_skill_preview', '上游预览服务成功启动后，通过 project_path 下 live_preview/lock.json 发现真实端口并返回用户可访问的受保护预览入口。', PreviewInput),
+    ('open_skill_preview', '上游服务启动后打开受保护页面。surface=preview 读取 live_preview/lock.json；surface=confirmation 读取 .confirm_ui.lock，支持默认流程两阶段方案确认。', PreviewInput),
 ]
 SKILL_TOOLS = {name for name, _, _ in DEFINITIONS}
 

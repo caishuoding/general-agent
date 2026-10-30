@@ -37,7 +37,7 @@ class DockerSandbox:
             raise ValueError('Skill 容器操作失败，请检查运行镜像、宿主数据路径及 Docker 权限。')
         return result.stdout
 
-    def ensure(self, task: UUID) -> None:
+    def ensure(self, task: UUID, skill: str | None = None) -> None:
         """幂等创建带限额的任务容器，不挂载其他任务、应用目录或 Docker socket。"""
         with self.lock:
             name = self.name(task)
@@ -51,9 +51,10 @@ class DockerSandbox:
             workspace = self.directory / 'skill-tasks' / str(task) / 'workspace'
             workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
             host = self.host_directory / 'skill-tasks' / str(task) / 'workspace'
-            library = workspace / '.skill-library'
-            mounts = (['--mount', f'type=bind,src={host}/.skill-library,dst=/opt/skills/ppt-master/templates']
-                if library.is_dir() else [])
+            library = self.directory / 'skill-tasks' / str(task) / 'library'
+            host_library = self.host_directory / 'skill-tasks' / str(task) / 'library'
+            mounts = (['--mount', f'type=bind,src={host_library},dst=/opt/skills/{skill}/templates']
+                if skill is not None and library.is_dir() and not library.is_symlink() else [])
             proxy = 'http://skill-egress:3128'
             self.control(['run', '-d', '--name', name, '--label', 'general-agent.skill-task=true',
                 '--network', self.network, '--read-only', '--cap-drop', 'ALL',
@@ -73,9 +74,11 @@ class DockerSandbox:
             pass
 
     def run(self, task: UUID, command: str, output: Path, guard: Callable[[], None],
-            environment: dict[str, str], seconds: int = 300) -> int:
+            environment: dict[str, str], seconds: int = 300, skill: str | None = None) -> int:
         """执行单条任务命令并持续核验取消、时限和日志大小，失败时终止整个任务容器。"""
-        self.ensure(task)
+        guard()
+        self.ensure(task, skill)
+        guard()
         args = ['docker', 'exec', '-i']
         for key, value in environment.items():
             args.extend(['-e', f'{key}={value}'])
@@ -104,8 +107,8 @@ class DockerSandbox:
         payload = json.dumps({'port': port, 'method': method, 'path': path,
             'body': base64.b64encode(body).decode(), 'content_type': content_type}).encode()
         script = (
-            'import urllib.request,urllib.error,json,base64,sys; p=json.load(sys.stdin); '
-            'r=urllib.request.Request("http://127.0.0.1:"+str(p["port"])+p["path"], '
+            'import urllib.request,urllib.error,urllib.parse,json,base64,sys; p=json.load(sys.stdin); '
+            'r=urllib.request.Request("http://127.0.0.1:"+str(p["port"])+urllib.parse.quote(p["path"],safe="/%?=&:+,;@"), '
             'data=base64.b64decode(p["body"]) if p["method"]!="GET" else None, '
             'method=p["method"],headers={"Content-Type":p["content_type"]}); '
             'o=urllib.request.build_opener(urllib.request.ProxyHandler({})); '
