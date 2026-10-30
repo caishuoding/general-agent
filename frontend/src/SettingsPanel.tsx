@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { SearchSettings } from "./SearchSettings";
 import { EmbeddingSettings } from "./EmbeddingSettings";
+import { SkillSettings } from "./SkillSettings";
 import { api, errorMessage, type Settings, type Usage } from "./api";
 
 type Props = {
@@ -9,7 +10,7 @@ type Props = {
   onSaved: (value: Settings) => void;
 };
 
-// 管理聊天、独立嵌入与搜索设置以及真实调用用量；保存不代表验证通过。
+// 管理聊天、嵌入、搜索与 Skill 提供商设置和真实用量；保存不代表连接验证通过。
 export function SettingsPanel({ settings, usage, onSaved }: Props) {
   const [recentUsage, setRecentUsage] = useState(usage ?? []);
   const [saving, setSaving] = useState(false);
@@ -153,6 +154,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
       </div>
       <EmbeddingSettings settings={settings} />
       <SearchSettings onSaved={searchSaved} />
+      <SkillSettings />
       {usage !== undefined && <div className="settings-card usage-card">
         <div className="card-heading">
           <h3>最近调用</h3>

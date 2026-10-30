@@ -213,3 +213,4 @@ xxhash==4.0.1
     #   langsmith
 zstandard==0.25.0
     # via langsmith
+PyYAML==6.0.3

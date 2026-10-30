@@ -88,7 +88,7 @@ class OperationService:
 
     def begin(self, context: OperationContext, call_id: UUID, settings: StoredSettings, assistant_message_id: UUID | None = None,
               web_kind: WebKind | None = None) -> None:
-        """输入操作、预留、配置及联网类别，外发前核验期限与分类额度；成功后无返回值。"""
+        """外发前核验操作、期限、分类额度及根执行的普通或制作任务调用预算。"""
         with self.database.connect() as connection:
             run = connection.execute('SELECT r.id,r.agent_id,r.deadline,r.status,a.answer_attempt_id,a.parent_agent_id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE r.operation_id=%s', (context.operation_id,)).fetchone()
             if run:
@@ -115,7 +115,7 @@ class OperationService:
                         raise CallBudgetExceeded(f'当前智能体已达到{limit}次{label}请求上限。')
                     connection.execute(f'UPDATE agents SET {field}={field}+1 WHERE id=%s', (run['agent_id'],))
                 else:
-                    if root['model_count'] >= LIMITS.model_calls:
+                    if root['model_count'] >= root['model_limit']:
                         raise CallBudgetExceeded('本次回答已达到共享调用预算。')
                     connection.execute('UPDATE agents SET model_count=model_count+1 WHERE id=%s', (root['id'],))
                 connection.execute('UPDATE model_calls SET agent_id=%s,agent_run_id=%s,assistant_message_id=%s WHERE id=%s', (run['agent_id'],run['id'],run['answer_attempt_id'],call_id))

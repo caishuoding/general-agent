@@ -60,6 +60,7 @@ class AgentToolGraph:
         execute_tool: ToolExecutor,
         context_messages: list[dict[str, Any]] | None = None,
         context_fragments: list[str] | None = None,
+        instruction_context: Callable[[], list[str]] | None = None,
         assistant_message_id: UUID | None = None,
         on_content: Callable[[str], None] | None = None,
         on_tool_context: Callable[[list[dict[str, Any]], list[dict[str, Any]]], None] | None = None,
@@ -71,7 +72,7 @@ class AgentToolGraph:
         settle_answer: AnswerSettler | None = None,
         on_round_start: Callable[[], None] | None = None,
     ) -> AgentState:
-        """按消息、配置和工具运行模型循环；返回含回答与消息快照的状态，并在收尾时接收子任务结果。"""
+        """按消息运行工具循环；每轮重新注入可信指令并计入真实请求预算，收尾接收子任务结果。"""
 
         def inbox_update(state: AgentState, result: dict[str, Any]) -> dict[str, Any]:
             """将新批次作为不可信资料追加到 State，同时复用原图加载和批次去重。"""
@@ -95,9 +96,7 @@ class AgentToolGraph:
             return inbox_update(state, result)
 
         def call_model(state: AgentState) -> dict[str, Any]:
-            """根据当前状态组装单条系统消息和可用工具；返回模型回复及更新后的轮次状态。"""
-            if before_model is not None:
-                before_model(state["messages"], tools)
+            """组装唯一系统消息及完整活动 Skill 指令，外发前按实际请求检查预算。"""
             index = state["round_index"]
             if index >= self.maximum_rounds:
                 raise ValueError("工具调用达到本次执行上限；已完成的操作保留，请缩小范围后继续。")
@@ -110,12 +109,16 @@ class AgentToolGraph:
                 system_parts = [str(message['content']) for message in state['messages']
                                 if message.get('role') == 'system']
                 fragments = [fragment.strip() for fragment in (context_fragments or []) if fragment.strip()]
+                if instruction_context is not None:
+                    fragments.extend(instruction_context())
                 system_prompt = ('\n\n'.join([*system_parts, *fragments]) if system_parts or fragments
                                  else base_system_prompt())
                 model_messages = [
                     {"role": "system", "content": system_prompt},
                     *(message for message in state['messages'] if message.get('role') != 'system'),
                 ]
+                if before_model is not None:
+                    before_model(model_messages, tools)
                 content: list[str] = []
                 reasoning: list[str] = []
                 partial_calls: dict[int, dict[str, Any]] = {}
@@ -270,7 +273,7 @@ class AgentToolGraph:
                 web_key = checkpoint.key('tools:web-failure', [str(assistant_message_id), name, arguments])
                 provider_key = checkpoint.key('tools:web-provider-failure', [str(assistant_message_id)])
                 # 当前时间每次执行都重新读取，不复用历史步骤中的旧时钟。
-                cacheable = name != 'get_current_time' and name not in ORCHESTRATION
+                cacheable = name not in {'get_current_time', 'poll_skill_command', 'load_skill', 'read_skill_file', 'open_skill_preview'} and name not in ORCHESTRATION
                 result = checkpoint.get(attempt_key) if cacheable else None
                 if result is None and cacheable:
                     cached = checkpoint.get(tool_key)
@@ -407,5 +410,5 @@ class AgentToolGraph:
         # thread_id 使用当前回答来源消息，后续接入持久化 checkpointer 时无需改变调用身份。
         return cast(AgentState, graph.invoke(initial, {
             "configurable": {"thread_id": str(checkpoint.message_id)},
-            "recursion_limit": self.maximum_rounds * 3 + 4,
+            "recursion_limit": max(self.maximum_rounds, 128 if instruction_context is not None else 0) * 3 + 4,
         }))

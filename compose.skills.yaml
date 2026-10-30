@@ -1,0 +1,37 @@
+services:
+  app:
+    environment:
+      SKILL_HOST_DATA_DIR: ${SKILL_HOST_DATA_DIR:?填写宿主机 .local 数据目录的绝对路径}
+      SKILL_RUNTIME_IMAGE: general-agent-skills:5e8856be
+      SKILL_RUNTIME_NETWORK: general-agent-skills
+    volumes:
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
+    depends_on:
+      skill-egress:
+        condition: service_started
+  skill-image:
+    image: general-agent-skills:5e8856be
+    build:
+      context: .
+      dockerfile: deploy/skills/Dockerfile
+    profiles: [build-skills]
+  skill-egress:
+    image: general-agent-skill-egress:1
+    build:
+      context: .
+      dockerfile: deploy/skills/egress.Dockerfile
+    restart: unless-stopped
+    environment:
+      SKILL_EGRESS_DOH: ${SKILL_EGRESS_DOH:-}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks:
+      skill-internal:
+        aliases: [skill-egress]
+      skill-internet: {}
+networks:
+  skill-internal:
+    name: general-agent-skills
+    internal: true
+  skill-internet: {}

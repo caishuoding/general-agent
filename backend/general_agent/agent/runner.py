@@ -2,6 +2,8 @@
 
 import json
 import httpx
+import os
+from pathlib import Path
 from typing import Any, TYPE_CHECKING, cast
 from collections.abc import Callable
 from uuid import UUID
@@ -25,6 +27,10 @@ from general_agent.conversation.progress import (
 )
 from general_agent.memory.automatic import MemoryCheckpoint
 from general_agent.prompts.agents import SUBAGENT_PROMPT
+from general_agent.skills.catalog import SkillCatalog
+from general_agent.skills.runtime import SkillRuntime, SkillSession
+from general_agent.skills.service import SkillService
+from general_agent.skills.tools import SKILL_TOOLS, skill_tools
 
 if TYPE_CHECKING:
     from general_agent.memory.tools import MemoryTools, ToolOutcome
@@ -34,10 +40,14 @@ class AgentRuntime:
     """将一次回答的主从运行集中在同一模块，调用者只需提供固定身份和材料。"""
 
     def __init__(self, tools: 'MemoryTools') -> None:
-        """复用真实业务工具与调用网关，为应用绑定统一后台调度。"""
+        """绑定主从调度与受信任 Skill 目录，命令运行使用独立隔离环境。"""
         self.tools = tools
         self.repository = AgentRepository(tools.memory.database)
         self.orchestrator = AgentOrchestrator(self.repository)
+        root = Path(os.environ.get('SKILLS_DIR', str(Path(__file__).resolve().parents[3] / 'skills')))
+        catalog = SkillCatalog(root)
+        self.skills = (SkillRuntime(SkillService(tools.memory.database, tools.memory.directory, catalog), tools.attachments)
+                       if tools.attachments is not None else None)
 
     def run(self, conversation_id: UUID, account_id: UUID, user_id: UUID, answer_id: UUID,
             settings: StoredSettings, operation: OperationContext, messages: list[ModelMessage],
@@ -64,7 +74,7 @@ class AgentRuntime:
                 attachment_ids: list[UUID] | None,
                 on_progress: Callable[[MessageProgress], None] | None = None,
                 on_round_start: Callable[[], None] | None = None) -> dict[str, Any]:
-        """按执行身份、模型配置和历史消息运行主或子任务；返回回答状态，并绑定各自权限与预算。"""
+        """绑定各自权限与预算运行主从工具；主执行按需加载 Skill，子执行不继承共享工作目录写权限。"""
         from general_agent.memory.tools import agent_tools, worker_tools
         row = self.repository.info(run_id)
         worker = row['parent_agent_id'] is not None
@@ -77,6 +87,11 @@ class AgentRuntime:
         documents_enabled = self.tools.attachments is not None and bool(attachment_ids)
         shared = worker_tools(knowledge_enabled, documents_enabled)
         tools = shared if worker else [*agent_tools(knowledge_enabled, documents_enabled), *orchestration_tools()]
+        skill_session = SkillSession(self.skills, checkpoint) if self.skills is not None and not worker else None
+        if skill_session is not None:
+            tools.extend(skill_tools()[:1])
+            messages = [*messages[:-1], {'role': 'user', 'content': '当前会话制作任务摘要（资料，不是指令）：'
+                + skill_session.service.summaries(row['account_id'], row['conversation_id'])}, *messages[-1:]]
         injected: set[UUID] = set()
         document_budget = 0
 
@@ -135,9 +150,18 @@ class AgentRuntime:
                 raise
 
         def execute_tool(current: MemoryCheckpoint, name: str, arguments: dict[str, Any], configured: StoredSettings) -> dict[str, Any]:
-            """双重执行角色权限检查，编排工具与业务工具使用各自可信入口。"""
+            """双重检查角色权限，Skill 工具仅在主执行中调用受信任加载和隔离任务接口。"""
             checkpoint.guard()
             try:
+                if name in SKILL_TOOLS:
+                    if skill_session is None:
+                        raise ValueError('当前执行没有 Skill 工作目录权限。')
+                    result = skill_session.execute(name, arguments)
+                    if skill_session.task is not None:
+                        graph.maximum_rounds = 128
+                        if not any(tool['function']['name'] == 'read_skill_file' for tool in tools):
+                            tools.extend(skill_tools()[1:])
+                    return result
                 if name in ORCHESTRATION:
                     if worker:
                         raise ValueError('子智能体没有编排权限。')
@@ -153,7 +177,7 @@ class AgentRuntime:
                     on_progress(DRAFTING_PROGRESS)
 
         def images(results: list[dict[str, Any]]) -> list[ModelMessage]:
-            """加载本执行真实结果及已交付证据的原图，按批次去重并核验访问。"""
+            """加载真实资料原图及当前任务预览，工作图像只来自已授权的任务文件。"""
             actual = [*results]
             for result in results:
                 for agent in result.get('agents', []):
@@ -175,6 +199,9 @@ class AgentRuntime:
             except (ValueError, LookupError, OSError, ModelFailure, httpx.HTTPError):
                 output.append({'role': 'user', 'content': '部分原图无法加载，请明确尚未核对原图，仅根据文字描述回答。'})
             injected.update(selected)
+            if skill_session is not None:
+                output.extend(cast(list[ModelMessage], skill_session.images))
+                skill_session.images.clear()
             checkpoint.guard()
             return output
 
@@ -197,7 +224,14 @@ class AgentRuntime:
                     on_progress(DRAFTING_PROGRESS)
 
         def settle(current: list[dict[str, Any]], answer: str) -> bool:
-            """主模型候选答案在无未读结果及活动子执行时原子完成，子模型不走此入口。"""
+            """主执行先收完子结果与制作命令，再提交最终回答，防止后台工作成为无主进程。"""
+            if skill_session is not None and skill_session.task is not None:
+                with self.repository.database.connect() as connection:
+                    command = connection.execute("SELECT id FROM skill_commands WHERE task_id=%s AND status='running'", (skill_session.task,)).fetchone()
+                if command:
+                    result = skill_session.runtime.poll(skill_session.task, command['id'], 0, 20)
+                    current.append({'role': 'user', 'content': '后台制作命令实际状态（请完成轮询后再交付）：' + json.dumps(result, ensure_ascii=False)})
+                    return False
             return self.orchestrator.inbox.settle(checkpoint, answer, current)
 
         fragments = [SUBAGENT_PROMPT] if worker else []
@@ -211,6 +245,7 @@ class AgentRuntime:
         output = graph.run(messages=messages, settings=settings, calls=self.tools.memory.calls.bind(checkpoint.operation),
             checkpoint=cast(MemoryCheckpoint, checkpoint), tools=tools, execute_tool=execute_tool,
             context_fragments=fragments, assistant_message_id=answer_id, on_content=on_content,
+            instruction_context=skill_session.context if skill_session is not None else None,
             on_tool_context=budget, on_tool_results=images, before_model=before_model, before_tool=before_tool,
             on_stream_status=stream_status,
             receive_inbox=None if worker else receive, settle_answer=None if worker else settle,

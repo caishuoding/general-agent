@@ -23,12 +23,14 @@ import {
   type MessageAttachment,
 } from "./api";
 import { AttachmentPanel } from "./AttachmentPanel";
+import { SkillTasks } from "./SkillTasks";
 import { LoginScreen, PasswordChangeScreen } from "./AuthScreens";
 import { KnowledgePanel, KnowledgeSelector } from './KnowledgePanel';
 
 type Screen = "chat" | "password" | "knowledge";
 
 // 展示响应式会话与独立知识库入口，保持附件和知识库选择各自的业务边界。
+/** 管理会话、资料与制作任务显示，复用当前账号的受保护聊天接口。 */
 export function App() {
   const [mobile, setMobile] = useState(window.matchMedia("(max-width: 800px)").matches);
   const [navigationOpen, setNavigationOpen] = useState(false);
@@ -831,6 +833,7 @@ export function App() {
                 ) : (
                   <div className="messages">
                     {conversation?.messages.map(renderMessage)}
+                    {conversation && <SkillTasks conversationId={conversation.id} />}
                     {currentPending && (
                       <>
                         <article className="message user">

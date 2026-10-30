@@ -10,4 +10,4 @@ test-results
 tests
 docs
 .scratch
-deploy
+!deploy/skills/

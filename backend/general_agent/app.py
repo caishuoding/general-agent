@@ -31,6 +31,7 @@ from general_agent.attachments.service import AttachmentService
 from general_agent.knowledge.service import KnowledgeService
 from general_agent.knowledge.api import knowledge_router
 from general_agent.knowledge.tools import KnowledgeTools
+from general_agent.skills.api import skill_router
 from general_agent.infrastructure.operations import OperationContext, OperationService
 from general_agent.infrastructure.calls import CallGateway
 from general_agent.conversation.chat import ChatService
@@ -115,7 +116,7 @@ class UsageRecord(BaseModel):
 
 
 def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None, mem0_transport: httpx.BaseTransport | None = None, secure_cookies: bool | None = None) -> FastAPI:
-    """加载配置并组装会话附件与独立知识库，测试可注入隔离存储和模型 HTTP 传输。"""
+    """组装会话、知识库与完整 Skill 运行接口，测试可注入隔离存储及 HTTP 传输。"""
     database = Database(database_url or os.environ.get(
         "DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/general_agent"
     ))
@@ -149,6 +150,8 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         """恢复业务及子任务终态，停机取消智能体并有界等待后台线程。"""
         database.migrate()
         execution.agent_runtime.orchestrator.recover()
+        if execution.agent_runtime.skills is not None:
+            execution.agent_runtime.skills.recover()
         streaming.recover()
         attachments.recover()
         knowledge.recover()
@@ -156,13 +159,15 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         stopped = asyncio.Event()
 
         async def expire_attachments() -> None:
-            """每分钟清理到期附件；访问路径独立检查 TTL，清理延迟不延长可用期。"""
+            """每分钟清理到期附件和失效制作环境；各读取路径独立检查权限与 TTL。"""
             while not stopped.is_set():
                 try:
                     await asyncio.wait_for(stopped.wait(), timeout=60)
                 except TimeoutError:
                     try:
                         await asyncio.to_thread(attachments.expire)
+                        if execution.agent_runtime.skills is not None:
+                            await asyncio.to_thread(execution.agent_runtime.skills.maintain)
                     except Exception:
                         # 暂时不可用的数据库留待下一轮，不终止后续清理。
                         logging.getLogger(__name__).exception('附件到期清理暂未完成')
@@ -175,6 +180,8 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
             await expiration
             await asyncio.to_thread(execution.agent_runtime.orchestrator.close)
             await asyncio.to_thread(streaming.close)
+            if execution.agent_runtime.skills is not None:
+                await asyncio.to_thread(execution.agent_runtime.skills.close)
             await asyncio.to_thread(knowledge.close)
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
@@ -183,6 +190,8 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     app.include_router(admin_router(auth, database, attachments, memory, knowledge))
     app.include_router(attachment_router(attachments))
     app.include_router(knowledge_router(knowledge))
+    if execution.agent_runtime.skills is not None:
+        app.include_router(skill_router(execution.agent_runtime.skills))
     app.include_router(source_deletion_router(source_deletion))
     app.include_router(correction_router(MemoryCorrection(memory)))
     app.include_router(native_memory_router(execution.automatic,settings))

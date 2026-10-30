@@ -33,7 +33,7 @@ from general_agent.attachments.tools import DocumentTools
 from general_agent.attachments.retrieval import DocumentRetrieval
 from general_agent.infrastructure.provider import FilePart, ModelFailure, ModelMessage, TextPart
 from general_agent.infrastructure.settings import SettingsStore
-from general_agent.attachments.upload import UploadedFile
+from general_agent.attachments.upload import UploadedFile, SKILL_SOURCE_EXTENSIONS
 from general_agent.prompts import attachment_data, image_material_label
 
 LOGGER = logging.getLogger(__name__)
@@ -168,7 +168,7 @@ class AttachmentService:
             self.process_file(attachment_id)
 
     def process_file(self, attachment_id: UUID) -> None:
-        """用同一计数快照完成原生或 OCR 解析，再统一描述插图和切片，发布前重核 TTL。"""
+        """解析文字与图片；制作专用格式只保留原件并标记，不误作 UTF-8 文本或可检索正文。"""
         info: dict[str, Any] = {}
         try:
             with self.database.connect() as connection:
@@ -178,6 +178,20 @@ class AttachmentService:
             policy = self.policy
             path = self.directory / str(attachment_id)
             extension = Path(str(row['filename'])).suffix.lower()
+            if extension in SKILL_SOURCE_EXTENSIONS:
+                if extension in {'.pptx', '.xlsx', '.xlsm'}:
+                    from zipfile import ZipFile, BadZipFile
+                    try:
+                        with ZipFile(path) as package:
+                            names = package.namelist()
+                            expected = 'ppt/presentation.xml' if extension == '.pptx' else 'xl/workbook.xml'
+                            if len(names) > 20000 or expected not in names or sum(item.file_size for item in package.infolist()) > 500_000_000:
+                                raise ValueError('Office 文件结构无效或展开后过大。')
+                    except BadZipFile:
+                        raise ValueError('Office 文件不是有效的 PPTX 或 XLSX 包。') from None
+                with self.database.connect() as connection:
+                    connection.execute("UPDATE attachments SET status='ready',parse_info=%s,error=NULL WHERE id=%s AND status='processing' AND expires_at>CURRENT_TIMESTAMP", (Jsonb({'format': extension[1:], 'skill_source': True}), attachment_id))
+                return
             if extension in {'.png', '.jpg', '.jpeg'}:
                 metadata = validate_image(path, extension)
                 remote = self.files.upload(path, str(row['filename']), metadata['mime'])
@@ -322,7 +336,7 @@ class AttachmentService:
         return path, str(row['filename'])
 
     def prepare(self, conversation_id: UUID, account_id: UUID) -> AttachmentContext:
-        """每轮提供已升级的有效文档清单和图片身份，正文由工具按需读取。"""
+        """提供按需读取文档、制作专用原件清单和原图身份，不将模板伪装成已解析正文。"""
         with self.database.connect() as connection:
             if not connection.execute(
                 "SELECT id FROM conversations WHERE id=%s AND user_id=%s AND NOT deleting",
@@ -345,10 +359,15 @@ class AttachmentService:
             if row['image_metadata'] is None and row['knowledge_version'] == 2
         ]
         images = [row for row in rows if row['image_metadata'] is not None]
-        if not documents and not images:
+        originals = [{'source_id': str(row['id']), 'filename': row['filename'], 'kind': 'attachment'}
+            for row in rows if row['parse_info'].get('skill_source')]
+        if not documents and not images and not originals:
             return AttachmentContext()
 
         messages: list[ModelMessage] = []
+        if originals:
+            import json
+            messages.append({'role': 'user', 'content': '制作专用附件原件（尚未读取内容，可通过 import_skill_source 导入）：' + json.dumps(originals, ensure_ascii=False)})
         if documents:
             messages.append({'role': 'user', 'content': attachment_data(documents)})
         if images:
