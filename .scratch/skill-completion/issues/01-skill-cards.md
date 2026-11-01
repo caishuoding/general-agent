@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: wontfix
 
 # 实现聊天输入区的 Skill 卡片显式选择
 

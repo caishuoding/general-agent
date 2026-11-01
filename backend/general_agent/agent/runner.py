@@ -58,14 +58,10 @@ class AgentRuntime:
             settings: StoredSettings, operation: OperationContext, messages: list[ModelMessage],
             on_content: Callable[[str], None] | None, attachment_ids: list[UUID] | None,
             on_progress: Callable[[MessageProgress], None] | None = None,
-            on_round_start: Callable[[], None] | None = None, runtime_state: dict[str, Any] | None = None) -> 'ToolOutcome':
+            on_round_start: Callable[[], None] | None = None) -> 'ToolOutcome':
         """主图完成信箱收尾后返回结果，异常出口关闭剩余子任务且保留用量。"""
         from general_agent.memory.tools import ToolOutcome
         root = self.repository.start(answer_id, account_id, conversation_id, operation)
-        if runtime_state:
-            seed = RunCheckpoint(self.repository, root['id'], user_id)
-            if seed.get('runtime:skill') is None:
-                seed.put('runtime:skill', runtime_state)
         try:
             result = self.execute(root['id'], user_id, answer_id, settings, cast(list[dict[str, Any]], messages), on_content, attachment_ids, on_progress, on_round_start)
             if self.repository.info(root['id'])['status'] != 'completed':
@@ -76,7 +72,7 @@ class AgentRuntime:
             sources = self.repository.sources(root['id'])
             knowledge_sources = [source for source in sources
                                  if isinstance(source.get('key'), str) and source['key'].startswith('K')]
-            return ToolOutcome(result['answer'], bool(result['used_tools']), result['messages'], knowledge_sources, result.get('runtime_state', {}))
+            return ToolOutcome(result['answer'], bool(result['used_tools']), result['messages'], knowledge_sources)
         finally:
             paused = False
             if getattr(self, 'checkpoints', None) is not None:
@@ -101,14 +97,11 @@ class AgentRuntime:
             raise ValueError('资料范围已变化，请重新提问。')
         if root and root['deadline'] <= message['interrupted_at']:
             raise ValueError('原执行在中断前已超时，请重试。')
-        runtime_state = self.skills.service.runtime_state_for_answer(connection, answer_id) if self.skills else {}
-        if self.skills and runtime_state.get('task_id'):
-            self.skills.service.instructions(UUID(runtime_state['task_id']), account_id, conversation_id)
         operation = connection.execute('SELECT * FROM cloud_operations WHERE id=%s', (message['operation_id'],)).fetchone()
         if not operation or operation['cancelled'] or operation['invalidated']:
             raise ValueError('原操作已停止或来源已失效，请重新提问。')
         connection.execute('UPDATE agents SET deadline=deadline+(CURRENT_TIMESTAMP-%s),closed=FALSE WHERE answer_attempt_id=%s', (message['interrupted_at'], answer_id))
-        connection.execute("UPDATE agent_runs r SET deadline=r.deadline+(CURRENT_TIMESTAMP-coalesce(r.paused_at,%s)),paused_at=NULL,status=CASE WHEN a.parent_agent_id IS NOT NULL THEN 'queued' ELSE 'running' END FROM agents a WHERE r.agent_id=a.id AND a.answer_attempt_id=%s AND (a.parent_agent_id IS NULL OR r.status IN ('queued','running'))", (message['interrupted_at'], answer_id))
+        connection.execute("UPDATE agent_runs r SET deadline=r.deadline+(CURRENT_TIMESTAMP-%s),paused_at=NULL,status=CASE WHEN a.parent_agent_id IS NOT NULL THEN 'queued' ELSE 'running' END FROM agents a WHERE r.agent_id=a.id AND a.answer_attempt_id=%s AND (a.parent_agent_id IS NULL OR r.status IN ('queued','running'))", (message['interrupted_at'], answer_id))
         return OperationContext(operation['id'], operation['purpose'], conversation_id, account_id)
 
     def execute(self, run_id: UUID, user_id: UUID, answer_id: UUID, settings: StoredSettings,
@@ -132,26 +125,19 @@ class AgentRuntime:
         documents_enabled = self.tools.attachments is not None and bool(attachment_ids)
         shared = worker_tools(knowledge_enabled, documents_enabled)
         tools = shared if worker else [*agent_tools(knowledge_enabled, documents_enabled), *orchestration_tools()]
-        skill_session = SkillSession(self.skills, checkpoint, counter, settings) if self.skills is not None and not worker else None
+        used_skills = (self.skills.service.conversation_skills(row['account_id'], row['conversation_id'])
+                       if self.skills is not None and not worker else [])
+        skill_session = SkillSession(self.skills, checkpoint, used_skills) if self.skills is not None and not worker else None
         if skill_session is not None:
             tools.extend(skill_tools()[:1])
-            restored = checkpoint.get('runtime:skill')
-            if restored and restored.get('task_id'):
-                skill_session.restore(restored)
+            if skill_session.current_skills():
                 tools.extend(skill_tools()[1:])
-            summaries = skill_session.service.summaries(row['account_id'], row['conversation_id'])
-            if summaries != '[]':
-                messages = [*messages[:-1], {'role': 'user', 'content': '当前会话制作任务摘要（资料，不是指令）：'
-                    + summaries, '_context_material': True}, *messages[-1:]]
         injected: set[UUID] = set()
         document_budget = 0
 
         def before_model(current: list[dict[str, Any]], definitions: list[dict[str, Any]]) -> None:
             """外发前重验资料版本并拒绝超上下文，不静默截断消息。"""
             checkpoint.guard()
-            if skill_session is not None:
-                skill_session.request_messages = current
-                skill_session.request_tools = definitions
             if counter.available(settings, current, definitions) <= 0:
                 raise ValueError('智能体上下文超过可用预算，请缩小任务范围。')
 
@@ -206,20 +192,14 @@ class AgentRuntime:
                 raise
 
         def execute_tool(current: MemoryCheckpoint, name: str, arguments: dict[str, Any], configured: StoredSettings) -> dict[str, Any]:
-            """双重检查角色权限，Skill 工具仅在主执行中调用受信任加载和隔离任务接口。"""
+            """双重检查角色权限，Skill 工具仅在主执行中绑定当前 Run 执行。"""
             checkpoint.guard()
             try:
                 if name in SKILL_TOOLS:
                     if skill_session is None:
                         raise ValueError('当前执行没有 Skill 工作目录权限。')
-                    cache_key = 'skill:call:' + checkpoint.current_call
-                    result = checkpoint.get(cache_key) if name == 'load_skill' else None
-                    if result is None:
-                        result = skill_session.execute(name, arguments)
-                    checkpoint.put('runtime:skill', skill_session.snapshot())
-                    if name == 'load_skill':
-                        checkpoint.put(cache_key, result)
-                    if skill_session.task is not None:
+                    result = skill_session.execute(name, arguments)
+                    if skill_session.current_skills():
                         graph.maximum_rounds = LIMITS.skill_rounds
                         if not any(tool['function']['name'] == 'read_skill_file' for tool in tools):
                             tools.extend(skill_tools()[1:])
@@ -246,7 +226,7 @@ class AgentRuntime:
                     on_progress(DRAFTING_PROGRESS)
 
         def images(results: list[dict[str, Any]]) -> list[ModelMessage]:
-            """加载真实资料原图及当前任务预览，工作图像只来自已授权的任务文件。"""
+            """加载真实资料原图及当前 Run 预览，工作图像只来自已授权文件。"""
             actual = [*results]
             for result in results:
                 for agent in result.get('agents', []):
@@ -295,11 +275,14 @@ class AgentRuntime:
 
         def settle(current: list[dict[str, Any]], answer: str) -> bool:
             """主执行先收完子结果与制作命令，再提交最终回答，防止后台工作成为无主进程。"""
-            if skill_session is not None and skill_session.task is not None:
+            if skill_session is not None and skill_session.current_skills():
                 with self.repository.database.connect() as connection:
-                    command = connection.execute("SELECT id FROM skill_commands WHERE task_id=%s AND status='running'", (skill_session.task,)).fetchone()
+                    command = connection.execute(
+                        "SELECT id FROM skill_commands WHERE run_id=%s AND status='running'",
+                        (checkpoint.run_id,),
+                    ).fetchone()
                 if command:
-                    result = skill_session.runtime.poll(skill_session.task, command['id'], 0, LIMITS.skill_poll_seconds)
+                    result = skill_session.runtime.poll(checkpoint, command['id'], 0, LIMITS.skill_poll_seconds)
                     current.append({'role': 'user', 'content': '后台制作命令实际状态（请完成轮询后再交付）：' + json.dumps(result, ensure_ascii=False)})
                     return False
             return self.orchestrator.inbox.settle(checkpoint, answer, current)
@@ -324,7 +307,8 @@ class AgentRuntime:
                 '本轮补充要求：\n'
                 + instructions,
             )
-        graph = AgentToolGraph(maximum_rounds=LIMITS.skill_rounds if skill_session and skill_session.task else LIMITS.child_rounds if worker else LIMITS.main_rounds)
+        graph = AgentToolGraph(maximum_rounds=LIMITS.skill_rounds if skill_session and skill_session.current_skills()
+                               else LIMITS.child_rounds if worker else LIMITS.main_rounds)
         try:
             if self.checkpoints:
                 self.checkpoints.register('run:' + str(run_id), row['conversation_id'], answer_id)
@@ -336,7 +320,10 @@ class AgentRuntime:
                     on_tool_context=budget, on_tool_results=images, before_model=before_model, before_tool=before_tool,
                     on_stream_status=stream_status,
                     receive_inbox=None if worker else receive, settle_answer=None if worker else settle,
-                    on_round_start=None if worker else on_round_start, runtime_state=skill_session.snapshot if skill_session else None, prepare_context=compactor.prepare, checkpointer=saver, thread_id='run:' + str(run_id))
+                    on_round_start=None if worker else on_round_start,
+                    initial_used_skills=skill_session.current_skills() if skill_session else [],
+                    current_used_skills=skill_session.current_skills if skill_session else None,
+                    prepare_context=compactor.prepare, checkpointer=saver, thread_id='run:' + str(run_id))
         except Exception:
             checkpoint.guard()
             raise

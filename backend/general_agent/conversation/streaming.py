@@ -14,7 +14,6 @@ from general_agent.infrastructure.checkpoints import STATE_VERSION, supersede_in
 from general_agent.infrastructure.operations import OperationContext
 from general_agent.conversation.execution import ChatExecution
 from general_agent.infrastructure.settings import StoredSettings
-from general_agent.skills.selection import SkillSnapshot
 
 
 class StreamingChat:
@@ -54,8 +53,8 @@ class StreamingChat:
             self.execution.close_agent_execution(row['id'])
 
     def start(self, conversation_id: UUID, account_id: UUID, content: str, settings: StoredSettings, operation: OperationContext,
-              skill_selections: list[SkillSnapshot] | None = None) -> UUID:
-        """登记原文、技能快照及模型版本，启动可检查点续接的回答。"""
+              skill_names: list[str] | None = None) -> UUID:
+        """登记包含完整 Skill 正文的用户消息、技能名称及模型版本。"""
         message_id = uuid4()
         with self.database.connect() as connection:
             found = connection.execute("SELECT id FROM conversations WHERE id = %s AND user_id = %s AND NOT deleting FOR NO KEY UPDATE", (conversation_id, account_id)).fetchone()
@@ -65,7 +64,10 @@ class StreamingChat:
                 raise ValueError("本会话正在生成回答，请先停止或等待完成。")
             supersede_interrupted(connection, conversation_id)
             user_id = uuid4()
-            connection.execute("INSERT INTO messages (id, conversation_id, role, content, status,skill_selections) VALUES (%s, %s, 'user', %s, 'complete',%s)", (user_id, conversation_id, content,Jsonb(skill_selections or [])))
+            connection.execute("INSERT INTO messages (id, conversation_id, role, content, status,skill_names) VALUES (%s, %s, 'user', %s, 'complete',%s)", (user_id, conversation_id, content,Jsonb(skill_names or [])))
+            skill_runtime = self.execution.agent_runtime.skills
+            if skill_runtime is not None and skill_names:
+                skill_runtime.service.remember_skills(connection, conversation_id, skill_names)
             self.attachments.bind_to_user_message(connection, conversation_id, user_id)
             connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to, operation_id, progress,resume_model_revision) VALUES (%s, %s, 'assistant', '', 'generating', %s, %s, %s,%s)", (message_id, conversation_id, user_id, operation.operation_id, Jsonb(PREPARING_PROGRESS),settings.revision))
             connection.execute("UPDATE conversations SET title = %s WHERE id = %s AND title = '新会话'", (content[:40], conversation_id))
@@ -108,7 +110,7 @@ class StreamingChat:
         """读取带位置的原消息，恢复工作上下文时按水位合入新增历史。"""
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT id,position,role, content,skill_selections FROM messages WHERE conversation_id = %s AND status = 'complete' AND position <= (SELECT position FROM messages WHERE id = %s) ORDER BY position",
+                "SELECT id,position,role, content,skill_names FROM messages WHERE conversation_id = %s AND status = 'complete' AND position <= (SELECT position FROM messages WHERE id = %s) ORDER BY position",
                 (conversation_id, user_id),
             ).fetchall()
         context = ConversationContext(
@@ -171,7 +173,6 @@ class StreamingChat:
         with self.database.connect() as connection:
             connection.execute("UPDATE messages SET status = 'stopped', progress=NULL WHERE id = %s AND status IN ('generating','interrupted')", (message_id,))
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE WHERE id IN (SELECT operation_id FROM messages WHERE id=%s)", (message_id,))
-            connection.execute("UPDATE skill_tasks SET status='interrupted',updated_at=CURRENT_TIMESTAMP WHERE account_id=%s AND conversation_id=%s AND status='active'", (account_id, conversation_id))
             connection.execute("UPDATE model_calls SET status = 'stopped' WHERE assistant_message_id = %s AND status = 'generating' AND EXISTS (SELECT 1 FROM messages WHERE id = %s AND status = 'stopped')", (message_id, message_id))
 
         try:

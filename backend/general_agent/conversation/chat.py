@@ -11,7 +11,6 @@ from general_agent.infrastructure.operations import OperationContext
 from general_agent.conversation.execution import ChatExecution
 from general_agent.infrastructure.provider import ModelFailure
 from general_agent.infrastructure.settings import StoredSettings
-from general_agent.skills.selection import SkillSnapshot
 
 
 class ChatService:
@@ -24,8 +23,8 @@ class ChatService:
         self.graph = graph
 
     def send(self, conversation_id: UUID, account_id: UUID, content: str, settings: StoredSettings, operation: OperationContext,
-             skill_selections: list[SkillSnapshot] | None = None) -> None:
-        """登记用户原文、技能快照和模型版本，同步回答也保存恢复检查点。"""
+             skill_names: list[str] | None = None) -> None:
+        """登记包含完整 Skill 正文的用户消息、技能名称和模型版本。"""
         user_id, answer_id = uuid4(), uuid4()
         with self.database.connect() as connection:
             if not connection.execute('SELECT id FROM conversations WHERE id=%s AND user_id=%s AND NOT deleting FOR NO KEY UPDATE', (conversation_id, account_id)).fetchone():
@@ -33,11 +32,14 @@ class ChatService:
             if connection.execute("SELECT id FROM messages WHERE conversation_id=%s AND status='generating'", (conversation_id,)).fetchone():
                 raise ValueError('本会话正在生成回答，请先停止或等待完成。')
             supersede_interrupted(connection, conversation_id)
-            connection.execute("INSERT INTO messages(id,conversation_id,role,content,status,skill_selections) VALUES(%s,%s,'user',%s,'complete',%s)", (user_id,conversation_id,content,Jsonb(skill_selections or [])))
+            connection.execute("INSERT INTO messages(id,conversation_id,role,content,status,skill_names) VALUES(%s,%s,'user',%s,'complete',%s)", (user_id,conversation_id,content,Jsonb(skill_names or [])))
+            skill_runtime = self.execution.agent_runtime.skills
+            if skill_runtime is not None and skill_names:
+                skill_runtime.service.remember_skills(connection, conversation_id, skill_names)
             self.attachments.bind_to_user_message(connection, conversation_id, user_id)
             connection.execute("INSERT INTO messages(id,conversation_id,role,content,status,reply_to,operation_id,resume_model_revision) VALUES(%s,%s,'assistant','','generating',%s,%s,%s)", (answer_id,conversation_id,user_id,operation.operation_id,settings.revision))
             connection.execute("UPDATE conversations SET title=%s WHERE id=%s AND title='新会话'", (content[:40],conversation_id))
-            rows = connection.execute("SELECT id,position,role,content,skill_selections FROM messages WHERE conversation_id=%s AND status='complete' ORDER BY position", (conversation_id,)).fetchall()
+            rows = connection.execute("SELECT id,position,role,content,skill_names FROM messages WHERE conversation_id=%s AND status='complete' ORDER BY position", (conversation_id,)).fetchall()
         result = self.graph.run(ConversationContext(
             conversation_id=conversation_id,
             account_id=account_id,

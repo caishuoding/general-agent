@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: wontfix
 
 # 完整接入 PPT Master
 

@@ -14,13 +14,16 @@ from general_agent.memory.service import MemoryService
 class SourceDeletion:
     """来源删除先撤回使用许可，再复用正式记忆删除与本机物理清理。"""
 
-    def __init__(self, memory: MemoryDeletion, memories: MemoryService, delete_attachment_file: Callable[[UUID], None] | None = None) -> None:
-        """绑定记忆与附件清理接口，图片远端删除由附件模块负责。"""
+    def __init__(self, memory: MemoryDeletion, memories: MemoryService,
+                 delete_attachment_file: Callable[[UUID], None] | None = None,
+                 delete_generated: Callable[[Any, UUID, UUID], None] | None = None) -> None:
+        """绑定记忆、附件和 Skill 生成目录清理接口。"""
         self.memory=memory
         self.memories=memories
         self.database=memories.database
         self.directory=memories.directory/'attachments'
         self.delete_attachment_file = delete_attachment_file
+        self.delete_generated = delete_generated
 
     def impact(self, connection: Any, kind: str, conversation_id: UUID, source_id: UUID, account_id: UUID) -> dict[str,Any]:
         """按真实来源关系收集关联动作，经正式记忆接口核验可保留项，不按正文扩大影响。"""
@@ -144,6 +147,8 @@ class SourceDeletion:
         connection.execute('DELETE FROM attachments WHERE id=ANY(%s)',(row['attachment_ids'],))
         if row['kind']!='conversation':
             return
+        if self.delete_generated is not None:
+            self.delete_generated(connection, row['user_id'], row['conversation_id'])
         messages=row['message_ids']
         connection.execute('DELETE FROM memory_recalls WHERE message_id=ANY(%s)',(messages,))
         connection.execute("UPDATE memory_updates SET source_deleted=TRUE,source_message_id=NULL,source_conversation_id=NULL,fact='',previous_fact='',error=NULL WHERE source_conversation_id=%s",(row['conversation_id'],))

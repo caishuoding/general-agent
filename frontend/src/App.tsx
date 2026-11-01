@@ -21,9 +21,10 @@ import {
   type ConversationDetail,
   type Message,
   type MessageAttachment,
+  type SkillContent,
 } from "./api";
 import { AttachmentPanel } from "./AttachmentPanel";
-import { SkillTasks } from "./SkillTasks";
+import { GeneratedFiles } from "./GeneratedFiles";
 import { SkillCards, MessageSkills } from "./SkillCards";
 import { LoginScreen, PasswordChangeScreen } from "./AuthScreens";
 import { KnowledgePanel, KnowledgeSelector } from './KnowledgePanel';
@@ -31,7 +32,7 @@ import { KnowledgePanel, KnowledgeSelector } from './KnowledgePanel';
 type Screen = "chat" | "password" | "knowledge";
 
 // 展示响应式会话与独立知识库入口，保持附件和知识库选择各自的业务边界。
-/** 管理会话、技能卡片选择、资料与制作任务，草稿只保存真实需求。 */
+/** 管理会话、技能卡片选择、资料与生成文件，草稿只保存真实需求。 */
 export function App() {
   const [mobile, setMobile] = useState(window.matchMedia("(max-width: 800px)").matches);
   const [navigationOpen, setNavigationOpen] = useState(false);
@@ -530,6 +531,24 @@ export function App() {
     }
   }
 
+  /** 读取一个已安装 Skill 的完整入口，供显式选择构造用户消息。 */
+  async function loadSkillContent(name: string) {
+    return api<SkillContent>(`/skills/${encodeURIComponent(name)}/content`);
+  }
+
+  /** 将单个 Skill 正文包装成清晰的用户消息块。 */
+  function skillMessageBlock(skill: SkillContent) {
+    return `【Skill：${skill.name}】\n\n${skill.content}`;
+  }
+
+  /** 按选择顺序把完整 SKILL.md 放入用户消息，名称元数据仅用于后端授权。 */
+  async function composeSkillContent(names: string[], userContent: string) {
+    if (!names.length) return userContent;
+    const skills = await Promise.all(names.map(loadSkillContent));
+    const blocks = skills.map(skillMessageBlock).join("\n\n");
+    return `${blocks}\n\n【用户需求】\n${userContent}`;
+  }
+
   // 发送真实需求与显式选择，旧失败响应只恢复尚未被用户编辑的同一份草稿。
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -556,9 +575,10 @@ export function App() {
     setSelectedSkills([]);
     setError("");
     try {
+      const modelContent = await composeSkillContent(skills, content);
       const result = await api<ConversationDetail>(
         `/conversations/${targetId}/runs`,
-        { method: "POST", body: JSON.stringify({ content, skills }) },
+        { method: "POST", body: JSON.stringify({ content: modelContent, skills }) },
       );
       if (activeId.current === targetId) {
         selection.current += 1;
@@ -665,7 +685,7 @@ export function App() {
     );
   }
 
-  /** 助手显示 Markdown，用户显示原始需求及可展开的技能描述快照。 */
+  /** 助手显示 Markdown，用户显示完整 Skill 用户消息及技能名称标签。 */
   // 展示主回答、子任务状态及失败重试，子任务详情按需授权加载。
   function renderMessage(message: Message) {
     return (
@@ -687,7 +707,7 @@ export function App() {
         {message.role === "assistant"
           ? <AnswerContent message={message} />
           : <div className="message-content">
-              <MessageSkills skills={message.skill_selections || []} />
+              <MessageSkills names={message.skill_names || []} />
               <span>{message.content}</span>
               {!!message.attachments.length && renderMessageAttachments(message.attachments)}
             </div>}
@@ -859,7 +879,7 @@ export function App() {
                 ) : (
                   <div className="messages">
                     {conversation?.messages.map(renderMessage)}
-                    {conversation && <SkillTasks conversationId={conversation.id} />}
+                    {conversation && <GeneratedFiles conversationId={conversation.id} />}
                     {currentPending && (
                       <>
                         <article className="message user">

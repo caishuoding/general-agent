@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, errorMessage, type SkillDescription, type SkillSelection } from './api';
+import { api, errorMessage, type SkillDescription } from './api';
 
 type Props = { selected: string[]; disabled: boolean; onChange: (names: string[]) => void };
 
@@ -76,12 +76,12 @@ export function SkillCards({ selected, disabled, onChange }: Props) {
   </section>;
 }
 
-/** 聊天历史保留原始需求，以小标签展开当时实际使用的描述快照。 */
-export function MessageSkills({ skills }: { skills: SkillSelection[] }) {
-  /** 每个历史选择独立展开，避免长说明占据普通消息正文。 */
-  function renderSkill(skill: SkillSelection) {
-    return <details key={skill.name} className="message-skill-tag"><summary>{skill.name}</summary><p>{skill.description}</p></details>;
+/** 聊天历史只显示本条消息实际选择的 Skill 名称。 */
+export function MessageSkills({ names }: { names: string[] }) {
+  /** 为每个名称生成轻量标签，不重复保存或展开 Skill 正文。 */
+  function renderSkill(name: string) {
+    return <span key={name} className="message-skill-tag">{name}</span>;
   }
-  if (!skills.length) return null;
-  return <div className="message-skill-tags" aria-label="本条消息选择的技能">{skills.map(renderSkill)}</div>;
+  if (!names.length) return null;
+  return <div className="message-skill-tags" aria-label="本条消息选择的技能">{names.map(renderSkill)}</div>;
 }

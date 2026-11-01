@@ -20,7 +20,6 @@ from general_agent.memory.automatic import AutomaticMemory
 from general_agent.memory.tools import MemoryTools, ToolOutcome
 from general_agent.knowledge.tools import KnowledgeTools
 from general_agent.agent.runner import AgentRuntime
-from general_agent.skills.selection import user_skill_content
 from general_agent.conversation.progress import MessageProgress
 from general_agent.prompts import (
     base_system_prompt,
@@ -72,7 +71,7 @@ class ChatExecution:
         operation: OperationContext,
         rows: list[dict[str, Any]],
     ) -> AnswerPreparation:
-        """刷新记忆与附件并合入工作消息，仅对新增用户原文展开技能描述。"""
+        """刷新记忆与附件并合入工作消息，显式 Skill 正文按原用户消息发送。"""
         content = str(rows[-1]['content'])
         material = self.search.attachments.prepare(conversation_id, account_id)
         memory_material = self.prepare_answer(user_id, content, operation)
@@ -86,7 +85,7 @@ class ChatExecution:
             if row.get('_model_message'):
                 conversation.append(cast(ModelMessage, {key: value for key, value in row.items() if key in ('role', 'content', 'tool_calls', 'tool_call_id', '_context_summary', '_message_id')}))
             else:
-                conversation.append(cast(ModelMessage, {'role': str(row['role']), 'content': user_skill_content(str(row['content']), row.get('skill_selections') or [])
+                conversation.append(cast(ModelMessage, {'role': str(row['role']), 'content': str(row['content'])
                     if row['role'] == 'user' else str(row['content']), **({'_message_id': str(row['id'])} if row.get('id') else {}),
                     **({'_current_request': True} if index == len(rows) - 1 else {})}))
         return AnswerPreparation(conversation, material)
@@ -105,24 +104,14 @@ class ChatExecution:
         on_progress: Callable[[MessageProgress], None] | None = None,
         on_round_start: Callable[[], None] | None = None,
         source_attachment_ids: list[UUID] | None = None,
-        runtime_state: dict[str, Any] | None = None,
     ) -> ToolOutcome:
         """把 State 材料和草稿轮次回调交给主从模块，返回主回答及可信证据快照。"""
         return self.agent_runtime.run(conversation_id, account_id, user_id, assistant_message_id,
-            settings, operation, messages, on_content, source_attachment_ids, on_progress, on_round_start, runtime_state)
+            settings, operation, messages, on_content, source_attachment_ids, on_progress, on_round_start)
 
     def close_agent_execution(self, answer_id: UUID) -> None:
         """幂等关闭根 Agent 及遗留子任务，供回答最终业务提交后调用。"""
         self.agent_runtime.repository.close(answer_id)
-
-    def settle_skill_answer(self, connection: Any, answer_id: UUID, account_id: UUID,
-                            conversation_id: UUID, status: str, runtime_state: dict[str, Any]) -> None:
-        """把回答终态转交 Skill 服务，未配置 Skill 时保持空操作。"""
-        runtime = self.agent_runtime.skills
-        if runtime is not None:
-            runtime.service.settle_answer(
-                connection, answer_id, account_id, conversation_id, status, runtime_state,
-            )
 
     @staticmethod
     def material_attachment_ids(material: AttachmentContext | None) -> list[UUID]:

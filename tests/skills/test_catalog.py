@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from general_agent.skills.catalog import SkillCatalog
+from general_agent.skills.selection import selected_skill_names
 
 
 def test_catalog_preserves_description_and_loads_complete_instruction(tmp_path: Path) -> None:
@@ -21,3 +22,18 @@ def test_catalog_preserves_description_and_loads_complete_instruction(tmp_path: 
     assert loaded['version'] == '1.0'
     with pytest.raises(ValueError, match='路径'):
         catalog.read('ppt-master', '../secret.md')
+
+
+def test_selected_skill_names_supports_multiple_without_duplicates(tmp_path: Path) -> None:
+    """会话选择保留多个真实 Skill 名称并去重，不重新拼描述。"""
+    for name in ('alpha', 'beta'):
+        root = tmp_path / name
+        root.mkdir()
+        (root / 'SKILL.md').write_text(
+            f'---\nname: {name}\ndescription: {name}\n---\n# {name}\n',
+            encoding='utf-8',
+        )
+    catalog = SkillCatalog(tmp_path)
+    assert selected_skill_names(catalog, ['beta', 'alpha', 'beta']) == ['beta', 'alpha']
+    with pytest.raises(ValueError, match='已不可用'):
+        selected_skill_names(catalog, ['missing'])

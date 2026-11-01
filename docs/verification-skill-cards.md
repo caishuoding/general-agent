@@ -1,27 +1,20 @@
 # Skill 卡片显式选择验收记录
 
-日期：2026-10-30。实现依据 `.scratch/skill-completion/spec.md`，审查基准 `a8cc5370d48d4593d5434865baca8adbd41dc209`。
+日期：2026-11-01。实现依据 `.scratch/skill-simplification/spec.md` 与 ADR 0022。
 
-## 已实现
+## 已验证行为
 
-- 聊天输入区读取真实 `GET /api/skills` 目录并显示紧凑名称卡片；不显示简介、版本或展开说明，可多选、取消和清除，输入框只保留用户真实需求。
-- 发送请求提交 `content` 与 Skill 名称；后端从已安装目录解析名称、版本和完整 description，不信任客户端描述。未知名称返回明确错误。
-- 模型边界统一将所选完整 description 与真实需求拼成一条 user message；用户需求只出现一次，多选保持选择顺序，名称去重。
-- 用户消息正文保存原文，`skill_selections` 保存版本化描述快照。历史界面以标签展示并可展开；刷新、后续上下文和失败重试继续使用当时快照。
-- 发送成功清空选择和正文；发送失败按草稿版本恢复，迟到失败不覆盖等待期间的新输入。切换会话或账号清除选择。
-- 桌面和手机名称卡片保持现有聊天视觉语言，仅显示名称与选中标记，支持键盘焦点、触摸、输入法组合状态、屏幕阅读器和横向溢出保护。
+- 卡片只显示真实 Skill 名称，支持多选、取消和清除。
+- 用户点击卡片后不提前创建任务；发送时前端读取每个所选 Skill 的完整 `SKILL.md`，按选择顺序拼入用户消息。
+- 请求同时提交技能名称元数据；后端只校验名称并写入会话已用 Skill，不再拼接 description 或保存描述快照。
+- 历史消息显示完整用户消息与轻量 Skill 名称标签，重试直接沿用原内容。
+- 发送成功清空选择和草稿；失败恢复原选择与草稿，迟到失败不覆盖用户后来输入。
+- 手机、键盘、输入法、触摸和横向溢出行为保持可用。
 
 ## 自动验证
 
-- `python -m pytest tests/skills/test_message_selection.py -q`：2 项通过，覆盖单用户消息拼接、多选顺序、去重、未知名称和历史/重试快照。
-- 消息、会话、LangGraph State 和提示词相关测试：20 项通过。
-- `pnpm --dir frontend exec playwright test skill-cards.spec.ts`：3 项通过，覆盖桌面选择发送、历史展开、手机输入法及失败恢复。
-- `TEST_SKILL_DOCKER=1 TEST_SKILL_BROWSER=1 python -m pytest tests/skills -q`：11 项通过，覆盖完整 Skill 运行、原生 PPT 导出和 Chromium 预览。
-- 移动端键盘配置 3 项、图片配置 1 项、来源删除配置 1 项通过。软键盘打开时技能卡片临时收起，优先保留历史阅读区和输入框；键盘收起后恢复卡片与选择状态。
-- 前端生产构建和 TypeScript 检查通过；新增后端及测试范围 mypy 检查通过。
-
-默认浏览器全量配置为 20 项通过、2 项失败。失败为既有 PDF 说明文案和断流提示预期；本次新增 3 项全部通过。搜索配置在重复执行中一次通过、一次未命中既有精确流式文本断言；实际回答已出现，属于测试时序问题，未发现卡片功能回归。
-
-最终完整 Python 套件单独运行为 356 项通过、5 项跳过、3 项失败。3 项失败为起始基准中已经复现的历史切片迁移初始化问题，以及搜索同步/流式两个旧重试预期；本次全部 Skill 测试通过，与消息技能快照迁移无关。
-
-Standards 与 Spec 双轴审查均无必须修复项。当前环境只有一个真实 Skill，因此浏览器未实际同时点击两张卡片；多选顺序、去重和快照稳定性由后端接口测试覆盖。
+- `pnpm --dir frontend exec playwright test skill-cards.spec.ts`：3 项通过。
+- `pnpm --dir frontend exec tsc --noEmit`：通过。
+- `pnpm --dir frontend build`：通过。
+- `pytest tests/skills/test_message_selection.py`：通过，验证完整正文只出现一次、名称去重、未知名称拒绝。
+- `pytest tests/skills/test_simplified_skill_content.py`：通过，验证完整入口接口。

@@ -1,4 +1,4 @@
-"""公开 Skill 选择和制作任务工具，所有身份由后端绑定。"""
+"""公开 Skill 加载、按 Run 工作区和生成文件工具。"""
 
 from typing import Any, Literal
 from uuid import UUID
@@ -9,90 +9,85 @@ from general_agent.infrastructure.agent_limits import LIMITS
 
 
 class SkillInput(BaseModel):
-    """限定加载名称和可选的显式续接任务，不接受模型指定安装路径。"""
+    """按真实安装名称加载入口，不接受文件系统根目录。"""
     model_config = ConfigDict(extra='forbid', strict=True)
     name: str
-    task_id: str | None = None
 
 
-class TaskInput(BaseModel):
-    """所有工作工具必须明确指出已激活的任务。"""
+class SkillFileInput(BaseModel):
+    """读取当前会话已使用 Skill 根目录内的相对文本文件。"""
     model_config = ConfigDict(extra='forbid', strict=True)
-    task_id: str
-
-
-class ReadSkillInput(TaskInput):
-    """区分按需加载可信 Markdown 指令与读取脚本、索引等参考数据。"""
+    skill: str
     path: str
-    instruction: bool = True
 
 
-class ContextInput(TaskInput):
-    """保留当前阶段已读指令，显式卸载其他阶段文档以管理上下文。"""
-    paths: list[str]
-
-
-class ReadFileInput(TaskInput):
-    """读取目录或文本，范围受限且保留后续位置。"""
+class ReadFileInput(BaseModel):
+    """读取当前会话 workspace 的目录或文本，范围受限并保留续读位置。"""
+    model_config = ConfigDict(extra='forbid', strict=True)
     path: str = '.'
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=20000, ge=1, le=100000)
 
 
-class WriteFileInput(TaskInput):
-    """写入任务目录中的文本文件。"""
+class WriteFileInput(BaseModel):
+    """写入当前会话 workspace 中的相对文本文件。"""
+    model_config = ConfigDict(extra='forbid', strict=True)
     path: str
     content: str = Field(max_length=2_000_000)
 
 
-class CommandInput(TaskInput):
-    """在隔离任务容器异步执行命令，不提供 Docker 或宿主参数。"""
+class CommandInput(BaseModel):
+    """在当前 Run 的隔离容器中异步执行命令。"""
+    model_config = ConfigDict(extra='forbid', strict=True)
     command: str = Field(min_length=1, max_length=30000)
     seconds: int = Field(default=LIMITS.skill_command_default_seconds, ge=1, le=LIMITS.skill_command_seconds)
 
 
-class PollInput(TaskInput):
-    """读取实际执行状态及有界日志，可短暂等待以免模型空轮询。"""
+class PollInput(BaseModel):
+    """读取当前 Run 命令的真实状态和有界日志。"""
+    model_config = ConfigDict(extra='forbid', strict=True)
     command_id: str
     offset: int = Field(default=0, ge=0)
     wait_seconds: int = Field(default=10, ge=0, le=LIMITS.skill_poll_seconds)
 
 
-class ImportInput(TaskInput):
-    """将用户有权使用的会话附件或已选知识库原件复制到任务输入目录。"""
+class ImportInput(BaseModel):
+    """将用户有权使用的会话附件或知识库原件复制到当前会话 workspace。"""
+    model_config = ConfigDict(extra='forbid', strict=True)
     source_id: str
     kind: str = 'attachment'
 
 
-class PathInput(TaskInput):
-    """选择真实工作文件用于查看或发布。"""
+class PathInput(BaseModel):
+    """选择当前会话 workspace 中的真实文件用于检查或发布。"""
+    model_config = ConfigDict(extra='forbid', strict=True)
     path: str
 
 
-class PreviewInput(TaskInput):
-    """通过真实项目预览锁发现端口，不允许模型指定任意主机。"""
+class PreviewInput(BaseModel):
+    """通过当前 Run 项目预览锁发现端口，不允许模型指定任意主机。"""
+    model_config = ConfigDict(extra='forbid', strict=True)
     project_path: str
     surface: Literal['preview', 'confirmation'] = 'preview'
 
 
 DEFINITIONS: list[tuple[str, str, type[BaseModel]]] = [
-    ('load_skill', '按完整 description 选择已安装 Skill 后加载完整入口。续接必须传原 task_id，新任务省略。介绍问题不授权开始制作。', SkillInput),
-    ('read_skill_file', '读取已激活 Skill 中的相对文件。Markdown 工作流使用 instruction=true，脚本或索引使用 false；可信指令将在下一轮完整注入。', ReadSkillInput),
-    ('set_skill_context', '保留 paths 中已经完整加载的阶段指令，卸载其余支持文件；SKILL.md 始终保留。跨阶段切换时按上游要求管理，不能丢弃仍适用的强制规则。', ContextInput),
-    ('read_work_file', '列出任务目录或分段读取 UTF-8 文本，path 相对于 /workspace；根据 next_offset 续读。', ReadFileInput),
-    ('write_work_file', '在当前任务 /workspace 内创建或修改文本，不接受宿主路径。', WriteFileInput),
-    ('run_skill_command', '在隔离任务容器 /workspace 异步执行 shell 命令，返回 command_id，之后用 poll_skill_command 取得真实退出码；读取 Skill 后按其命令执行。', CommandInput),
-    ('poll_skill_command', '等待并读取当前任务命令的真实状态和有界日志。running 表示尚未完成，非零退出码必须检查并按工作流修复。', PollInput),
-    ('import_skill_source', '将本会话有效 attachment 原件或当前已选知识库 knowledge 原件复制到工作目录；返回原文件名和实际路径。', ImportInput),
-    ('view_work_image', '将任务内真实 PNG/JPEG 图片发送给视觉模型检查；SVG/PDF 先在隔离环境渲染为 PNG。', PathInput),
-    ('publish_skill_file', '将真实工作文件保存为不可变交付副本并返回下载地址；必须实际导出并通过上游检查后发布，不能伪造链接。', PathInput),
-    ('open_skill_preview', '上游服务启动后打开受保护页面。surface=preview 读取 live_preview/lock.json；surface=confirmation 读取 .confirm_ui.lock，支持默认流程两阶段方案确认。', PreviewInput),
+    ('load_skill', '加载已安装 Skill 的完整 SKILL.md。返回内容不创建任务、目录或会话状态；可多次调用加载多个 Skill。', SkillInput),
+    ('read_skill_file', '读取当前会话已使用 Skill 根目录内的相对文本文件；不同 Skill 使用各自固定根目录。', SkillFileInput),
+    ('read_work_file', '列出当前会话工作目录或分段读取 UTF-8 文本，path 为 workspace 相对路径。', ReadFileInput),
+    ('write_work_file', '在当前会话 workspace 内创建或修改文本，不接受宿主绝对路径。', WriteFileInput),
+    ('run_skill_command', '在隔离容器 /workspace 异步执行 shell 命令，返回 command_id，之后用轮询取得真实退出码。', CommandInput),
+    ('poll_skill_command', '等待并读取当前 Run 命令的真实状态和有界日志；非零退出码必须检查并修复。', PollInput),
+    ('import_skill_source', '将本会话有效 attachment 原件或当前已选知识库原件复制到 workspace；返回相对路径。', ImportInput),
+    ('view_work_image', '将当前 Run 中真实 PNG/JPEG 图片发送给视觉模型检查；SVG/PDF 先由上游脚本渲染。', PathInput),
+    ('publish_skill_file', '将当前 Run 的真实工作文件保存为不可变交付副本并返回下载地址。', PathInput),
+    ('open_skill_preview', '读取当前 Run 项目的预览锁并返回短期授权页面；surface=confirmation 使用确认页锁。', PreviewInput),
 ]
 SKILL_TOOLS = {name for name, _, _ in DEFINITIONS}
 
 
 def skill_tools() -> list[dict[str, Any]]:
-    """返回严格参数定义，后端执行仍逐次验证激活身份和会话权限。"""
+    """返回严格参数定义，身份和目录始终由后端当前 Run 注入。"""
     return [{'type': 'function', 'function': {'name': name, 'description': description,
         'parameters': model.model_json_schema()}} for name, description, model in DEFINITIONS]
 
@@ -101,7 +96,7 @@ def validate(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """统一校验工具参数并规范化 UUID，拒绝额外字段与错误类型。"""
     model = next(model for key, _, model in DEFINITIONS if key == name)
     result = model.model_validate(arguments).model_dump()
-    for key in ('task_id', 'command_id', 'source_id'):
+    for key in ('command_id', 'source_id'):
         if result.get(key):
             result[key] = UUID(result[key])
     return result

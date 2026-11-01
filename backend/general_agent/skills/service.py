@@ -1,213 +1,190 @@
-"""以账号与会话为授权单位保存 Skill 制作任务和可续接的工作文件。"""
+"""管理会话 Skill 名称、会话工作区、Run 命令目录和不可变生成文件。"""
 
 import hashlib
-import json
 import mimetypes
 import shutil
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from psycopg.types.json import Jsonb
-
-from general_agent.agent.repository import AgentRepository
 from general_agent.infrastructure.database import Database
 from general_agent.skills.catalog import SkillCatalog
 from general_agent.skills.files import SafeFiles
 
 
 class SkillService:
-    """集中任务身份、版本、可信指令和文件授权，调用者不能指定磁盘根目录。"""
+    """将 Skill、文件与命令绑定到现有账号、会话、回答和 Agent Run。"""
 
     def __init__(self, database: Database, directory: Path, catalog: SkillCatalog) -> None:
-        """绑定业务存储和受信任目录；任务文件不与应用配置混放。"""
+        """绑定业务存储、生成文件根目录与只读 Skill 目录。"""
         self.database, self.catalog = database, catalog
-        self.directory = directory.resolve() / 'skill-tasks'
-        self.repository = AgentRepository(database)
-
-    def list(self, account: UUID, conversation: UUID) -> list[dict[str, Any]]:
-        """返回本会话任务摘要，普通聊天不自动激活旧任务的工作流。"""
-        self.conversation(account, conversation)
-        with self.database.connect() as connection:
-            return connection.execute('SELECT id,skill,version,status,updated_at FROM skill_tasks WHERE account_id=%s AND conversation_id=%s ORDER BY updated_at DESC LIMIT 30', (account, conversation)).fetchall()
+        self.directory = directory.resolve() / 'generated'
 
     def conversation(self, account: UUID, conversation: UUID) -> None:
-        """每次访问核对所属账号和未删除会话，其他账号一律视为不存在。"""
+        """每次访问核对账号与未删除会话，其他账号一律视为不存在。"""
         with self.database.connect() as connection:
-            if not connection.execute('SELECT id FROM conversations WHERE id=%s AND user_id=%s AND NOT deleting', (conversation, account)).fetchone():
-                raise LookupError('会话不存在。')
+            row = connection.execute(
+                'SELECT id FROM conversations WHERE id=%s AND user_id=%s AND NOT deleting',
+                (conversation, account),
+            ).fetchone()
+        if row is None:
+            raise LookupError('会话不存在。')
 
-    def get(self, task: UUID, account: UUID, conversation: UUID) -> dict[str, Any]:
-        """读取任务并复核来源，撤销后删除复制资料及产物，不允许旧任务继续外发。"""
+    def run(self, account: UUID, conversation: UUID, run_id: UUID) -> dict[str, Any]:
+        """复核 Agent Run 属于当前账号和会话，返回回答及执行身份。"""
         self.conversation(account, conversation)
         with self.database.connect() as connection:
-            row = connection.execute('SELECT * FROM skill_tasks WHERE id=%s AND account_id=%s AND conversation_id=%s', (task, account, conversation)).fetchone()
+            row = connection.execute(
+                'SELECT r.id,a.account_id,a.conversation_id '
+                'FROM agent_runs r JOIN agents a ON a.id=r.agent_id '
+                'WHERE r.id=%s AND a.account_id=%s AND a.conversation_id=%s '
+                'AND a.parent_agent_id IS NULL',
+                (run_id, account, conversation),
+            ).fetchone()
         if row is None:
-            raise LookupError('制作任务不存在。')
-        if row['status'] == 'revoked':
-            raise ValueError('制作任务的来源已撤销，请重新创建任务。')
-        if row['source_snapshot'] != self.repository.snapshot(conversation):
-            shutil.rmtree(self.directory / str(task), ignore_errors=True)
-            with self.database.connect() as connection:
-                connection.execute("UPDATE skill_tasks SET status='revoked',updated_at=CURRENT_TIMESTAMP WHERE id=%s", (task,))
-            raise ValueError('制作任务资料范围已变化，旧工作文件已清理，请重新创建任务。')
+            raise LookupError('Agent 执行不存在。')
         return row
 
-    def activate(self, account: UUID, conversation: UUID, skill: str, task: UUID | None, creation_id: UUID | None = None) -> dict[str, Any]:
-        """新建或续接固定版本任务，稳定创建身份使重放不产生重复工作目录。"""
+    def remember_skills(self, connection: Any, conversation: UUID, names: list[str]) -> None:
+        """在发送事务内记录会话使用过的 Skill 名称，供后续消息继续读取。"""
+        for name in dict.fromkeys(names):
+            connection.execute(
+                'INSERT INTO conversation_skills(conversation_id,skill_name) VALUES(%s,%s) '
+                'ON CONFLICT(conversation_id,skill_name) DO UPDATE SET last_used_at=CURRENT_TIMESTAMP',
+                (conversation, name),
+            )
+
+    def conversation_skills(self, account: UUID, conversation: UUID) -> list[str]:
+        """按首次使用顺序返回会话中所有已使用 Skill 名称。"""
         self.conversation(account, conversation)
-        entry = self.catalog.read(skill, 'SKILL.md')
-        if task is not None:
-            row = self.get(task, account, conversation)
-            if row['skill'] != skill or row['entry_digest'] != entry['digest'] or row['version'] != entry['version']:
-                raise ValueError('任务 Skill 版本与安装版本不一致，不能静默升级旧任务。')
-            row['previous_instruction_paths'] = list(row['instruction_files'])
-            row['instruction_files'] = {'SKILL.md': entry['file_digest']}
-            with self.database.connect() as connection:
-                connection.execute("UPDATE skill_tasks SET status='active',updated_at=CURRENT_TIMESTAMP,instruction_files=%s WHERE id=%s", (Jsonb(row['instruction_files']), task))
-            row['status'] = 'active'
-            return row
-        identifier = creation_id or uuid4()
         with self.database.connect() as connection:
-            existing = connection.execute('SELECT id FROM skill_tasks WHERE id=%s AND account_id=%s AND conversation_id=%s', (identifier, account, conversation)).fetchone()
-        if existing:
-            (self.directory / str(identifier) / 'workspace').mkdir(parents=True, mode=0o700, exist_ok=True)
-            return self.get(identifier, account, conversation)
-        snapshot = self.repository.snapshot(conversation)
-        files = {'SKILL.md': entry['file_digest']}
-        with self.database.connect() as connection:
-            created = connection.execute('INSERT INTO skill_tasks(id,account_id,conversation_id,skill,version,entry_digest,instruction_files,source_snapshot) VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *',
-                (identifier, account, conversation, skill, entry['version'], entry['digest'], Jsonb(files), Jsonb(snapshot))).fetchone()
-        assert created is not None
-        (self.directory / str(identifier) / 'workspace').mkdir(parents=True, mode=0o700)
-        return created
+            rows = connection.execute(
+                'SELECT skill_name FROM conversation_skills WHERE conversation_id=%s '
+                'ORDER BY first_used_at,skill_name',
+                (conversation,),
+            ).fetchall()
+        return [str(row['skill_name']) for row in rows]
 
-    def prepare_library(self, task: UUID, skill: str) -> Path | None:
-        """按任务复制模板库，允许上游注册模板且不改写安装目录或其他用户资源。"""
-        source = self.catalog.directory / skill / 'templates'
-        if not source.is_dir():
-            return None
-        destination = self.directory / str(task) / 'library'
-        if not destination.exists():
-            shutil.copytree(source, destination)
-        return destination
+    def conversation_directory(self, account: UUID, conversation: UUID) -> Path:
+        """返回已授权会话的生成根目录，不向模型暴露宿主路径。"""
+        self.conversation(account, conversation)
+        return self.directory / str(account) / str(conversation)
 
-    def load_file(self, task: UUID, account: UUID, conversation: UUID, path: str, instruction: bool,
-                  check: Callable[[str], None] | None = None) -> dict[str, Any]:
-        """完整读取引用文件，可信 Markdown 预检通过才保存，任务模板始终作为参考资料。"""
-        row = self.get(task, account, conversation)
-        if Path(path).parts and Path(path).parts[0] == 'templates':
-            library = self.prepare_library(task, row['skill'])
-            if instruction:
-                raise ValueError('任务模板库是可修改参考资料，请使用 instruction=false 读取。')
-            if library is None:
-                raise ValueError('该 Skill 没有模板库。')
-            data = SafeFiles(library).read(str(Path(path).relative_to('templates')), 0, 2_000_000)
-            if data.get('next_offset') is not None:
-                raise ValueError('模板资料过大，请按范围读取。')
-            return {'path': path, 'absolute_path': f'/opt/skills/{row["skill"]}/{path}', **data}
-        item = self.catalog.read(row['skill'], path)
-        if instruction:
-            if Path(path).suffix.lower() != '.md':
-                raise ValueError('只有已安装的 Markdown 文档可以作为 Skill 指令加载。')
-            files = {**row['instruction_files'], path: item['file_digest']}
-            if check is not None:
-                check(self.instructions(task, account, conversation, files))
-            with self.database.connect() as connection:
-                connection.execute('UPDATE skill_tasks SET instruction_files=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s', (Jsonb(files), task))
-        return item
+    def workspace(self, account: UUID, conversation: UUID, create: bool = False) -> Path:
+        """返回或按需创建会话共享 workspace，所有可编辑项目限制在这里。"""
+        root = self.conversation_directory(account, conversation) / 'workspace'
+        if create:
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return root
 
-    def instructions(self, task: UUID, account: UUID, conversation: UUID, files: dict[str, str] | None = None) -> str:
-        """重读活动或候选指令集合并验证摘要；候选集合只用于预算预检，不写入状态。"""
-        row = self.get(task, account, conversation)
-        parts = [f'已激活 Skill {row["skill"]}，版本 {row["version"]}。SKILL_DIR=/opt/skills/{row["skill"]}；工作目录=/workspace；任务 ID={task}。']
-        for path, digest in (files if files is not None else row['instruction_files']).items():
-            item = self.catalog.read(row['skill'], path)
-            if item['file_digest'] != digest:
-                raise ValueError('已激活 Skill 文件发生变化，请恢复固定版本后继续。')
-            parts.append(f'可信 Skill 指令：{item["absolute_path"]}\n{item["content"]}')
-        return '\n\n'.join(parts)
+    def command_directory(self, account: UUID, conversation: UUID, run_id: UUID) -> Path:
+        """校验当前 Run 后返回会话级命令日志目录。"""
+        self.run(account, conversation, run_id)
+        root = self.conversation_directory(account, conversation) / 'commands'
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return root
 
-    def read(self, task: UUID, account: UUID, conversation: UUID, relative: str, offset: int = 0, limit: int = 20000) -> dict[str, Any]:
-        """按字符范围读取任务文本或有界列出目录，明确续读位置且不伪称完整。"""
-        self.get(task, account, conversation)
-        return SafeFiles(self.directory / str(task) / 'workspace').read(relative, offset, limit)
+    def prepare_libraries(self, account: UUID, conversation: UUID,
+                          skills: list[str]) -> dict[str, Path]:
+        """为当前会话复制每个已用 Skill 的模板库，避免跨会话互相修改。"""
+        root = self.conversation_directory(account, conversation) / 'libraries'
+        libraries: dict[str, Path] = {}
+        for skill in skills:
+            source = self.catalog.directory / skill / 'templates'
+            if not source.is_dir():
+                continue
+            destination = root / skill
+            if not destination.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                shutil.copytree(source, destination)
+            libraries[skill] = destination
+        return libraries
 
-    def write(self, task: UUID, account: UUID, conversation: UUID, relative: str, content: str) -> dict[str, Any]:
-        """在受限工作目录保存完整 UTF-8 文本，不解释内容中的指令。"""
-        self.get(task, account, conversation)
-        if len(content.encode()) > 2_000_000:
+    def read_work(self, account: UUID, conversation: UUID, run_id: UUID,
+                  relative: str, offset: int, limit: int) -> dict[str, Any]:
+        """按范围读取当前会话 workspace 文本或目录清单，并复核 Run 身份。"""
+        self.run(account, conversation, run_id)
+        return SafeFiles(self.workspace(account, conversation)).read(relative, offset, limit)
+
+    def write_work(self, account: UUID, conversation: UUID, run_id: UUID,
+                   relative: str, content: str) -> dict[str, Any]:
+        """在会话 workspace 内保存文本，并用当前 Run 复核写入权限。"""
+        self.run(account, conversation, run_id)
+        data = content.encode('utf-8')
+        if len(data) > 2_000_000:
             raise ValueError('单次写入超过两百万字节。')
-        with SafeFiles(self.directory / str(task) / 'workspace').file(relative, write=True) as destination:
-            destination.write(content.encode('utf-8'))
-        return {'path': '/workspace/' + relative, 'bytes': len(content.encode('utf-8'))}
+        root = self.workspace(account, conversation, create=True)
+        with SafeFiles(root).file(relative, write=True) as destination:
+            destination.write(data)
+        return {'path': relative, 'bytes': len(data)}
 
-    def publish(self, task: UUID, account: UUID, conversation: UUID, answer: UUID, relative: str, artifact_id: UUID | None = None) -> dict[str, Any]:
-        """按稳定发布身份保存不可变副本，检查点重放复用原交付且不覆盖内容。"""
-        self.get(task, account, conversation)
-        identifier = artifact_id or uuid4()
+    def publish(self, account: UUID, conversation: UUID, run_id: UUID,
+                relative: str, file_id: UUID | None = None) -> dict[str, Any]:
+        """保存会话生成文件的不可变副本，并记录创建它的 Run。"""
+        self.run(account, conversation, run_id)
+        identifier = file_id or uuid4()
         with self.database.connect() as connection:
-            existing = connection.execute('SELECT filename FROM skill_artifacts WHERE id=%s AND task_id=%s AND answer_id=%s', (identifier, task, answer)).fetchone()
+            existing = connection.execute(
+                'SELECT filename FROM generated_files WHERE id=%s AND account_id=%s '
+                'AND conversation_id=%s AND created_by_run_id=%s',
+                (identifier, account, conversation, run_id),
+            ).fetchone()
         if existing:
-            return {'artifact_id': str(identifier), 'filename': existing['filename'],
-                'url': f'/api/conversations/{conversation}/skill-artifacts/{identifier}/file'}
-        storage = self.directory / str(task) / 'artifacts'
-        storage.mkdir(exist_ok=True)
+            return {'file_id': str(identifier), 'filename': existing['filename'],
+                    'url': f'/api/conversations/{conversation}/generated-files/{identifier}/file'}
+        root = self.workspace(account, conversation)
+        with SafeFiles(root).file(relative) as source:
+            data = source.read(200_000_001)
+        if len(data) > 200_000_000:
+            raise ValueError('生成文件超过 200 MB。')
+        storage = self.conversation_directory(account, conversation) / 'artifacts'
+        storage.mkdir(parents=True, exist_ok=True, mode=0o700)
         destination = storage / str(identifier)
-        if not destination.exists():
-            with SafeFiles(self.directory / str(task) / 'workspace').file(relative) as source:
-                data = source.read(200_000_001)
-            if len(data) > 200_000_000:
-                raise ValueError('产物超过 200 MB。')
-            temporary = storage / (str(identifier) + '.tmp')
-            temporary.write_bytes(data)
-            temporary.replace(destination)
-        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        temporary = storage / (str(identifier) + '.tmp')
+        temporary.write_bytes(data)
+        temporary.replace(destination)
+        digest = hashlib.sha256(data).hexdigest()
         filename = Path(relative).name
         mime = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
         with self.database.connect() as connection:
-            connection.execute('INSERT INTO skill_artifacts(id,task_id,answer_id,filename,digest,media_type) VALUES(%s,%s,%s,%s,%s,%s)', (identifier, task, answer, filename, digest, mime))
-        return {'artifact_id': str(identifier), 'filename': filename,
-            'url': f'/api/conversations/{conversation}/skill-artifacts/{identifier}/file'}
+            connection.execute(
+                'INSERT INTO generated_files(id,account_id,conversation_id,created_by_run_id,'
+                'path,filename,digest,media_type) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',
+                (identifier, account, conversation, run_id, str(destination), filename, digest, mime),
+            )
+        return {'file_id': str(identifier), 'filename': filename,
+                'url': f'/api/conversations/{conversation}/generated-files/{identifier}/file'}
 
-    def artifact(self, artifact: UUID, account: UUID, conversation: UUID) -> tuple[Path, dict[str, Any]]:
-        """下载前重新验证账号、会话、来源及产物摘要。"""
+    def list_files(self, account: UUID, conversation: UUID) -> list[dict[str, Any]]:
+        """返回当前会话最近生成的文件，不暴露其他会话或用户记录。"""
+        self.conversation(account, conversation)
         with self.database.connect() as connection:
-            row = connection.execute('SELECT a.* FROM skill_artifacts a JOIN skill_tasks t ON t.id=a.task_id WHERE a.id=%s AND t.account_id=%s AND t.conversation_id=%s', (artifact, account, conversation)).fetchone()
+            return connection.execute(
+                'SELECT id,filename,media_type,created_at FROM generated_files '
+                'WHERE account_id=%s AND conversation_id=%s ORDER BY created_at DESC,id DESC LIMIT 100',
+                (account, conversation),
+            ).fetchall()
+
+    def artifact(self, file_id: UUID, account: UUID, conversation: UUID) -> tuple[Path, dict[str, Any]]:
+        """下载前重新验证账号、会话和文件摘要。"""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                'SELECT * FROM generated_files WHERE id=%s AND account_id=%s AND conversation_id=%s',
+                (file_id, account, conversation),
+            ).fetchone()
         if row is None:
             raise LookupError('生成文件不存在。')
-        self.get(row['task_id'], account, conversation)
-        path = self.directory / str(row['task_id']) / 'artifacts' / str(artifact)
+        path = Path(str(row['path']))
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != row['digest']:
             raise LookupError('生成文件已丢失或变化。')
         return path, row
 
-    def runtime_state_for_answer(self, connection: Any, answer_id: UUID) -> dict[str, Any]:
-        """读取主执行保存的 Skill 运行快照，供恢复和终态迁移共同使用。"""
-        saved = connection.execute(
-            "SELECT s.payload FROM agent_messages s JOIN agent_runs r ON r.id=s.run_id "
-            "JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s AND "
-            "a.parent_agent_id IS NULL AND s.step_key='runtime:skill'",
-            (answer_id,),
-        ).fetchone()
-        payload = saved.get('payload') if isinstance(saved, dict) else None
-        return dict(payload) if isinstance(payload, dict) else {}
-
-    def settle_answer(self, connection: Any, answer_id: UUID, account: UUID,
-                      conversation: UUID, status: str, runtime_state: dict[str, Any]) -> None:
-        """按优先使用当前 State 的规则把活动任务同步为回答终态。"""
-        task_id = runtime_state.get('task_id') if isinstance(runtime_state, dict) else None
-        if not task_id:
-            task_id = self.runtime_state_for_answer(connection, answer_id).get('task_id')
-        if not isinstance(task_id, str):
-            return
-        connection.execute(
-            "UPDATE skill_tasks SET status=%s,updated_at=CURRENT_TIMESTAMP "
-            "WHERE id=%s AND account_id=%s AND conversation_id=%s AND status='active'",
-            (status, UUID(task_id), account, conversation),
-        )
-
-    def summaries(self, account: UUID, conversation: UUID) -> str:
-        """仅序列化任务摘要，不在普通聊天恢复过去的制作工作流。"""
-        return json.dumps(self.list(account, conversation), ensure_ascii=False, default=str)
+    def preview(self, token_digest: str) -> dict[str, Any] | None:
+        """按能力令牌摘要读取未过期预览及有效用户状态。"""
+        with self.database.connect() as connection:
+            return connection.execute(
+                'SELECT p.*,u.status AS user_status FROM skill_previews p '
+                'JOIN users u ON u.id=p.account_id '
+                'WHERE p.token_digest=%s AND p.expires_at>CURRENT_TIMESTAMP',
+                (token_digest,),
+            ).fetchone()

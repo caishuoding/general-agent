@@ -1,4 +1,6 @@
-Status: ready-for-agent
+Status: wontfix
+
+> 已由 `.scratch/skill-simplification/spec.md` 取代：显式选择改为前端拼接完整 `SKILL.md`，不再保存 description 快照。
 
 实现状态：已完成，验收记录见 `docs/verification-skill-cards.md`。
 

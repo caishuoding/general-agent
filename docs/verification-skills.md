@@ -1,41 +1,28 @@
-# PPT Master 完整接入验证
+# PPT Master 无状态 Skill 验收记录
 
-日期：2026-10-30。实现依据 `.scratch/skill-runtime/spec.md`，审查基准 `f681d1a68db9c7fa63e001673ed2bb569c54ce9b`。完整上游固定于 `5e8856be0da8e6bc85c4aa28acc614478f7b7137`；发行目录与该提交逐文件比较无差异。
+日期：2026-11-01。实现依据 `.scratch/skill-simplification/spec.md` 与 ADR 0022。上游固定于 `5e8856be0da8e6bc85c4aa28acc614478f7b7137`。
 
 ## 已验证行为
 
-- 模型 HTTP 请求每次获得上游完整 description；自主调用 load_skill 后完整入口进入唯一系统消息；普通聊天不携带制作工作流或空任务资料消息。
-- 实际聊天工具链完成写入、异步执行、轮询、上游归属检查、SVG 最终质量检查、后处理和原生 DrawingML 导出。下载包中真实包含文字和 p:sp，未用整页图片替代。
-- 中文 `01_封面.svg` 可经受保护代理读取、标注并保存草稿；真实 Chromium 已加载脚本、样式并渲染 SVG。默认 Confirm UI 使用独立锁发现真实端口，页面及第一阶段推荐资料可经同一授权代理访问。
-- 用户可上传 PPTX 模板等原件；交付副本不可变；其他账号无法读取任务或下载。管理员可配置媒体服务，但读取接口不返回任何变量值。
-- 真实容器仅看到自己工作目录及模板库，应用配置和 Docker socket 不存在；取消命令被终止。工作目录符号链接不能被转换成宿主额外挂载；宿主文件操作逐级使用目录描述符与 O_NOFOLLOW。
-- 指令预检失败不保存超预算集合；续接保留阶段和历史路径，从完整入口按需重读。续接/命令启动更新任务活动时间，维护不终止实际运行的命令。
-- 已构建完整运行镜像并通过 pip check、系统 Chromium 截图及上游完整性检查；Python 依赖锁保存在 deploy/skills/requirements.lock。真实公网代理请求返回 200，回环目标返回 403。本机 Fake-IP DNS 使用文档列明的 HTTPS DNS 配置，未放宽私网限制。
+- 用户显式选择由前端读取完整 `SKILL.md` 并拼入用户消息；后端不重拼 description。
+- 模型自主调用 `load_skill` 直接取得完整正文，不返回或保存 `task_id`。
+- `read_skill_file` 仅允许读取会话已用 Skill 根目录内的相对文本；多 Skill 和跨消息集合均保留。
+- 工作文件、模板和正式文件按会话持久化；命令和预览绑定当前 Run，生成文件用 `created_by_run_id` 记录来源。
+- 删除会话会停止全部相关 Run 容器并删除整个会话生成目录。
+- 文件工具不接收任务、账号、会话、Run 或绝对路径；后端通过当前 checkpoint 解析根目录。
+- 生成文件不可变并重新核验账号、会话和 SHA-256。
+- 真实 Docker 工具链完成写入、异步执行、轮询、SVG 检查、原生 PPTX 导出、发布和预览代理。
+- 旧 `skill_tasks`、`runtime_state`、`instruction_files` 与 `skill_selections` 已从运行路径移除；测试迁移直接删除旧任务数据。
 
 ## 测试结果
 
-最终新增 Skill 测试：`TEST_SKILL_DOCKER=1 TEST_SKILL_BROWSER=1 python -m pytest tests/skills -q`，9 项通过，包含真实 Docker 与 Chromium。
+- `TEST_SKILL_DOCKER=1 TEST_SKILL_BROWSER=1 pytest tests/skills -q`：11 passed。
+- `mypy backend/general_agent`：通过。
+- 前端 TypeScript 和 production build：通过。
+- PPT Master attribution guard：通过。
+- 完整 Python 套件多次运行到 75% 左右时本地测试 PostgreSQL 异常断开，后续错误为数据库断连级联；断连前的失败候选已单独复验通过，附件、文档、搜索和 Skill 模块分别通过。未将此次运行伪报为全绿。
+- Standards/Spec 双轴审查已完成；审查发现由显式正文校验、预览 `answer_id`、提示词和类型注释问题已在提交前修正。
 
-受影响的图片、会话、断流恢复和 Skill 接口回归：30 项通过，3 项真实容器/浏览器测试因该次未设置开关跳过，随后已在上述 9 项中实际运行。
+## 范围
 
-前端构建与类型检查通过；后端及新增测试类型检查通过。全仓 mypy 仍有 5 个既有错误，位于未修改的 tests/app/test_agent_graph.py 和 tests/auth/test_admin.py，审查已核对它们相对起始提交无差异。
-
-浏览器主配置 17 项通过、2 项失败；图片、搜索、来源删除和移动端独立配置全部通过（共 6 项）。失败的 documents.spec.ts 旧说明文案及 streaming.spec.ts 旧断流预期，已在起始提交的独立副本与隔离端口复现，基准相同两项失败。
-
-最后一次完整 Python 套件运行：353 项通过、4 项失败、5 项跳过。其中新增确认页测试只是对 JSON Unicode 转义形式作了错误假设，已改为验证解码后的字段值；修正后全部新增 Skill 测试再次实际运行，9 项通过。完整套件运行中的测试模块在收集时已经加载，故该次完整统计仍保留旧断言的失败，不把它伪写成全绿。
-
-剩余 3 项为历史切片迁移测试和搜索测试的同步/流式两个参数变体，全部已在起始提交独立副本复现。迁移测试使用历史结构时调用当前初始管理员初始化，导致 admin_accounts 不存在；搜索测试的旧重试预期与现有分类额度/流式协议不一致。不在本次 Skill 接入中修改这些既有行为或把失败记为通过。
-
-## Standards
-
-独立 Standards 智能体首先报告 3 项：符号链接竞态/额外挂载、首次取消检查过晚、worker 准备异常遗漏终态。均已修复并补充验证；复核剩余必须修复项为 0。新增或修改的自有函数均有中文用途注释；完整上游文件保留既有格式与归属。
-
-
-## Spec
-
-独立 Spec 智能体首先报告 4 项：超预算集合阻塞恢复、旧任务误被闲置清理、通用 Skill 模板硬编码、中文预览路径未编码。均已修复；同时补齐默认 Confirm UI 代理。复核剩余必须修复项为 0。
-
-
-## 验证范围
-
-未调用用户的付费图片或语音凭据，也未以受控模型验证冒充真实模型的设计质量验收。媒体提供商配置、上游特定宿主限制和脚本直接调用的计费边界见 docs/skills.md。已提交本地当前分支，未推送或部署远程生产应用。
+未调用付费图片或语音服务；真实浏览器预览依赖当前环境中的 Node/Chromium，本次浏览器卡片测试通过，Docker 内 PPT 预览代理由测试接口验证。

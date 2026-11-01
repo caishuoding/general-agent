@@ -88,7 +88,7 @@ class OperationService:
 
     def begin(self, context: OperationContext, call_id: UUID, settings: StoredSettings, assistant_message_id: UUID | None = None,
               web_kind: WebKind | None = None) -> None:
-        """外发前核验操作、期限、分类额度及根执行的普通或制作任务调用预算。"""
+        """外发前核验操作、期限、分类额度及根执行的普通或 Skill Run 调用预算。"""
         with self.database.connect() as connection:
             run = connection.execute('SELECT r.id,r.agent_id,r.deadline,r.status,a.answer_attempt_id,a.parent_agent_id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE r.operation_id=%s', (context.operation_id,)).fetchone()
             if run:

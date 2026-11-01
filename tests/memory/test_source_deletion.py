@@ -19,6 +19,10 @@ def test_conversation_delete_rejects_old_preview_and_retained_memory_survives_re
     configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, transport) as client:
         conversation = configure_memory(client)
+        account = client.get('/api/auth/me').json()['id']
+        generated = tmp_path / 'generated' / account / conversation / 'run-fixture' / 'workspace'
+        generated.mkdir(parents=True)
+        (generated / 'intermediate.txt').write_text('中间产物', encoding='utf-8')
         client.post(f'/api/conversations/{conversation}/messages', json={'content': '请记住：我喜欢简洁的中文回答'})
         kept = client.get('/api/memories').json()[0]
         uploaded = client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('原文件.txt', b'own source')}).json()[0]
@@ -36,6 +40,7 @@ def test_conversation_delete_rejects_old_preview_and_retained_memory_survives_re
         assert response.status_code == 200 and response.json()['status'] == 'complete'
         assert client.get(path).status_code == 404 and client.get('/api/conversations').json() == []
         assert not (tmp_path / 'attachments' / uploaded['id']).exists()
+        assert not (tmp_path / 'generated' / account / conversation).exists()
         entries = client.get('/api/memories').json()
         assert len(entries) == 1 and entries[0]['id'] == kept['id'] and entries[0]['status'] == 'complete'
         assert entries[0]['source_deleted'] is True and entries[0]['conversation_id'] is None and entries[0]['message_id'] is None

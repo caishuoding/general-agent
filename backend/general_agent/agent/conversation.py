@@ -28,7 +28,6 @@ class ConversationState(TypedDict):
     answer_id: NotRequired[str]
     history_position: NotRequired[int]
     source_snapshot: NotRequired[dict[str, Any]]
-    runtime_state: NotRequired[dict[str, Any]]
     messages: list[dict[str, Any]]
     source_attachment_ids: list[str]
     answer: str
@@ -82,7 +81,6 @@ class ConversationGraph:
         """对齐已提交回答水位后恢复工作消息，仅合入新消息并按稳定身份去重。"""
         position = max((int(row.get("position", 0)) for row in rows), default=0)
         source_snapshot: dict[str, Any] = {}
-        inherited_runtime: dict[str, Any] = {}
         if self.checkpoints is not None:
             source_snapshot = self.execution.agent_runtime.repository.snapshot(context.conversation_id)
             previous = self.checkpoints.values(str(context.conversation_id))
@@ -98,7 +96,6 @@ class ConversationGraph:
             if (previous.get("version") == STATE_VERSION and not previous.get("failure")
                     and previous.get("source_snapshot") == source_snapshot
                     and previous.get("history_position", 0) < position):
-                inherited_runtime = previous.get('runtime_state', {})
                 recent = [{**message, "_model_message": True} for message in previous.get("messages", [])
                           if message.get("role") != "system" and not message.get('_context_material')]
                 known = {message.get('_message_id') for message in recent if message.get('_message_id')}
@@ -106,7 +103,7 @@ class ConversationGraph:
                     and str(row.get('id')) not in known)]
         initial: ConversationState = {
             'version': STATE_VERSION, 'answer_id': str(context.assistant_message_id),
-            'history_position': position, 'source_snapshot': source_snapshot, 'runtime_state': inherited_runtime,
+            'history_position': position, 'source_snapshot': source_snapshot,
             'messages': [dict(row) for row in rows],
             'source_attachment_ids': [],
             'answer': '',
@@ -244,13 +241,12 @@ class ConversationGraph:
                 on_progress=on_progress,
                 on_round_start=reset_draft,
                 source_attachment_ids=[UUID(identifier) for identifier in state['source_attachment_ids']],
-                **({'runtime_state': state.get('runtime_state', {})} if self.checkpoints else {}),
             )
             answer = outcome.answer or ''.join(chunks)
             if not answer:
                 raise ValueError('模型没有返回最终回答。')
             LOGGER.info('event=node agent message_id=%s used_tools=%s characters=%s', context.assistant_message_id, outcome.used_tools, len(answer))
-            return {'runtime_state': outcome.runtime_state, 'answer': answer, 'used_tools': outcome.used_tools,
+            return {'answer': answer, 'used_tools': outcome.used_tools,
                     'knowledge_source_candidates': outcome.knowledge_source_candidates,
                     'messages': outcome.messages if outcome.messages is not None else self.answered_messages(state['messages'], answer)}
         except (ValueError, ModelFailure) as error:
@@ -258,14 +254,6 @@ class ConversationGraph:
         except Exception:
             LOGGER.exception('LangGraph 工具节点失败 conversation_id=%s message_id=%s', context.conversation_id, context.assistant_message_id)
             return self.failure_update(context, self.unexpected_failure(context.delivery), ''.join(chunks))
-
-    def settle_skill_task(self, connection: Any, state: ConversationState,
-                          context: ConversationContext, status: str) -> None:
-        """将会话终态交给 Skill 边界同步，找不到当前任务时保持幂等空操作。"""
-        self.execution.settle_skill_answer(
-            connection, context.assistant_message_id, context.account_id,
-            context.conversation_id, status, state.get('runtime_state', {}),
-        )
 
     def finalize(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
         """核验网页和知识库引用后保存终态，把正文及两类可信来源返回 State。"""
@@ -282,7 +270,6 @@ class ConversationGraph:
                 (answer, 'failed' if failure else 'complete', failure, Jsonb(web_sources),
                  Jsonb(knowledge_sources), context.assistant_message_id),
             ).fetchone()
-            self.settle_skill_task(connection, state, context, 'interrupted' if failure else 'waiting')
         if completed:
             # Agent 已在正常路径关闭；仅剩 finalize 的恢复路径在这里幂等关闭主执行。
             self.execution.close_agent_execution(context.assistant_message_id)
@@ -321,7 +308,6 @@ class ConversationGraph:
                     "UPDATE messages SET content=%s,status='failed',error=%s WHERE id=%s AND status='generating' RETURNING id",
                     (answer, detail, context.assistant_message_id),
                 ).fetchone()
-                self.settle_skill_task(connection, state, context, 'interrupted')
             if completed:
                 self.execution.close_agent_execution(context.assistant_message_id)
         except Exception:

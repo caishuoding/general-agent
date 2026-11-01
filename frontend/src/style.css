@@ -604,9 +604,9 @@ button:hover:not(:disabled) {
 .skill-picker-status { margin: 0; font-size: 12px; color: var(--muted); }
 .skill-picker-status button { border: 0; background: transparent; color: var(--teal); padding: 0 4px; }
 .message-skill-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-.message-skill-tag { max-width: 100%; font-size: 11px; }
-.message-skill-tag summary { display: inline-flex; cursor: pointer; padding: 2px 9px; border: 1px solid #a9c6b7; border-radius: 6px; background: #edf5ef; color: #244e40; }
-.message-skill-tag p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 12px; padding: 10px 12px; border-left: 2px solid #a9c6b7; font-size: 12px; line-height: 1.7; }
+.message-skill-tag { display: inline-flex; max-width: 100%; padding: 2px 9px; border: 1px solid #a9c6b7; border-radius: 6px; background: #edf5ef; color: #244e40; font-size: 11px; }
+.generated-files { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.generated-files ul { margin: 8px 0 0; padding-left: 18px; }
 @media (max-width: 800px) {
   .skill-picker { padding-bottom: 8px; margin-bottom: 4px; }
   .skill-choice-grid { max-height: min(120px, 18dvh); }

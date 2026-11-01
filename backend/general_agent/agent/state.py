@@ -4,9 +4,9 @@ from typing import Any, TypedDict, NotRequired
 
 
 class AgentState(TypedDict):
-    """保存模型消息、待执行调用、工具失败次数和文档工具调用次数及最终结果。"""
+    """保存模型消息、待执行调用、工具失败次数、已用 Skill 及最终结果。"""
 
-    runtime_state: NotRequired[dict[str, Any]]
+    used_skills: list[str]
     version: NotRequired[int]
     messages: list[dict[str, Any]]
     tool_calls: list[dict[str, Any]]

@@ -28,7 +28,8 @@ def test_obsolete_columns_are_removed_and_caption_is_retained(database_url: str)
         rows = connection.execute(
             "SELECT table_name,column_name FROM information_schema.columns "
             "WHERE table_schema='public' AND table_name=ANY(%s)",
-            (['search_requests', 'messages', 'document_images', 'agents'],),
+            (['search_requests', 'messages', 'document_images', 'agents',
+              'generated_files', 'skill_commands', 'skill_previews'],),
         ).fetchall()
     columns = {(row['table_name'], row['column_name']) for row in rows}
     assert ('search_requests', 'revision') not in columns
@@ -41,9 +42,16 @@ def test_obsolete_columns_are_removed_and_caption_is_retained(database_url: str)
     assert ('document_images', 'ocr_text') not in columns
     assert ('document_images', 'uncertainties') not in columns
     assert ('document_images', 'caption') in columns
-    assert ('skill_tasks', 'stage') not in columns
-    assert ('skill_tasks', 'route') not in columns
+    assert ('messages', 'skill_selections') not in columns
+    assert ('messages', 'skill_names') in columns
     assert ('agents', 'web_count') not in columns
+    assert ('generated_files', 'answer_id') not in columns
+    assert ('skill_commands', 'answer_id') not in columns
+    assert ('skill_previews', 'answer_id') not in columns
+    assert ('generated_files', 'created_by_run_id') in columns
+    assert ('generated_files', 'run_id') not in columns
+    assert ('skill_commands', 'run_id') in columns
+    assert ('skill_previews', 'run_id') in columns
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         obsolete = connection.execute("SELECT to_regclass('public.memory_tool_runs') AS name").fetchone()
         search_status = connection.execute(
@@ -51,19 +59,17 @@ def test_obsolete_columns_are_removed_and_caption_is_retained(database_url: str)
             "WHERE conrelid='search_requests'::regclass AND contype='c' "
             "AND pg_get_constraintdef(oid) LIKE '%%status%%'"
         ).fetchone()
-        skill_status = connection.execute(
-            "SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint "
-            "WHERE conrelid='skill_tasks'::regclass AND contype='c' "
-            "AND pg_get_constraintdef(oid) LIKE '%%status%%'"
-        ).fetchone()
+        skill_tasks = connection.execute("SELECT to_regclass('public.skill_tasks') AS name").fetchone()
+        generated_files = connection.execute("SELECT to_regclass('public.generated_files') AS name").fetchone()
     assert obsolete is not None and obsolete['name'] is None
     assert search_status is not None
     assert not any(status in search_status['definition'] for status in ('planning', 'pending', 'rejected', 'expired'))
-    assert skill_status is not None and 'completed' not in skill_status['definition']
+    assert skill_tasks is not None and skill_tasks['name'] is None
+    assert generated_files is not None and generated_files['name'] is not None
 
 
-def test_cleanup_migrations_convert_existing_rows_before_tightening_constraints(database_url: str) -> None:
-    """真实旧行在升级时映射为取消和等待，不能只验证空库的新约束。"""
+def test_cleanup_migrations_convert_search_rows_and_drop_disposable_skill_tasks(database_url: str) -> None:
+    """旧搜索行按现有规则收敛，测试环境直接删除已废弃的 Skill 任务结构。"""
     account_id, conversation_id, message_id = uuid4(), uuid4(), uuid4()
     with psycopg.connect(database_url) as connection:
         migrate_through(connection, '064_remove_obsolete_skill_stage_route.sql')
@@ -106,11 +112,11 @@ def test_cleanup_migrations_convert_existing_rows_before_tightening_constraints(
     Database(database_url).migrate()
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         search_statuses = connection.execute('SELECT status,error FROM search_requests ORDER BY created_at,id').fetchall()
-        skill_status = connection.execute('SELECT status FROM skill_tasks').fetchone()
+        skill_tasks = connection.execute("SELECT to_regclass('public.skill_tasks') AS name").fetchone()
         columns = connection.execute(
             "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='agents'"
         ).fetchall()
     assert [row['status'] for row in search_statuses] == ['cancelled'] * 4
     assert all(row['error'] for row in search_statuses)
-    assert skill_status == {'status': 'waiting'}
+    assert skill_tasks is not None and skill_tasks['name'] is None
     assert 'web_count' not in {row['column_name'] for row in columns}

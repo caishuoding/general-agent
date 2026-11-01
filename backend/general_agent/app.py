@@ -32,7 +32,7 @@ from general_agent.knowledge.service import KnowledgeService
 from general_agent.knowledge.api import knowledge_router
 from general_agent.knowledge.tools import KnowledgeTools
 from general_agent.skills.api import skill_router
-from general_agent.skills.selection import SkillSnapshot, selected_skills
+from general_agent.skills.selection import selected_skill_names
 from general_agent.infrastructure.operations import OperationContext, OperationService
 from general_agent.infrastructure.calls import CallGateway
 from general_agent.conversation.chat import ChatService
@@ -67,7 +67,7 @@ class Conversation(BaseModel):
 
 class MessageInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
-    content: str = Field(min_length=1, max_length=32000)
+    content: str = Field(min_length=1, max_length=2_000_000)
     skills: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(default_factory=list, max_length=50)
 
 
@@ -80,7 +80,7 @@ class Message(BaseModel):
     id: UUID
     role: str
     content: str
-    skill_selections: list[SkillSnapshot] = Field(default_factory=list)
+    skill_names: list[str] = Field(default_factory=list)
     status: str
     created_at: datetime
     attachments: list[dict[str, Any]] = Field(default_factory=list)
@@ -147,7 +147,13 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     checkpoints = Checkpoints(database)
     execution.agent_runtime.checkpoints = checkpoints
     conversation_graph = ConversationGraph(database, execution, checkpoints)
-    source_deletion = SourceDeletion(execution.deletion, memory, attachments.delete_file)
+    skill_runtime = execution.agent_runtime.skills
+    source_deletion = SourceDeletion(
+        execution.deletion,
+        memory,
+        attachments.delete_file,
+        skill_runtime.delete_conversation if skill_runtime is not None else None,
+    )
     chat = ChatService(database, execution, attachments, conversation_graph)
     streaming = StreamingChat(database, execution, attachments, conversation_graph)
 
@@ -384,53 +390,53 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         """读取当前账号的指定会话。"""
         return read_conversation(conversation_id, current_user(request).id)
 
-    def message_skill_snapshots(body: MessageInput) -> list[SkillSnapshot]:
-        """同步与流式入口共用已安装描述解析，显式选择失效时拒绝静默降级。"""
+    def message_skill_names(body: MessageInput) -> list[str]:
+        """同步与流式入口共用名称校验，完整 Skill 正文由前端放入用户输入。"""
         runtime = execution.agent_runtime.skills
         if runtime is None:
             if body.skills:
                 raise HTTPException(422, '技能目录不可用，请刷新后重试。')
             return []
         try:
-            return selected_skills(runtime.service.catalog, body.skills, body.content)
+            return selected_skill_names(runtime.service.catalog, body.skills, body.content)
         except ValueError as error:
             raise HTTPException(422, str(error)) from None
 
     @app.post("/api/conversations/{conversation_id}/messages")
     def send_message(conversation_id: UUID, body: MessageInput, request: Request, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
-        """同步入口解析显式技能描述快照并纳入操作身份，消息仍保存用户原文。"""
+        """同步入口校验显式 Skill 名称，消息保存前端拼好的完整 Skill 正文。"""
         account_id = current_user(request).id
         saved = settings.read()
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
 
-        selections = message_skill_snapshots(body)
+        skills = message_skill_names(body)
 
         def send(operation: OperationContext) -> None:
-            """把用户原文与已校验的技能快照交给同步回答流程。"""
-            chat.send(conversation_id, account_id, body.content, saved, operation, selections)
-        scope = [*execution.scope(body.content,saved), selections] if selections else execution.scope(body.content,saved)
+            """把包含完整 Skill 正文的用户消息交给同步回答流程。"""
+            chat.send(conversation_id, account_id, body.content, saved, operation, skills)
+        scope = [*execution.scope(body.content,saved), skills] if skills else execution.scope(body.content,saved)
         return perform_run("chat", scope, operation_id, conversation_id, account_id, send, 200)
 
     @app.post("/api/conversations/{conversation_id}/runs", status_code=202)
     def start_stream(conversation_id: UUID, body: MessageInput, request: Request, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
-        """解析显式技能快照后登记流式操作，描述随用户消息持久化供后续重试。"""
+        """校验显式 Skill 名称后登记流式操作，完整正文随用户消息持久化。"""
         account_id = current_user(request).id
         saved = settings.read()
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
 
-        selections = message_skill_snapshots(body)
+        skills = message_skill_names(body)
 
         def start(operation: OperationContext) -> None:
-            """后台保存原文和完整描述快照，使停止、恢复与用量属于同一执行。"""
-            streaming.start(conversation_id, account_id, body.content, saved, operation, selections)
-        scope = [*execution.scope(body.content,saved), selections] if selections else execution.scope(body.content,saved)
+            """后台保存包含完整 Skill 正文的用户消息及技能名称。"""
+            streaming.start(conversation_id, account_id, body.content, saved, operation, skills)
+        scope = [*execution.scope(body.content,saved), skills] if skills else execution.scope(body.content,saved)
         return perform_run("chat_stream", scope, operation_id, conversation_id, account_id, start)
 
     @app.post("/api/conversations/{conversation_id}/messages/{message_id}/retry", status_code=202)
     def retry_stream(conversation_id: UUID, message_id: UUID, request: Request, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
-        """重试保留原用户消息的技能快照，每次实际云端请求仍独立记录用量。"""
+        """重试沿用原用户消息及其 Skill 名称，每次云端请求独立记录用量。"""
         account_id = current_user(request).id
         saved = settings.read()
         if saved is None:
@@ -444,9 +450,9 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         except LookupError as error:
             raise HTTPException(404,str(error)) from None
         with database.connect() as connection:
-            original = connection.execute('SELECT content,skill_selections FROM messages WHERE id=%s',(source['reply_to'],)).fetchone()
+            original = connection.execute('SELECT content,skill_names FROM messages WHERE id=%s',(source['reply_to'],)).fetchone()
         scope = [str(message_id), execution.scope(str(original['content']) if original else '',saved),
-                 original['skill_selections'] if original else []]
+                 original['skill_names'] if original else []]
         return perform_run("chat_retry", scope, operation_id, conversation_id, account_id, retry)
 
     @app.post('/api/conversations/{conversation_id}/messages/{message_id}/resume', status_code=202, response_model=ConversationDetail)

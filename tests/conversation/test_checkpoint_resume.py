@@ -22,7 +22,6 @@ def test_restart_resumes_same_answer_after_completed_tool(database_url: str, tmp
     """模型工具回合已完成后杀进程，显式续接复用原调用和用户消息。"""
     waiting, release, final_waiting, finish = Event(), Event(), Event(), Event()
     requests: list[dict[str, Any]] = []
-    task_id = ''
     with_skill, with_child = mode == 'skill', mode == 'child'
     child_attempts = 0
     child_seen = Event()
@@ -35,7 +34,7 @@ def test_restart_resumes_same_answer_after_completed_tool(database_url: str, tmp
 
         def do_POST(self) -> None:
             """提供真实 SSE；在模型、Skill 或子执行中断点等待进程重启。"""
-            nonlocal task_id, child_attempts
+            nonlocal child_attempts
             payload = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
             requests.append(payload)
             is_child = str(payload['messages'][0]['content']).startswith('你是负责指定子任务')
@@ -62,16 +61,18 @@ def test_restart_resumes_same_answer_after_completed_tool(database_url: str, tmp
             elif with_skill and index == 1:
                 call = ('load_skill', {'name': 'demo'})
             elif with_skill and index == 2:
-                task_id = json.loads(next(item['content'] for item in payload['messages'] if item['role'] == 'tool'))['task_id']
-                call = ('write_work_file', {'task_id': task_id, 'path': 'notes.txt', 'content': '持久工作内容'})
+                loaded = json.loads(next(item['content'] for item in payload['messages'] if item['role'] == 'tool'))
+                assert loaded['content'].startswith('---\nname: demo')
+                assert 'task_id' not in loaded
+                call = ('write_work_file', {'path': 'notes.txt', 'content': '持久工作内容'})
             elif index == (3 if with_skill else 2):
                 waiting.set()
                 release.wait(45)
                 return
             elif with_skill and index == 4:
                 assert 'read_work_file' in [tool['function']['name'] for tool in payload['tools']]
-                assert '完整指令' in payload['messages'][0]['content']
-                call = ('read_work_file', {'task_id': task_id, 'path': 'notes.txt'})
+                assert '完整指令' in json.dumps(payload['messages'], ensure_ascii=False)
+                call = ('read_work_file', {'path': 'notes.txt'})
             elif not with_skill and index == 1:
                 call = ('get_current_time', {})
             else:

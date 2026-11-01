@@ -89,7 +89,8 @@ class AgentToolGraph:
         receive_inbox: InboxReceiver | None = None,
         settle_answer: AnswerSettler | None = None,
         on_round_start: Callable[[], None] | None = None,
-        runtime_state: Callable[[], dict[str, Any]] | None = None,
+        initial_used_skills: list[str] | None = None,
+        current_used_skills: Callable[[], list[str]] | None = None,
         prepare_context: Callable[[list[dict[str, Any]], list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
         checkpointer: BaseCheckpointSaver[Any] | None = None,
         thread_id: str | None = None,
@@ -137,8 +138,7 @@ class AgentToolGraph:
             if prepare_context is None:
                 return {}
             updated = prepare_context(model_input(state['messages'], clean=False), active_tools(state))
-            return {'runtime_state': runtime_state() if runtime_state else {},
-                'messages': [*(message for message in state['messages'] if message.get('role') == 'system'),
+            return {'messages': [*(message for message in state['messages'] if message.get('role') == 'system'),
                 *(message for message in updated if message.get('role') != 'system')]}
 
         def call_model(state: AgentState) -> dict[str, Any]:
@@ -387,6 +387,7 @@ class AgentToolGraph:
                 "used_tools": True,
                 "tool_failures": failures,
                 "document_calls": document_calls,
+                'used_skills': current_used_skills() if current_used_skills else state['used_skills'],
                 'watching_inbox': watching,
             }
 
@@ -437,7 +438,7 @@ class AgentToolGraph:
         graph = builder.compile(checkpointer=checkpointer)
         raw_messages = [*messages]
         initial: AgentState = {
-            "version": STATE_VERSION, "runtime_state": runtime_state() if runtime_state else {},
+            "version": STATE_VERSION, "used_skills": list(dict.fromkeys(initial_used_skills or [])),
             "messages": raw_messages,
             "tool_calls": [],
             "round_index": 0,

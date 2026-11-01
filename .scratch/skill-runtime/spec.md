@@ -1,4 +1,6 @@
-Status: ready-for-agent
+Status: wontfix
+
+> 已被 `.scratch/skill-simplification/spec.md` 和 ADR 0022 取代：Skill 加载改为无状态，不再创建制作任务。
 
 # 完整接入 PPT Master 与通用 Skill 运行能力
 

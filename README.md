@@ -1,6 +1,6 @@
 # 个人对话智能体
 
-完整 PPT Master Skill 已集成，支持模型自主加载、隔离制作任务、方案确认后续接、原生模板上传和真实文件交付。首次使用需准备 Docker 运行镜像和内部网络，见 [Skills 接入与部署](docs/skills.md)。可选图片、语音等服务在管理端单独配置。
+完整 PPT Master Skill 已集成，支持用户显式发送完整 `SKILL.md`、模型自主加载、按 Agent Run 隔离工作区、方案确认交互、原生模板上传和真实文件交付。首次使用需准备 Docker 运行镜像和内部网络，见 [Skills 接入与部署](docs/skills.md)。可选图片、语音等服务在管理端单独配置。
 
 完整对话执行使用 LangGraph `StateGraph` 编排工具决策、上下文准备、长期记忆召回、附件清单与按需读取、最终回答和消息终态。同步与流式入口共享同一张完整回答图。LangGraph 是应用编排层；Mem0 仍通过独立 Docker API 管理长期记忆，业务 PostgreSQL 继续保存会话、授权、用量和外部操作的幂等事实。架构边界见 [ADR 0007](docs/adr/0007-langgraph-agent-orchestration.md) 与 [ADR 0011](docs/adr/0011-conversation-document-tools.md)。
 

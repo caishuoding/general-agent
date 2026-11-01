@@ -17,6 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from general_agent.skills.sandbox import DockerSandbox
+from general_agent.infrastructure.database import Database
 from tests.agent.test_multi_agent import response
 from tests.auth.support import authenticated_client, set_global_settings
 
@@ -81,7 +82,7 @@ verify().catch(function report(error){console.error(error);process.exit(1);});''
 
 def test_agent_exports_native_pptx_and_user_can_annotate_preview(database_url: str, tmp_path: Path) -> None:
     """受控模型驱动真实上游脚本，用户下载原生 PPT 并通过代理保存预览标注。"""
-    task_id, command_id, download_url, preview_url, confirmation_url = '', '', '', '', ''
+    run_id, command_id, download_url, preview_url, confirmation_url = '', '', '', '', ''
     phase = 0
     script = (
         'from pathlib import Path\nimport subprocess,json\n'
@@ -100,7 +101,7 @@ def test_agent_exports_native_pptx_and_user_can_annotate_preview(database_url: s
 
     def provider(request: httpx.Request) -> httpx.Response:
         """按工具真实结果推进制作，不把启动命令视为已经导出成功。"""
-        nonlocal phase, task_id, command_id, download_url, preview_url, confirmation_url
+        nonlocal phase, command_id, download_url, preview_url, confirmation_url
         payload: dict[str, Any] = json.loads(request.content)
         messages = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
         if messages:
@@ -109,34 +110,35 @@ def test_agent_exports_native_pptx_and_user_can_annotate_preview(database_url: s
             phase = 1
             return response(name='load_skill', arguments={'name': 'ppt-master'})
         if phase == 1:
-            task_id = messages[-1]['task_id']
+            assert messages[-1]['content'].startswith('---\nname: ppt-master')
             phase = 2
-            return response(name='write_work_file', arguments={'task_id': task_id, 'path': 'render.py', 'content': script})
+            return response(name='write_work_file', arguments={'path': 'render.py', 'content': script})
         if phase == 2:
             phase = 3
-            return response(name='run_skill_command', arguments={'task_id': task_id, 'command': 'python /workspace/render.py', 'seconds': 120})
+            return response(name='run_skill_command', arguments={'command': 'python /workspace/render.py', 'seconds': 120})
         if phase == 3:
             command_id = messages[-1]['command_id']
             phase = 4
         if phase == 4:
             if messages[-1].get('status') != 'completed':
                 assert messages[-1].get('status') not in {'interrupted', 'failed'}, messages[-1]
-                return response(name='poll_skill_command', arguments={'task_id': task_id, 'command_id': command_id, 'wait_seconds': 10})
+                return response(name='poll_skill_command', arguments={'command_id': command_id, 'wait_seconds': 10})
             assert messages[-1]['exit_code'] == 0, messages[-1]
             phase = 5
-            return response(name='publish_skill_file', arguments={'task_id': task_id, 'path': 'deck/exports/report.pptx'})
+            return response(name='publish_skill_file', arguments={'path': 'deck/exports/report.pptx'})
         if phase == 5:
             download_url = messages[-1]['url']
             phase = 6
-            return response(name='open_skill_preview', arguments={'task_id': task_id, 'project_path': 'deck'})
+            return response(name='open_skill_preview', arguments={'project_path': 'deck'})
         if phase == 6:
             preview_url = messages[-1]['url']
             phase = 7
-            return response(name='open_skill_preview', arguments={'task_id': task_id, 'project_path': 'deck', 'surface': 'confirmation'})
+            return response(name='open_skill_preview', arguments={'project_path': 'deck', 'surface': 'confirmation'})
         if phase == 7:
             confirmation_url = messages[-1]['url']
             phase = 8
             assert 'save_skill_task' not in [tool['function']['name'] for tool in payload['tools']]
+            assert all('task_id' not in tool['function']['parameters'].get('properties', {}) for tool in payload['tools'])
         return response(f'制作完成。[下载 PPT]({download_url}) [预览]({preview_url})')
 
     set_global_settings(database_url, tmp_path, {'base_url': 'https://model.example/v1', 'model': 'controlled',
@@ -152,9 +154,7 @@ def test_agent_exports_native_pptx_and_user_can_annotate_preview(database_url: s
                 assert 'Editable presentation' in slide
                 assert '<p:sp>' in slide
                 assert '<p:pic>' not in slide
-            redirected = client.get(preview_url, follow_redirects=False)
-            assert redirected.status_code == 303, redirected.text
-            url = redirected.headers['location']
+            url = preview_url
             page = client.get(url)
             assert page.status_code == 200
             assert url + 'static/app.js' in page.text
@@ -165,13 +165,19 @@ def test_agent_exports_native_pptx_and_user_can_annotate_preview(database_url: s
             changed = client.post(url + 'api/slide/01_封面.svg/annotate', json={'element_id': 'title', 'annotation': '标题改成蓝色'})
             assert changed.status_code == 200, changed.text
             assert changed.json()['draft_saved'] is True
-            confirmation = client.get(confirmation_url, follow_redirects=False)
-            assert confirmation.status_code == 303, confirmation.text
-            confirm_root = confirmation.headers['location']
+            confirm_root = confirmation_url
             assert client.get(confirm_root).status_code == 200
             recommendations = client.get(confirm_root + 'api/recommendations')
             assert recommendations.status_code == 200, recommendations.text
             assert recommendations.json()['audience']['value'] == '管理层'
+            with Database(database_url).connect() as connection:
+                run = connection.execute(
+                    'SELECT r.id FROM agent_runs r JOIN agents a ON a.id=r.agent_id '
+                    'WHERE a.answer_attempt_id=%s AND a.parent_agent_id IS NULL',
+                    (result.json()['messages'][-1]['id'],),
+                ).fetchone()
+            assert run is not None
+            run_id = str(run['id'])
     finally:
-        if task_id:
-            DockerSandbox(tmp_path).stop(UUID(task_id))
+        if run_id:
+            DockerSandbox(tmp_path / 'generated').stop(UUID(run_id))

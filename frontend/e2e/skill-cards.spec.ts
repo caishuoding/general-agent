@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { configureChatModel, loginUser } from './auth';
 
-/** 使用已登录的真实技能目录验证选择、请求正文和历史展示。 */
-test('技能卡片选择保留真实输入，发送名称并保存描述快照', async function skillCards({ page }) {
+/** 使用已登录的真实技能目录验证前端完整正文拼接、名称元数据和历史展示。 */
+test('技能卡片选择由前端发送完整 SKILL.md 和名称', async function skillCards({ page }) {
   await loginUser(page);
   await configureChatModel(page, `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18081'}/v1`, 'controlled-model');
   await page.goto('/');
@@ -24,18 +24,21 @@ test('技能卡片选择保留真实输入，发送名称并保存描述快照',
   await expect(input).toHaveValue('给我一份汇报建议');
   await expect(input).toBeFocused();
   await page.screenshot({ path: '/private/tmp/skill-cards-desktop.png', fullPage: true });
-  /** 捕获真实流式发送请求，核验没有将长描述写进可见输入框。 */
+  /** 捕获真实流式发送请求，核验完整入口由前端拼接且输入框仍只保留真实需求。 */
   const request = page.waitForRequest(function isSend(value) { return value.method() === 'POST' && value.url().endsWith('/runs'); });
   await page.getByRole('button', { name: '发送消息' }).click();
   const sent = await request;
-  expect(sent.postDataJSON()).toEqual({ content: '给我一份汇报建议', skills: ['ppt-master'] });
+  const payload = sent.postDataJSON();
+  expect(payload.skills).toEqual(['ppt-master']);
+  expect(payload.content).toContain('【Skill：ppt-master】');
+  expect(payload.content).toContain('AI-driven presentation workflow');
+  expect(payload.content).toContain('【用户需求】\n给我一份汇报建议');
   await expect(page.locator('.message.user').last()).toContainText('给我一份汇报建议');
   await expect(page.getByLabel('本条消息选择的技能')).toContainText('ppt-master');
   await expect(card).toHaveAttribute('aria-pressed', 'false');
   await page.reload();
   await expect(page.getByLabel('本条消息选择的技能')).toContainText('ppt-master');
-  await page.getByLabel('本条消息选择的技能').locator('summary').click();
-  await expect(page.getByLabel('本条消息选择的技能')).toContainText('AI-driven presentation workflow');
+  await expect(page.locator('.message.user').last()).toContainText('AI-driven presentation workflow');
 });
 
 /** 手机卡片可见且点按选择保持输入焦点，不产生横向溢出。 */
