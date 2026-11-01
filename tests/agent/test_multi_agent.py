@@ -13,25 +13,32 @@ from tests.auth.support import authenticated_client
 from tests.attachments.test_attachments import configure_settings
 
 
-def test_final_source_handoff_keeps_trace_messages_tied_to_real_tool_calls() -> None:
-    """主执行交回可信来源时保留原模型消息，知识库候选独立传递且不生成无调用者的工具消息。"""
+def test_run_answer_returns_messages_without_synthetic_tool_messages() -> None:
+    """主图返回真实模型和工具消息，不在执行边界伪造工具调用。"""
     runtime = AgentRuntime.__new__(AgentRuntime)
     runtime.repository = MagicMock()
     root_id, answer_id = uuid4(), uuid4()
     runtime.repository.start.return_value = {'id': root_id}
     runtime.repository.info.return_value = {'status': 'completed'}
-    knowledge_source = {'key': 'K7', 'knowledge_base_id': 'base', 'document_id': 'document'}
-    runtime.repository.sources.return_value = [
-        {'key': 'W39', 'url': 'https://example.org/weather'}, knowledge_source,
-    ]
     messages = [{'role': 'assistant', 'content': '回答[K7]'}]
-    with patch.object(AgentRuntime, 'execute', return_value={
-        'answer': '回答[K7]', 'used_tools': True, 'messages': messages,
-    }):
-        outcome = runtime.run(uuid4(), uuid4(), uuid4(), answer_id, MagicMock(), MagicMock(), [], None, None)
 
-    assert outcome.messages == messages
-    assert outcome.knowledge_source_candidates == [knowledge_source]
+    def prepare(_state: Any) -> dict[str, Any]:
+        """该边界测试不改变初始工作状态。"""
+        return {}
+
+    def finalize(state: Any) -> dict[str, Any]:
+        """直接返回共享图状态，供断言消息未被改写。"""
+        return {**state}
+
+    with patch.object(AgentRuntime, 'execute', return_value={
+        'answer': '回答[K7]', 'used_tools': True, 'messages': messages, 'settled': True,
+    }):
+        outcome = runtime.run_answer(
+            uuid4(), uuid4(), uuid4(), answer_id, MagicMock(), MagicMock(), [], None, None, None,
+            prepare, finalize, None, {},
+        )
+
+    assert outcome['messages'] == messages
     runtime.repository.close.assert_called_once_with(answer_id)
 
 

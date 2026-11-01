@@ -15,7 +15,7 @@ from psycopg.rows import dict_row
 from general_agent.infrastructure.agent_cleanup import forget_checkpoint_material
 from general_agent.infrastructure.database import Database
 
-STATE_VERSION = 2
+STATE_VERSION = 3
 
 
 class StateSerializer(JsonPlusSerializer):

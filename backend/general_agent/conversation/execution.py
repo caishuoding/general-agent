@@ -17,8 +17,9 @@ from general_agent.infrastructure.settings import StoredSettings
 from general_agent.attachments.service import AttachmentContext
 from general_agent.search.service import SearchService
 from general_agent.memory.automatic import AutomaticMemory
-from general_agent.memory.tools import MemoryTools, ToolOutcome
+from general_agent.memory.tools import MemoryTools
 from general_agent.knowledge.tools import KnowledgeTools
+from general_agent.agent.graph import TurnFinalizer, TurnPreparer
 from general_agent.agent.runner import AgentRuntime
 from general_agent.conversation.progress import MessageProgress
 from general_agent.prompts import (
@@ -71,8 +72,10 @@ class ChatExecution:
         operation: OperationContext,
         rows: list[dict[str, Any]],
     ) -> AnswerPreparation:
-        """刷新记忆与附件并合入工作消息，显式 Skill 正文按原用户消息发送。"""
-        content = str(rows[-1]['content'])
+        """刷新记忆与附件并合入工作消息，旧临时材料被替换且当前请求保持固定。"""
+        users = [row for row in rows if row.get('role') == 'user']
+        current = next((row for row in users if row.get('_current_request')), users[-1])
+        content = str(current['content'])
         material = self.search.attachments.prepare(conversation_id, account_id)
         memory_material = self.prepare_answer(user_id, content, operation)
         system_prompt: ModelMessage = {
@@ -82,15 +85,18 @@ class ChatExecution:
         data_messages: list[ModelMessage] = [cast(ModelMessage, {**message, '_context_material': True}) for message in [*memory_material, *material.messages]]
         conversation: list[ModelMessage] = [system_prompt, *data_messages]
         for index, row in enumerate(rows):
-            if row.get('_model_message'):
-                conversation.append(cast(ModelMessage, {key: value for key, value in row.items() if key in ('role', 'content', 'tool_calls', 'tool_call_id', '_context_summary', '_message_id')}))
-            else:
-                conversation.append(cast(ModelMessage, {'role': str(row['role']), 'content': str(row['content'])
-                    if row['role'] == 'user' else str(row['content']), **({'_message_id': str(row['id'])} if row.get('id') else {}),
-                    **({'_current_request': True} if index == len(rows) - 1 else {})}))
+            if row.get('role') == 'system' or row.get('_context_material'):
+                continue
+            message = {key: value for key, value in row.items() if key not in ('id', 'position', 'status', 'skill_names')}
+            message.pop('_current_request', None)
+            if row is current:
+                message['_current_request'] = True
+            if row.get('id') and not message.get('_message_id'):
+                message['_message_id'] = str(row['id'])
+            conversation.append(cast(ModelMessage, message))
         return AnswerPreparation(conversation, material)
 
-    def prepare(
+    def run_answer(
         self,
         conversation_id: UUID,
         account_id: UUID,
@@ -98,16 +104,29 @@ class ChatExecution:
         operation: OperationContext,
         settings: StoredSettings,
         *,
-        messages: list[ModelMessage],
+        messages: list[ModelMessage] | None,
         assistant_message_id: UUID,
         on_content: Callable[[str], None] | None = None,
         on_progress: Callable[[MessageProgress], None] | None = None,
         on_round_start: Callable[[], None] | None = None,
-        source_attachment_ids: list[UUID] | None = None,
-    ) -> ToolOutcome:
-        """把 State 材料和草稿轮次回调交给主从模块，返回主回答及可信证据快照。"""
-        return self.agent_runtime.run(conversation_id, account_id, user_id, assistant_message_id,
-            settings, operation, messages, on_content, source_attachment_ids, on_progress, on_round_start)
+        prepare_turn: TurnPreparer | None = None,
+        finalize_turn: TurnFinalizer | None = None,
+        model_failure: Callable[[Exception, str], dict[str, Any]] | None = None,
+        initial_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """运行完整回答图；主流程提供首轮准备和业务提交，子执行复用同一循环。"""
+        def default_prepare(_state: Any) -> dict[str, Any]:
+            """未提供主流程准备时保持当前工作消息不变。"""
+            return {}
+
+        def default_finalize(state: Any) -> dict[str, Any]:
+            """未提供业务收尾时确认共享循环可以结束。"""
+            return {**state, 'settled': True}
+
+        return self.agent_runtime.run_answer(conversation_id, account_id, user_id, assistant_message_id,
+            settings, operation, messages, on_content, on_progress, on_round_start,
+            prepare_turn or default_prepare, finalize_turn or default_finalize,
+            model_failure, initial_state or {})
 
     def close_agent_execution(self, answer_id: UUID) -> None:
         """幂等关闭根 Agent 及遗留子任务，供回答最终业务提交后调用。"""

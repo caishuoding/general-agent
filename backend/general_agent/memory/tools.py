@@ -1,6 +1,5 @@
 """为对话智能体注册真实记忆工具，执行前核对观察结果、版本和当前来源。"""
 
-from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid5
 
@@ -41,16 +40,6 @@ class DeleteMemoryInput(BaseModel):
 class UpdateMemoryInput(DeleteMemoryInput):
     """更新必须提供用户当前表达的完整新事实。"""
     fact: str = Field(min_length=1, max_length=5000)
-
-
-@dataclass(frozen=True)
-class ToolOutcome:
-    """返回最终文字、模型消息快照及已交付的知识库来源候选。"""
-
-    answer: str | None
-    used_tools: bool
-    messages: list[dict[str, Any]] | None = None
-    knowledge_source_candidates: list[dict[str, Any]] = field(default_factory=list)
 
 
 def memory_tools() -> list[dict[str, Any]]:

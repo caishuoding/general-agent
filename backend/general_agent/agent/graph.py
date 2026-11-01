@@ -27,6 +27,10 @@ ToolExecutor = Callable[[MemoryCheckpoint, str, dict[str, Any], StoredSettings],
 ToolResultImages = Callable[[list[dict[str, Any]]], list[ModelMessage]]
 InboxReceiver = Callable[[list[dict[str, Any]], str, bool, list[dict[str, Any]]], dict[str, Any]]
 AnswerSettler = Callable[[list[dict[str, Any]], str], bool]
+TurnPreparer = Callable[[AgentState], dict[str, Any]]
+TurnFinalizer = Callable[[AgentState], dict[str, Any]]
+ToolConfigurer = Callable[[list[str]], None]
+ModelFailureHandler = Callable[[Exception, str], dict[str, Any]]
 LOGGER = logging.getLogger(__name__)
 DOCUMENT_TOOLS = {'search_documents', 'read_document', 'search_knowledge'}
 STREAM_RESUMED_MARKER = '[[STREAM_RESUMED]]'
@@ -71,7 +75,7 @@ class AgentToolGraph:
     def run(
         self,
         *,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any]] | None,
         settings: StoredSettings,
         calls: BoundCalls,
         checkpoint: MemoryCheckpoint,
@@ -92,6 +96,11 @@ class AgentToolGraph:
         initial_used_skills: list[str] | None = None,
         current_used_skills: Callable[[], list[str]] | None = None,
         prepare_context: Callable[[list[dict[str, Any]], list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
+        prepare_turn: TurnPreparer | None = None,
+        finalize_turn: TurnFinalizer | None = None,
+        configure_tools: ToolConfigurer | None = None,
+        model_failure: ModelFailureHandler | None = None,
+        initial_state: dict[str, Any] | None = None,
         checkpointer: BaseCheckpointSaver[Any] | None = None,
         thread_id: str | None = None,
     ) -> AgentState:
@@ -107,16 +116,9 @@ class AgentToolGraph:
                 {'type': 'subagent_results', **result}, ensure_ascii=False)}]
             if on_tool_results is not None:
                 extra.extend(cast(list[dict[str, Any]], on_tool_results([result])))
-            return {'messages': [*state['messages'], *extra],
+            return {'messages': extra,
                     'inbox_deliveries': [*state['inbox_deliveries'], delivery],
                     'watching_inbox': watching}
-
-        def collect_inbox(state: AgentState) -> dict[str, Any]:
-            """完整工具回复之后自动领取当前回答的结果，等待逻辑不占模型轮次。"""
-            if receive_inbox is None:
-                return {}
-            result = receive_inbox(state['messages'], f'automatic:{state["round_index"]}', False, active_tools(state))
-            return inbox_update(state, result)
 
         def model_input(current: list[dict[str, Any]], clean: bool = True) -> list[dict[str, Any]]:
             """统一组装系统提示与动态指令，可保留内部标记交给压缩器。"""
@@ -133,16 +135,38 @@ class AgentToolGraph:
             return available_tool_definitions(
                 tools, state['tool_failures'], state['document_calls'], self.maximum_tool_retries)
 
-        def prepare_model(state: AgentState) -> dict[str, Any]:
-            """模型请求前压缩旧交互，节点返回后先持久化再执行实际模型调用。"""
-            if prepare_context is None:
+        def prepare_model_attempt(state: AgentState) -> dict[str, Any]:
+            """自动收信并在模型请求前压缩旧交互，持久化完成后再调用模型。"""
+            if state.get('failure'):
                 return {}
-            updated = prepare_context(model_input(state['messages'], clean=False), active_tools(state))
-            return {'messages': [*(message for message in state['messages'] if message.get('role') == 'system'),
-                *(message for message in updated if message.get('role') != 'system')]}
+            if configure_tools is not None:
+                configure_tools(list(state.get('source_attachment_ids', [])))
+            working = state
+            if receive_inbox is not None and state['watching_inbox']:
+                result = receive_inbox(state['messages'], f'automatic:{state["round_index"]}', False, active_tools(state))
+                working = cast(AgentState, {**dict(state), **inbox_update(state, result)})
+            if prepare_context is None:
+                return ({'messages': {'replace': working['messages']}, 'watching_inbox': working['watching_inbox']}
+                        if working is not state else {})
+            updated = prepare_context(model_input(working['messages'], clean=False), active_tools(working))
+            return {'messages': {'replace': [*(message for message in working['messages'] if message.get('role') == 'system'),
+                *(message for message in updated if message.get('role') != 'system')]}}
 
-        def call_model(state: AgentState) -> dict[str, Any]:
+        def prepare_model(state: AgentState) -> dict[str, Any]:
+            """把收信或压缩的终止错误写入统一失败状态，避免越过最终收尾。"""
+            try:
+                return prepare_model_attempt(state)
+            except (ValueError, LookupError, ModelFailure, WebRequestFailure) as error:
+                if model_failure is not None:
+                    return model_failure(error, '')
+                return {'failure': str(error), 'answer': str(error)}
+
+        last_visible_chunks: list[str] = []
+
+        def call_model_attempt(state: AgentState) -> dict[str, Any]:
             """组装完整活动指令，每次实际外发及断线续写都按请求重新检查预算。"""
+            if state.get('failure'):
+                return {}
             index = state["round_index"]
             if index >= self.maximum_rounds:
                 raise ValueError("工具调用达到本次执行上限；已完成的操作保留，请缩小范围后继续。")
@@ -154,6 +178,7 @@ class AgentToolGraph:
                 if on_round_start is not None:
                     on_round_start()
                 content: list[str] = []
+                last_visible_chunks.clear()
                 reasoning: list[str] = []
                 partial_calls: dict[int, dict[str, Any]] = {}
                 attempt_messages = model_messages
@@ -185,12 +210,14 @@ class AgentToolGraph:
                                 # 第一批恢复内容前写入持久标记，用户能看到真实的断点位置。
                                 if resume_marker_pending:
                                     content.append(STREAM_RESUMED_MARKER)
+                                    last_visible_chunks.append(STREAM_RESUMED_MARKER)
                                     if on_content is not None:
                                         on_content(STREAM_RESUMED_MARKER)
                                     if on_stream_status is not None:
                                         on_stream_status('resumed', attempt - 1, LIMITS.stream_attempts)
                                     resume_marker_pending = False
                                 content.append(chunk.content)
+                                last_visible_chunks.append(chunk.content)
                                 if on_content is not None:
                                     on_content(chunk.content)
                             if chunk.reasoning_content:
@@ -240,16 +267,33 @@ class AgentToolGraph:
             tool_calls = reply.get("tool_calls") or []
             LOGGER.info("event=tool_model round=%s tools=%s", index, [item.get("function", {}).get("name") for item in tool_calls])
             return {
-                "messages": [*state["messages"], reply],
+                "messages": [reply],
                 "tool_calls": tool_calls,
                 "round_index": index + 1,
             }
 
-        def route_model(state: AgentState) -> Literal["execute_tools", "settle_answer"]:
-            """模型无工具调用时先检查子任务收尾，避免提前结束并丢弃完成结果。"""
-            return "execute_tools" if state["tool_calls"] else "settle_answer"
+        def call_model(state: AgentState) -> dict[str, Any]:
+            """将模型和连接错误转成统一失败状态，保留已产生正文供最终收尾。"""
+            try:
+                return call_model_attempt(state)
+            except (ValueError, ModelFailure, WebRequestFailure) as error:
+                partial = visible_stream_content(last_visible_chunks)
+                if model_failure is not None:
+                    return model_failure(error, partial)
+                return {'failure': str(error), 'answer': partial or str(error)}
+            except Exception as error:
+                partial = visible_stream_content(last_visible_chunks)
+                if model_failure is not None:
+                    return model_failure(error, partial)
+                return {'failure': '回答执行中断，请重试。', 'answer': partial}
 
-        def execute_tools(state: AgentState) -> dict[str, Any]:
+        def route_model(state: AgentState) -> Literal['execute_tools', 'finalize']:
+            """失败直接收尾，有工具调用进入工具节点，否则进入统一最终处理。"""
+            if state.get('failure'):
+                return 'finalize'
+            return 'execute_tools' if state['tool_calls'] else 'finalize'
+
+        def execute_tools_attempt(state: AgentState) -> dict[str, Any]:
             """按输入状态执行工具批次，返回工具消息与额度状态；联网最终失败缓存，分类耗尽只禁用同类工具。"""
             tool_messages: list[dict[str, Any]] = []
             executed_results: list[dict[str, Any]] = []
@@ -382,7 +426,7 @@ class AgentToolGraph:
                     watching = bool(result['active_count'])
             LOGGER.info("event=tool_execute names=%s", names)
             return {
-                "messages": [*state["messages"], *tool_messages],
+                "messages": tool_messages,
                 "tool_calls": [],
                 "used_tools": True,
                 "tool_failures": failures,
@@ -391,55 +435,62 @@ class AgentToolGraph:
                 'watching_inbox': watching,
             }
 
-        def route_tools(state: AgentState) -> Literal['collect_inbox', 'call_model']:
-            """仅在编排工具启用过信箱时于工具批次后收信，普通业务工具直接回模型。"""
-            return 'collect_inbox' if state['watching_inbox'] else 'call_model'
+        def execute_tools(state: AgentState) -> dict[str, Any]:
+            """把工具批次中的终止错误写入统一失败状态，交给最终收尾。"""
+            try:
+                return execute_tools_attempt(state)
+            except (ValueError, LookupError, ModelFailure, WebRequestFailure) as error:
+                if model_failure is not None:
+                    return model_failure(error, '')
+                return {'failure': str(error), 'answer': str(error)}
+            except Exception:
+                if model_failure is not None:
+                    return model_failure(RuntimeError('工具执行中断。'), '')
+                return {'failure': '工具执行中断。', 'answer': ''}
 
-        def settle_candidate(state: AgentState) -> dict[str, Any]:
-            """子任务未结束则后端等待，收到结果后继续分析，否则提交候选答案。"""
+        def finalize(state: AgentState) -> dict[str, Any]:
+            """结束前收取后台结果，确认可交付后调用本轮统一业务收尾。"""
+            if state.get('failure'):
+                return finalize_turn(state) if finalize_turn is not None else {'settled': True}
             answer = str(state['messages'][-1].get('content') or '').strip()
-            if settle_answer is None or settle_answer(state['messages'], answer):
-                return {'settled': True}
-            assert receive_inbox is not None
-            result = receive_inbox(state['messages'], f'settle:{state["round_index"]}', True, active_tools(state))
-            return {**inbox_update(state, result), 'settled': False}
+            current = [dict(message) for message in state['messages']]
+            if settle_answer is None or settle_answer(current, answer):
+                settled = cast(AgentState, {**dict(state), 'messages': current,
+                                            'answer': answer or None, 'settled': True})
+                return finalize_turn(settled) if finalize_turn is not None else {
+                    'messages': {'replace': current}, 'answer': answer or None, 'settled': True}
+            if receive_inbox is not None:
+                result = receive_inbox(current, f'settle:{state["round_index"]}', True, active_tools(state))
+                return {**inbox_update({**state, 'messages': current}, result), 'settled': False}
+            return {'messages': {'replace': current}, 'settled': False}
 
-        def route_settle(state: AgentState) -> Literal['finish', 'collect_inbox']:
-            """只允许已确认关闭的候选答案结束，其他情况进入下一轮收信。"""
-            return 'finish' if state['settled'] else 'collect_inbox'
-
-        def finish(state: AgentState) -> dict[str, Any]:
-            """返回最后一轮流式文本作为回答，并保留是否执行过工具。"""
-            reply = state["messages"][-1]
-            answer = str(reply.get("content") or "").strip()
-            LOGGER.info("event=tool_finish used_tools=%s round=%s", state["used_tools"], state["round_index"])
-            return {"answer": answer or None}
+        def route_finalize(state: AgentState) -> Literal['prepare_model', '__end__']:
+            """正常提交或失败终结后结束，否则带着新结果回到模型准备。"""
+            return '__end__' if state['settled'] or state.get('failure') else 'prepare_model'
 
         builder = StateGraph(AgentState)
+        if prepare_turn is not None:
+            builder.add_node('prepare_context', cast(Any, prepare_turn))
         builder.add_node('prepare_model', prepare_model)
-        builder.add_node('collect_inbox', collect_inbox)
         builder.add_node("call_model", call_model)
         builder.add_node("execute_tools", execute_tools)
-        builder.add_node("finish", finish)
-        builder.add_node('settle_answer', settle_candidate)
-        builder.add_edge(START, 'prepare_model')
+        builder.add_node('finalize', finalize)
+        builder.add_edge(START, 'prepare_context' if prepare_turn is not None else 'prepare_model')
+        if prepare_turn is not None:
+            builder.add_edge('prepare_context', 'prepare_model')
         builder.add_edge('prepare_model', 'call_model')
-        builder.add_edge('collect_inbox', 'prepare_model')
         builder.add_conditional_edges(
             "call_model",
             route_model,
-            {"execute_tools": "execute_tools", "settle_answer": "settle_answer"},
+            {"execute_tools": "execute_tools", "finalize": "finalize"},
         )
-        builder.add_conditional_edges('execute_tools', route_tools,
-                                      {'collect_inbox': 'collect_inbox', 'call_model': 'prepare_model'})
-        builder.add_conditional_edges('settle_answer', route_settle,
-                                      {'finish': 'finish', 'collect_inbox': 'collect_inbox'})
-        builder.add_edge("finish", END)
+        builder.add_edge('execute_tools', 'prepare_model')
+        builder.add_conditional_edges('finalize', route_finalize,
+                                      {'prepare_model': 'prepare_model', '__end__': END})
         graph = builder.compile(checkpointer=checkpointer)
-        raw_messages = [*messages]
         initial: AgentState = {
             "version": STATE_VERSION, "used_skills": list(dict.fromkeys(initial_used_skills or [])),
-            "messages": raw_messages,
+            'messages': [],
             "tool_calls": [],
             "round_index": 0,
             "used_tools": False,
@@ -450,6 +501,13 @@ class AgentToolGraph:
             'settled': False,
             'watching_inbox': False,
         }
+        if messages is not None:
+            initial['messages'] = [*messages]
+        if initial_state is not None:
+            overrides = dict(initial_state)
+            # 工作消息由 reducer 单独合入，调用方的默认空列表不能覆盖本轮输入。
+            overrides.pop('messages', None)
+            initial.update(cast(AgentState, overrides))
         # Skill 可在运行中把业务轮数上限提高到 128；图递归上限必须提前预留，
         # 否则 LangGraph 会在调用模型的业务上限生效前截断执行。
         recursion_rounds = (max(self.maximum_rounds, LIMITS.skill_rounds)
@@ -464,5 +522,9 @@ class AgentToolGraph:
                 raise ValueError("Agent 检查点版本不兼容，请重试。")
             if saved.next:
                 return cast(AgentState, graph.invoke(None, config, durability='sync'))
-            return cast(AgentState, saved.values)
+            if messages is None and initial_state is None:
+                return cast(AgentState, saved.values)
+            # 新轮只提交本轮增量；messages 的 reducer 会合并到已保存的工作上下文。
+            turn_input = {**initial, 'messages': messages or []}
+            return cast(AgentState, graph.invoke(cast(AgentState, turn_input), config, durability='sync'))
         return cast(AgentState, graph.invoke(initial, config, durability='sync' if checkpointer is not None else None))

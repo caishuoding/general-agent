@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 from general_agent.agent import AgentToolGraph
+from general_agent.agent.state import AgentState
 from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.infrastructure.provider import ModelConnectionFailure, StreamChunk, ToolCallDelta
 from general_agent.infrastructure.settings import StoredSettings
@@ -84,22 +85,51 @@ def test_connection_interruption_resumes_from_visible_prefix(monkeypatch: pytest
     assert '不要重复已经输出的内容' in retry_messages[-1]['content']
 
 
-def test_connection_retry_exhaustion_has_specific_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """连续断线时仅进行配置允许的自动尝试，并返回明确的恢复失败说明。"""
+def test_connection_retry_exhaustion_is_finalized_as_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """连续断线时仅进行配置允许的自动尝试，并通过统一收尾返回明确失败。"""
     monkeypatch.setattr('general_agent.agent.graph.time.sleep', lambda _: None)
     calls = MagicMock()
     calls.stream.side_effect = [ModelConnectionFailure('连接中断。') for _ in range(LIMITS.stream_attempts)]
 
-    with pytest.raises(ModelConnectionFailure, match='自动恢复 2 次后仍未成功'):
-        AgentToolGraph().run(
-            messages=[{'role': 'user', 'content': '回答'}],
-            settings=settings(),
-            calls=calls,
-            checkpoint=cast(MemoryCheckpoint, checkpoint()),
-            tools=[],
-            execute_tool=MagicMock(),
-        )
+    result = AgentToolGraph().run(
+        messages=[{'role': 'user', 'content': '回答'}],
+        settings=settings(),
+        calls=calls,
+        checkpoint=cast(MemoryCheckpoint, checkpoint()),
+        tools=[],
+        execute_tool=MagicMock(),
+    )
+    assert result['failure'] == '模型连接中断，自动恢复 2 次后仍未成功。'
+    assert result['settled'] is True
     assert calls.stream.call_count == LIMITS.stream_attempts == 3
+
+
+def test_full_cycle_prepares_and_finalizes_inside_one_graph() -> None:
+    """主流程直接装配上下文、模型循环和最终提交，不再经过 agent 包装节点。"""
+    calls = MagicMock()
+    calls.stream.return_value = [StreamChunk(content='完整回答')]
+    events: list[str] = []
+
+    def prepare(state: AgentState) -> dict[str, Any]:
+        """向共享图补入本轮材料并记录节点顺序。"""
+        events.append('prepare')
+        return {'messages': {'replace': [*state['messages'], {'role': 'user', 'content': '资料'}]}}
+
+    def finalize(state: AgentState) -> dict[str, Any]:
+        """记录最终提交并确认本轮可结束。"""
+        events.append('finalize')
+        return {'answer': state['answer'], 'settled': True}
+
+    result = AgentToolGraph().run(
+        messages=[{'role': 'user', 'content': '回答'}], settings=settings(), calls=calls,
+        checkpoint=cast(MemoryCheckpoint, checkpoint()), tools=[], execute_tool=MagicMock(),
+        prepare_turn=prepare, finalize_turn=finalize,
+    )
+
+    assert events == ['prepare', 'finalize']
+    assert result['answer'] == '完整回答'
+    assert result['settled'] is True
+    assert [message['role'] for message in result['messages']] == ['user', 'user', 'assistant']
 
 
 def test_model_receives_one_combined_system_message() -> None:

@@ -36,15 +36,12 @@ if mode == 'offline':
     limits.LIMITS = replace(limits.LIMITS, answer_seconds=3, run_seconds=3)
 marker = Path(os.environ['TEST_RECOVERY_MARKER'])
 original = PostgresSaver.put
-positions = {}
 def put(self, config, checkpoint, metadata, new_versions):
     """在真实数据库提交前暂停，业务结果仍通过正常应用接口产生。"""
     values = checkpoint.get('channel_values', {})
     start = values.get('__start__', {})
-    if isinstance(start, dict) and start.get('answer_id'):
-        positions[start['answer_id']] = start['history_position']
     before = mode == 'before_input' and isinstance(start, dict) and any(item.get('content') == '第二轮' for item in start.get('messages', []))
-    after = mode == 'after_finalize' and values.get('answer') and values.get('history_position', 0) > positions.get(values.get('answer_id'), float('inf'))
+    after = mode == 'after_finalize' and values.get('settled') and values.get('answer')
     if (before or after) and not marker.exists():
         marker.write_text('reached')
         Event().wait(30)
@@ -53,12 +50,12 @@ PostgresSaver.put = put
 if mode == 'before_finalize':
     from general_agent.agent.conversation import ConversationGraph
     original_finalize = ConversationGraph.finalize
-    def finalize(self, state, runtime):
+    def finalize(self, state, context):
         """在 Agent 已完成、业务 finalize 尚未提交时暂停一次。"""
         if not marker.exists():
             marker.write_text('reached')
             Event().wait(30)
-        return original_finalize(self, state, runtime)
+        return original_finalize(self, state, context)
     ConversationGraph.finalize = finalize
 '''
     (tmp_path / 'recovery_hook.py').write_text(hook)
