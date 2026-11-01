@@ -149,6 +149,8 @@ class Checkpoints:
             connection.execute('DELETE FROM checkpoint_threads t WHERE NOT EXISTS (SELECT 1 FROM conversations c WHERE c.id=t.conversation_id AND NOT c.deleting)')
 
     def register(self, thread_id: str, conversation_id: UUID, answer_id: UUID) -> None:
-        """登记线程归属，供删除、失效和保留策略按业务身份清理。"""
+        """只允许仍在生成的回答登记线程，延迟启动的旧线程不能夺取归属。"""
         with self.database.connect() as connection:
-            connection.execute('INSERT INTO checkpoint_threads(thread_id,conversation_id,answer_id) VALUES(%s,%s,%s) ON CONFLICT(thread_id) DO UPDATE SET answer_id=EXCLUDED.answer_id', (thread_id, conversation_id, answer_id))
+            saved = connection.execute("INSERT INTO checkpoint_threads(thread_id,conversation_id,answer_id) SELECT %s,m.conversation_id,m.id FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.id=%s AND m.conversation_id=%s AND m.status='generating' AND NOT c.deleting ON CONFLICT(thread_id) DO UPDATE SET answer_id=EXCLUDED.answer_id RETURNING thread_id", (thread_id, answer_id, conversation_id)).fetchone()
+            if not saved:
+                raise ExecutionPaused()

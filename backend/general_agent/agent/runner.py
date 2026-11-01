@@ -89,6 +89,33 @@ class AgentRuntime:
                             connection.execute("UPDATE skill_tasks SET status='waiting',updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status='active'", (UUID(task['payload']['task_id']),))
                 self.repository.close(answer_id)
 
+    def heartbeat(self) -> None:
+        """记录进程仍实际执行的时间，离线和等待续接不消耗剩余执行时长。"""
+        with self.repository.database.connect() as connection:
+            connection.execute("UPDATE messages SET execution_heartbeat=CURRENT_TIMESTAMP WHERE status='generating' AND resume_model_revision IS NOT NULL")
+
+    def resume(self, connection: Any, message: dict[str, Any], account_id: UUID,
+               settings: StoredSettings) -> OperationContext:
+        """在认领事务内验证执行材料和配置，恢复原身份并补偿暂停时长。"""
+        answer_id, conversation_id = message['id'], message['conversation_id']
+        if message['resume_model_revision'] != settings.revision:
+            raise ValueError('模型配置已变化，请重试创建新的回答。')
+        root = connection.execute('SELECT * FROM agents WHERE answer_attempt_id=%s AND parent_agent_id IS NULL', (answer_id,)).fetchone()
+        if root and root['source_snapshot'] != self.repository.snapshot(conversation_id):
+            raise ValueError('资料范围已变化，请重新提问。')
+        if root and root['deadline'] <= message['interrupted_at']:
+            raise ValueError('原执行在中断前已超时，请重试。')
+        states = connection.execute("SELECT s.payload FROM agent_messages s JOIN agent_runs r ON r.id=s.run_id JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s AND a.parent_agent_id IS NULL AND s.step_key='runtime:skill'", (answer_id,)).fetchall()
+        for state in states:
+            if self.skills and state['payload'].get('task_id'):
+                self.skills.service.instructions(UUID(state['payload']['task_id']), account_id, conversation_id)
+        operation = connection.execute('SELECT * FROM cloud_operations WHERE id=%s', (message['operation_id'],)).fetchone()
+        if not operation or operation['cancelled'] or operation['invalidated']:
+            raise ValueError('原操作已停止或来源已失效，请重新提问。')
+        connection.execute('UPDATE agents SET deadline=deadline+(CURRENT_TIMESTAMP-%s),closed=FALSE WHERE answer_attempt_id=%s', (message['interrupted_at'], answer_id))
+        connection.execute("UPDATE agent_runs r SET deadline=r.deadline+(CURRENT_TIMESTAMP-coalesce(r.paused_at,%s)),paused_at=NULL,status=CASE WHEN a.parent_agent_id IS NOT NULL THEN 'queued' ELSE 'running' END FROM agents a WHERE r.agent_id=a.id AND a.answer_attempt_id=%s AND (a.parent_agent_id IS NULL OR r.status IN ('queued','running'))", (message['interrupted_at'], answer_id))
+        return OperationContext(operation['id'], operation['purpose'], conversation_id, account_id)
+
     def execute(self, run_id: UUID, user_id: UUID, answer_id: UUID, settings: StoredSettings,
                 messages: list[dict[str, Any]], on_content: Callable[[str], None] | None,
                 attachment_ids: list[UUID] | None,

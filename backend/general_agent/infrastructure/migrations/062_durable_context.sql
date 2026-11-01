@@ -2,6 +2,7 @@ ALTER TABLE messages DROP CONSTRAINT messages_status_check;
 ALTER TABLE messages ADD CONSTRAINT messages_status_check CHECK(status IN ('generating','complete','stopped','failed','interrupted'));
 ALTER TABLE messages ADD COLUMN resume_model_revision TEXT;
 ALTER TABLE messages ADD COLUMN interrupted_at TIMESTAMPTZ;
+ALTER TABLE messages ADD COLUMN execution_heartbeat TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
 ALTER TABLE agent_runs ADD COLUMN paused_at TIMESTAMPTZ;
 CREATE TABLE checkpoint_threads (
     thread_id TEXT PRIMARY KEY,

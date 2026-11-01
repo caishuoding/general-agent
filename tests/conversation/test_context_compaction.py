@@ -15,6 +15,9 @@ def test_compacted_context_survives_restart_without_changing_chat_history(databa
     """旧回答压缩成摘要后，下一条及重启后继续使用摘要，原消息仍完整可读。"""
     catalog = tmp_path / 'empty-catalog'
     catalog.mkdir()
+    skill = catalog / 'demo'
+    skill.mkdir()
+    (skill / 'SKILL.md').write_text('---\nname: demo\ndescription: |\n  第一行完整描述\n  第二行完整描述\n---\n# 指令')
     monkeypatch.setenv('SKILLS_DIR', str(catalog))
     observed: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
@@ -35,13 +38,16 @@ def test_compacted_context_survives_restart_without_changing_chat_history(databa
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation = client.post('/api/conversations', json={}).json()['id']
         assert client.post(f'/api/conversations/{conversation}/messages', json={'content': '按蓝白配色准备产品汇报'}).status_code == 200
-        sent = client.post(f'/api/conversations/{conversation}/messages', json={'content': '继续排版，标题保持原样'})
+        sent = client.post(f'/api/conversations/{conversation}/messages', json={'content': '继续排版，标题保持原样', 'skills': ['demo']})
         assert sent.status_code == 200, sent.text
         assert summaries, '上下文接近阈值时应先生成摘要'
         request_text = json.dumps(observed[-1]['messages'], ensure_ascii=False)
         assert '用户目标：完成产品汇报' in request_text
         assert long_answer not in request_text
-        assert observed[-1]['messages'][-1]['content'] == '继续排版，标题保持原样'
+        assert observed[-1]['messages'][-1]['content'].endswith('用户需求：\n继续排版，标题保持原样')
+        description = sent.json()['messages'][2]['skill_selections'][0]['description']
+        assert description in observed[-1]['messages'][-1]['content']
+        assert description not in json.dumps(summaries, ensure_ascii=False)
         assert sent.json()['messages'][1]['content'] == long_answer
     before = len(summaries)
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:

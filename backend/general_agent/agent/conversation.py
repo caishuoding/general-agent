@@ -80,20 +80,31 @@ class ConversationGraph:
         self.compiled = builder.compile(name='conversation')
 
     def run(self, context: ConversationContext, rows: list[dict[str, Any]], reserved_call_id: UUID | None = None) -> ConversationResult:
-        """从会话检查点恢复工作消息，仅合入新业务消息；旧会话首次使用完整历史。"""
+        """对齐已提交回答水位后恢复工作消息，仅合入新消息并按稳定身份去重。"""
         position = max((int(row.get("position", 0)) for row in rows), default=0)
         source_snapshot: dict[str, Any] = {}
         inherited_runtime: dict[str, Any] = {}
         if self.checkpoints is not None:
             source_snapshot = self.execution.agent_runtime.repository.snapshot(context.conversation_id)
             previous = self.checkpoints.values(str(context.conversation_id))
+            if previous.get('answer_id'):
+                with self.database.connect() as connection:
+                    committed = connection.execute('SELECT id,position,content,status FROM messages WHERE id=%s AND conversation_id=%s', (UUID(previous['answer_id']), context.conversation_id)).fetchone()
+                if committed and committed['status'] == 'complete':
+                    previous['history_position'] = max(previous.get('history_position', 0), committed['position'])
+                    previous['messages'] = self.answered_messages(previous.get('messages', []), committed['content'])
+                    previous['messages'][-1]['_message_id'] = str(committed['id'])
+                else:
+                    previous = {}
             if (previous.get("version") == STATE_VERSION and not previous.get("failure")
                     and previous.get("source_snapshot") == source_snapshot
                     and previous.get("history_position", 0) < position):
                 inherited_runtime = previous.get('runtime_state', {})
                 recent = [{**message, "_model_message": True} for message in previous.get("messages", [])
                           if message.get("role") != "system" and not message.get('_context_material')]
-                rows = [*recent, *(row for row in rows if int(row.get("position", 0)) > previous.get("history_position", 0))]
+                known = {message.get('_message_id') for message in recent if message.get('_message_id')}
+                rows = [*recent, *(row for row in rows if int(row.get('position', 0)) > previous.get('history_position', 0)
+                    and str(row.get('id')) not in known)]
         initial: ConversationState = {
             'version': STATE_VERSION, 'answer_id': str(context.assistant_message_id),
             'history_position': position, 'source_snapshot': source_snapshot, 'runtime_state': inherited_runtime,
@@ -258,9 +269,11 @@ class ConversationGraph:
         LOGGER.info('event=node finalize message_id=%s status=%s characters=%s', context.assistant_message_id, 'failed' if failure else 'complete', len(answer))
         with self.database.connect() as connection:
             saved = connection.execute('SELECT position FROM messages WHERE id=%s', (context.assistant_message_id,)).fetchone()
+        final_messages = self.answered_messages(state['messages'], answer)
+        final_messages[-1]['_message_id'] = str(context.assistant_message_id)
         return {'history_position': int(saved['position']) if saved and self.checkpoints else state.get('history_position', 0),
                 'answer': answer, 'web_sources': web_sources, 'knowledge_sources': knowledge_sources,
-                'messages': self.answered_messages(state['messages'], answer)}
+                'messages': final_messages}
 
     @staticmethod
     def answered_messages(messages: list[dict[str, Any]], answer: str) -> list[dict[str, Any]]:

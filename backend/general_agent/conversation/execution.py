@@ -96,10 +96,11 @@ class ChatExecution:
         conversation: list[ModelMessage] = [system_prompt, *data_messages]
         for index, row in enumerate(rows):
             if row.get('_model_message'):
-                conversation.append(cast(ModelMessage, {key: value for key, value in row.items() if key in ('role', 'content', 'tool_calls', 'tool_call_id', '_context_summary')}))
+                conversation.append(cast(ModelMessage, {key: value for key, value in row.items() if key in ('role', 'content', 'tool_calls', 'tool_call_id', '_context_summary', '_message_id')}))
             else:
                 conversation.append(cast(ModelMessage, {'role': str(row['role']), 'content': user_skill_content(str(row['content']), row.get('skill_selections') or [])
-                    if row['role'] == 'user' else str(row['content']), **({'_current_request': True} if index == len(rows) - 1 else {})}))
+                    if row['role'] == 'user' else str(row['content']), **({'_message_id': str(row['id'])} if row.get('id') else {}),
+                    **({'_current_request': True} if index == len(rows) - 1 else {})}))
         return AnswerPreparation(conversation, material, chat_reserved)
 
     def chat_reservation(self, content: str, reserved: UUID | None) -> UUID | None:

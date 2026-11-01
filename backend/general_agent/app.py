@@ -180,12 +180,25 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
                         # 暂时不可用的数据库留待下一轮，不终止后续清理。
                         logging.getLogger(__name__).exception('附件到期清理暂未完成')
 
+        async def execution_heartbeat() -> None:
+            """每秒保存执行心跳，重启按最后活跃时间冻结截止期限。"""
+            while not stopped.is_set():
+                try:
+                    await asyncio.wait_for(stopped.wait(), timeout=1)
+                except TimeoutError:
+                    try:
+                        await asyncio.to_thread(execution.agent_runtime.heartbeat)
+                    except Exception:
+                        logging.getLogger(__name__).exception('执行心跳暂未保存')
+
+        heartbeat = asyncio.create_task(execution_heartbeat())
         expiration = asyncio.create_task(expire_attachments())
         try:
             yield
         finally:
             stopped.set()
             await expiration
+            await heartbeat
             await asyncio.to_thread(streaming.close)
             await asyncio.to_thread(execution.agent_runtime.orchestrator.close)
             if execution.agent_runtime.skills is not None:

@@ -34,7 +34,7 @@ class StreamingChat:
     def recover(self) -> None:
         """重启保留可续接回答及执行身份，遗留外部请求只结算为中断。"""
         with self.database.connect() as connection:
-            connection.execute("UPDATE messages SET status='interrupted',error='应用重启中断了执行，可从保存的位置继续。',progress=NULL,interrupted_at=coalesce(interrupted_at,CURRENT_TIMESTAMP) WHERE status='generating' AND resume_model_revision IS NOT NULL")
+            connection.execute("UPDATE messages SET status='interrupted',error='应用重启中断了执行，可从保存的位置继续。',progress=NULL,interrupted_at=coalesce(interrupted_at,execution_heartbeat,created_at) WHERE status='generating' AND resume_model_revision IS NOT NULL")
             connection.execute("UPDATE agent_runs r SET paused_at=coalesce(paused_at,m.interrupted_at) FROM agents a,messages m WHERE r.agent_id=a.id AND a.answer_attempt_id=m.id AND m.status='interrupted' AND r.status IN ('queued','running')")
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE WHERE id IN (SELECT operation_id FROM messages WHERE status='generating')")
             connection.execute("UPDATE messages SET status='failed',error='旧版本执行没有检查点，请重试。',progress=NULL WHERE status='generating'")
@@ -137,32 +137,16 @@ class StreamingChat:
                     raise ValueError('只能继续本会话最新的中断回答。')
                 if row['status'] == 'generating':
                     return
-                if row['resume_model_revision'] != settings.revision:
-                    raise ValueError('模型配置已变化，请恢复原配置或重试创建新的回答。')
                 saved = checkpoints.values(str(conversation_id))
-                if saved and (saved.get('version') != STATE_VERSION or saved.get('answer_id') != str(message_id)):
-                    raise ValueError('检查点版本或回答身份不匹配，请重试。')
-                root = connection.execute('SELECT * FROM agents WHERE answer_attempt_id=%s AND parent_agent_id IS NULL', (message_id,)).fetchone()
-                repository = self.execution.agent_runtime.repository
-                if root and root['source_snapshot'] != repository.snapshot(conversation_id):
-                    raise ValueError('资料范围已变化，请重新提问。')
-                if root and root['deadline'] <= row['interrupted_at']:
-                    raise ValueError('原执行在中断前已超时，请重试。')
-                with self.database.connect() as state_connection:
-                    skill_states = state_connection.execute("SELECT s.payload FROM agent_messages s JOIN agent_runs r ON r.id=s.run_id JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s AND a.parent_agent_id IS NULL AND s.step_key='runtime:skill'", (message_id,)).fetchall()
-                skills = self.execution.agent_runtime.skills
-                for state in skill_states:
-                    if skills and state['payload'].get('task_id'):
-                        skills.service.instructions(UUID(state['payload']['task_id']), account_id, conversation_id)
-                operation = connection.execute('SELECT * FROM cloud_operations WHERE id=%s', (row['operation_id'],)).fetchone()
-                if not operation or operation['cancelled'] or operation['invalidated']:
-                    raise ValueError('原操作已停止或来源已失效，请重新提问。')
-                connection.execute("UPDATE agents SET deadline=deadline+(CURRENT_TIMESTAMP-%s),closed=FALSE WHERE answer_attempt_id=%s", (row['interrupted_at'], message_id))
-                connection.execute("UPDATE agent_runs r SET deadline=r.deadline+(CURRENT_TIMESTAMP-coalesce(r.paused_at,%s)),paused_at=NULL,status=CASE WHEN a.parent_agent_id IS NOT NULL THEN 'queued' ELSE 'running' END FROM agents a WHERE r.agent_id=a.id AND a.answer_attempt_id=%s AND (a.parent_agent_id IS NULL OR r.status IN ('queued','running'))", (row['interrupted_at'], message_id))
+                if saved and saved.get('version') != STATE_VERSION:
+                    raise ValueError('检查点版本不匹配，请重试。')
+                # 业务消息先于首次检查点落库，已有旧会话快照不代表新回答已开始。
+                own_checkpoint = bool(saved and saved.get('answer_id') == str(message_id))
+                operation = self.execution.agent_runtime.resume(connection, row, account_id, settings)
                 connection.execute("UPDATE messages SET status='generating',error=NULL,interrupted_at=NULL,progress=%s WHERE id=%s", (Jsonb(PREPARING_PROGRESS), message_id))
                 context = ConversationContext(conversation_id, account_id, row['reply_to'], message_id, settings,
-                    OperationContext(operation['id'], operation['purpose'], conversation_id, account_id), 'stream')
-        thread = Thread(target=self.continue_answer, args=(context, bool(saved)), daemon=True)
+                    operation, 'stream')
+        thread = Thread(target=self.continue_answer, args=(context, own_checkpoint), daemon=True)
         with self.lock:
             self.threads = {item for item in self.threads if item.is_alive()}
             self.threads.add(thread)
