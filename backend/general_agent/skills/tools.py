@@ -56,13 +56,6 @@ class PollInput(TaskInput):
     wait_seconds: int = Field(default=10, ge=0, le=20)
 
 
-class StateInput(TaskInput):
-    """保存工作流阶段和面向用户的等待状态。"""
-    status: str
-    stage: str = Field(max_length=2000)
-    route: str = Field(default='', max_length=100)
-
-
 class ImportInput(TaskInput):
     """将用户有权使用的会话附件或已选知识库原件复制到任务输入目录。"""
     source_id: str
@@ -88,7 +81,6 @@ DEFINITIONS: list[tuple[str, str, type[BaseModel]]] = [
     ('write_work_file', '在当前任务 /workspace 内创建或修改文本，不接受宿主路径。', WriteFileInput),
     ('run_skill_command', '在隔离任务容器 /workspace 异步执行 shell 命令，返回 command_id，之后用 poll_skill_command 取得真实退出码；读取 Skill 后按其命令执行。', CommandInput),
     ('poll_skill_command', '等待并读取当前任务命令的真实状态和有界日志。running 表示尚未完成，非零退出码必须检查并按工作流修复。', PollInput),
-    ('save_skill_task', '保存当前工作流、阶段和任务状态。需要用户确认时设 waiting 并结束当前回答，收到确认后显式续接；完成设 completed。', StateInput),
     ('import_skill_source', '将本会话有效 attachment 原件或当前已选知识库 knowledge 原件复制到工作目录；返回原文件名和实际路径。', ImportInput),
     ('view_work_image', '将任务内真实 PNG/JPEG 图片发送给视觉模型检查；SVG/PDF 先在隔离环境渲染为 PNG。', PathInput),
     ('publish_skill_file', '将真实工作文件保存为不可变交付副本并返回下载地址；必须实际导出并通过上游检查后发布，不能伪造链接。', PathInput),

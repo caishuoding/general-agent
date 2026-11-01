@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from general_agent.agent.repository import RunCheckpoint
 from general_agent.attachments.service import AttachmentService
@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class SkillRuntime:
-    """有界执行命令并保存真实状态，不把模型循环或主从执行持久化成图检查点。"""
+    """保存真实命令状态和稳定调用身份，图检查点负责模型与工具循环续接。"""
 
     def __init__(self, service: SkillService, attachments: AttachmentService) -> None:
         """绑定隔离执行和受保护来源读取，后台最多同时运行三个制作命令。"""
@@ -78,9 +78,15 @@ class SkillRuntime:
                 self.sandbox.stop(row['id'])
 
     def start(self, task: UUID, checkpoint: RunCheckpoint, command: str, seconds: int) -> dict[str, Any]:
-        """原子登记每任务唯一活动命令，并交给有界线程池运行。"""
+        """按原工具调用身份复用命令记录，避免检查点重放再次启动副作用。"""
         identifier = uuid4()
+        answer_id = checkpoint.repository.info(checkpoint.run_id)['answer_attempt_id']
+        call_key = str(checkpoint.run_id) + ':' + checkpoint.current_call if checkpoint.current_call else None
         with self.lock, self.service.database.connect() as connection:
+            if call_key:
+                previous = connection.execute('SELECT id,status FROM skill_commands WHERE answer_id=%s AND tool_call_key=%s', (answer_id, call_key)).fetchone()
+                if previous:
+                    return {'command_id': str(previous['id']), 'status': previous['status'], 'reused': True}
             if self.closed:
                 raise ValueError('制作执行环境正在关闭。')
             count = connection.execute("SELECT count(*) AS n FROM skill_commands WHERE status='running'").fetchone()
@@ -89,9 +95,9 @@ class SkillRuntime:
                 raise ValueError('制作命令并发已满，请等待已有命令结束。')
             if connection.execute("SELECT id FROM skill_commands WHERE task_id=%s AND status='running'", (task,)).fetchone():
                 raise ValueError('当前任务已有命令正在执行，请先轮询该命令。')
-            connection.execute('INSERT INTO skill_commands(id,task_id,answer_id,command,deadline) VALUES(%s,%s,%s,%s,%s)',
-                (identifier, task, checkpoint.repository.info(checkpoint.run_id)['answer_attempt_id'], command,
-                 datetime.now(timezone.utc) + timedelta(seconds=seconds)))
+            connection.execute('INSERT INTO skill_commands(id,task_id,answer_id,command,deadline,tool_call_key) VALUES(%s,%s,%s,%s,%s,%s)',
+                (identifier, task, answer_id, command,
+                 datetime.now(timezone.utc) + timedelta(seconds=seconds), call_key))
             connection.execute("UPDATE skill_tasks SET status='active',updated_at=CURRENT_TIMESTAMP WHERE id=%s", (task,))
         event = threading.Event()
         self.events[identifier] = event
@@ -172,6 +178,27 @@ class SkillSession:
         self.request_tools: list[dict[str, Any]] = []
         self.injected_context = ''
 
+    def snapshot(self) -> dict[str, Any]:
+        """保存任务身份及有效指令摘要，恢复时重新核对安装文件。"""
+        if self.task is None:
+            return {}
+        row = self.service.get(self.task, self.account, self.conversation)
+        return {'task_id': str(self.task), 'skill': row['skill'], 'version': row['version'],
+            'entry_digest': row['entry_digest'], 'instruction_files': row['instruction_files']}
+
+    def restore(self, snapshot: dict[str, Any]) -> None:
+        """还原固定版本任务和有效指令集合，版本不符时拒绝静默升级。"""
+        if not snapshot.get('task_id'):
+            return
+        task = UUID(snapshot['task_id'])
+        row = self.service.get(task, self.account, self.conversation)
+        if any(snapshot.get(key, row[key]) != row[key] for key in ('skill', 'version', 'entry_digest', 'instruction_files')):
+            raise ValueError('制作任务指令版本已变化，请重试。')
+        self.service.instructions(task, self.account, self.conversation)
+        self.task = task
+        with self.service.database.connect() as connection:
+            connection.execute("UPDATE skill_tasks SET status='active',updated_at=CURRENT_TIMESTAMP WHERE id=%s", (task,))
+
     def context(self, replacement: str | None = None) -> list[str]:
         """按每次请求重建可信目录和当前活动指令，历史任务只以资料摘要提供。"""
         result = [self.service.catalog.prompt()]
@@ -181,13 +208,13 @@ class SkillSession:
             '按上游顺序执行脚本，命令异步启动后必须轮询真实退出码。'
             '服务器没有桌面浏览器，启动上游预览使用 --no-browser，随后 open_skill_preview。'
             '默认 Confirm UI 启动后用 open_skill_preview(surface="confirmation") 返回真实页面；'
-            '保存 waiting 并结束当前回答，用户提交页面后回到会话要求继续，再读取实际确认回执。'
+            '需要等待用户时结束当前回答；状态由后端自动保存，用户回来后读取实际确认回执。'
             '模板库是本任务独立可写副本，路径为 SKILL_DIR/templates。'
             '模板索引与模板规范是参考资料，read_skill_file 使用 instruction=false。'
-            '用户确认环节保存 waiting 后结束回答；不能在用户确认前继续执行。'
+            '用户确认环节按 Skill 原文要求处理。'
             '需要外部图片或语音服务时使用已配置环境，不猜测配置。'
             '导出并检查后 publish_skill_file 才能提供真实下载链接。'
-            '上下文不足时先保存任务和文件并请用户继续，不声称制作完成。'
+            '工作状态由后端自动持久化，上下文由系统按预算压缩，不需要保存状态工具。'
             )
         if self.task:
             result.append(replacement if replacement is not None else self.service.instructions(self.task, self.account, self.conversation))
@@ -211,7 +238,8 @@ class SkillSession:
         """验证模型参数后执行 Skill 工具，所有文件和命令均要求本执行已显式激活任务。"""
         values = validate(name, arguments)
         if name == 'load_skill':
-            row = self.service.activate(self.account, self.conversation, values['name'], values['task_id'])
+            row = self.service.activate(self.account, self.conversation, values['name'], values['task_id'],
+                uuid5(self.checkpoint.run_id, self.checkpoint.current_call) if self.checkpoint.current_call else None)
             previous = self.task
             self.task = row['id']
             try:
@@ -252,16 +280,12 @@ class SkillSession:
             return self.runtime.start(task, self.checkpoint, values['command'], values['seconds'])
         if name == 'poll_skill_command':
             return self.runtime.poll(task, values['command_id'], values['offset'], values['wait_seconds'])
-        if name == 'save_skill_task':
-            with self.service.database.connect() as connection:
-                if values['status'] != 'active' and connection.execute("SELECT id FROM skill_commands WHERE task_id=%s AND status='running'", (task,)).fetchone():
-                    raise ValueError('请先等待活动命令结束，再保存等待或完成状态。')
-            return self.service.update(task, self.account, self.conversation, values['status'], values['stage'], values['route'])
         if name == 'import_skill_source':
             return self.import_source(task, values['source_id'], values['kind'])
         if name == 'publish_skill_file':
             return self.service.publish(task, self.account, self.conversation,
-                self.checkpoint.repository.info(self.checkpoint.run_id)['answer_attempt_id'], values['path'])
+                self.checkpoint.repository.info(self.checkpoint.run_id)['answer_attempt_id'], values['path'],
+                uuid5(self.checkpoint.run_id, self.checkpoint.current_call) if self.checkpoint.current_call else None)
         if name == 'view_work_image':
             from general_agent.attachments.images import validate_image
             from tempfile import NamedTemporaryFile

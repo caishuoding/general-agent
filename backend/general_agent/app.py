@@ -44,6 +44,7 @@ from general_agent.memory.correction import MemoryCorrection
 from general_agent.memory.correction_api import correction_router
 from general_agent.memory.deletion_api import deletion_router
 from general_agent.infrastructure.database import Database
+from general_agent.infrastructure.checkpoints import Checkpoints
 from general_agent.infrastructure.logging import configure_agent_logging
 from general_agent.infrastructure.tracing import configure_tracing
 from general_agent.memory.embedding import EmbeddingConfiguration
@@ -143,32 +144,36 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     search_settings = SettingsStore(settings.directory, 'search.json')
     search = SearchService(database, model, search_settings, memory, attachments, model_transport)
     execution = ChatExecution(model, memory, search, KnowledgeTools(knowledge))
-    conversation_graph = ConversationGraph(database, execution)
+    checkpoints = Checkpoints(database)
+    execution.agent_runtime.checkpoints = checkpoints
+    conversation_graph = ConversationGraph(database, execution, checkpoints)
     source_deletion = SourceDeletion(execution.deletion, memory, attachments.delete_file)
     chat = ChatService(database, model, execution, attachments, conversation_graph)
     streaming = StreamingChat(database, model, execution, attachments, conversation_graph)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """恢复对话、子任务与制作命令终态，停机取消执行并等待后台线程。"""
+        """初始化检查点并暂停遗留执行，停机先冻结回答再停止后台运行环境。"""
         database.migrate()
+        checkpoints.setup()
+        streaming.recover()
         execution.agent_runtime.orchestrator.recover()
         if execution.agent_runtime.skills is not None:
             execution.agent_runtime.skills.recover()
-        streaming.recover()
         attachments.recover()
         knowledge.recover()
         source_deletion.recover()
         stopped = asyncio.Event()
 
         async def expire_attachments() -> None:
-            """每分钟清理到期附件和失效制作环境；各读取路径独立检查权限与 TTL。"""
+            """每分钟清理到期附件、孤立检查点和失效制作环境。"""
             while not stopped.is_set():
                 try:
                     await asyncio.wait_for(stopped.wait(), timeout=60)
                 except TimeoutError:
                     try:
                         await asyncio.to_thread(attachments.expire)
+                        await asyncio.to_thread(checkpoints.prune)
                         if execution.agent_runtime.skills is not None:
                             await asyncio.to_thread(execution.agent_runtime.skills.maintain)
                     except Exception:
@@ -181,8 +186,8 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         finally:
             stopped.set()
             await expiration
-            await asyncio.to_thread(execution.agent_runtime.orchestrator.close)
             await asyncio.to_thread(streaming.close)
+            await asyncio.to_thread(execution.agent_runtime.orchestrator.close)
             if execution.agent_runtime.skills is not None:
                 await asyncio.to_thread(execution.agent_runtime.skills.close)
             await asyncio.to_thread(knowledge.close)
@@ -430,6 +435,21 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         scope = [str(message_id), execution.scope(str(original['content']) if original else '',saved),
                  original['skill_selections'] if original else []]
         return perform_run("chat_retry", scope, operation_id, conversation_id, account_id, retry)
+
+    @app.post('/api/conversations/{conversation_id}/messages/{message_id}/resume', status_code=202, response_model=ConversationDetail)
+    def resume_stream(conversation_id: UUID, message_id: UUID, request: Request) -> ConversationDetail:
+        """继续原回答的检查点，重复请求不会创建新的执行或用户消息。"""
+        account_id = current_user(request).id
+        saved = settings.read()
+        if saved is None:
+            raise HTTPException(409, '请先配置模型。')
+        try:
+            streaming.resume(conversation_id, account_id, message_id, saved)
+        except LookupError as error:
+            raise HTTPException(404, str(error)) from None
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
+        return read_conversation(conversation_id, account_id)
 
     @app.post("/api/conversations/{conversation_id}/messages/{message_id}/stop", response_model=ConversationDetail)
     def stop_stream(conversation_id: UUID, message_id: UUID, request: Request) -> ConversationDetail:

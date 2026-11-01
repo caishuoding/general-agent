@@ -58,6 +58,7 @@ class ToolOutcome:
     used_tools: bool
     messages: list[dict[str, Any]] | None = None
     knowledge_source_candidates: list[dict[str, Any]] = field(default_factory=list)
+    runtime_state: dict[str, Any] = field(default_factory=dict)
 
 
 def memory_tools() -> list[dict[str, Any]]:

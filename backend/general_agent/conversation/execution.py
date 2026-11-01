@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID
-from typing import Any
+from typing import Any, cast
 
 from general_agent.infrastructure.operations import OperationContext
 from general_agent.infrastructure.calls import CallGateway
@@ -83,7 +83,7 @@ class ChatExecution:
         reserved: UUID | None,
         rows: list[dict[str, Any]],
     ) -> AnswerPreparation:
-        """按用户原文准备记忆与附件；仅在模型消息边界展开保存的技能描述快照。"""
+        """刷新记忆与附件并合入工作消息，仅对新增用户原文展开技能描述。"""
         content = str(rows[-1]['content'])
         chat_reserved = self.chat_reservation(content, reserved)
         material = self.search.attachments.prepare(conversation_id, account_id)
@@ -92,10 +92,14 @@ class ChatExecution:
             'role': 'system',
             'content': base_system_prompt(),
         }
-        data_messages: list[ModelMessage] = [*memory_material, *material.messages]
+        data_messages: list[ModelMessage] = [cast(ModelMessage, {**message, '_context_material': True}) for message in [*memory_material, *material.messages]]
         conversation: list[ModelMessage] = [system_prompt, *data_messages]
-        conversation.extend({'role': str(row['role']), 'content': user_skill_content(str(row['content']), row.get('skill_selections') or [])
-            if row['role'] == 'user' else str(row['content'])} for row in rows)
+        for index, row in enumerate(rows):
+            if row.get('_model_message'):
+                conversation.append(cast(ModelMessage, {key: value for key, value in row.items() if key in ('role', 'content', 'tool_calls', 'tool_call_id', '_context_summary')}))
+            else:
+                conversation.append(cast(ModelMessage, {'role': str(row['role']), 'content': user_skill_content(str(row['content']), row.get('skill_selections') or [])
+                    if row['role'] == 'user' else str(row['content']), **({'_current_request': True} if index == len(rows) - 1 else {})}))
         return AnswerPreparation(conversation, material, chat_reserved)
 
     def chat_reservation(self, content: str, reserved: UUID | None) -> UUID | None:
@@ -122,12 +126,13 @@ class ChatExecution:
         on_progress: Callable[[MessageProgress], None] | None = None,
         on_round_start: Callable[[], None] | None = None,
         source_attachment_ids: list[UUID] | None = None,
+        runtime_state: dict[str, Any] | None = None,
     ) -> ToolOutcome:
         """把 State 材料和草稿轮次回调交给主从模块，返回主回答及可信证据快照。"""
         if settings is None:
             return ToolOutcome(None, False)
         return self.agent_runtime.run(conversation_id, account_id, user_id, assistant_message_id,
-            settings, operation, messages, on_content, source_attachment_ids, on_progress, on_round_start)
+            settings, operation, messages, on_content, source_attachment_ids, on_progress, on_round_start, runtime_state)
 
     @staticmethod
     def material_attachment_ids(material: AttachmentContext | None) -> list[UUID]:

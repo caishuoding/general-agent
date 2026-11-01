@@ -1,11 +1,13 @@
 """定义工具决策图在节点之间传递的最小状态。"""
 
-from typing import Any, TypedDict
+from typing import Any, TypedDict, NotRequired
 
 
 class AgentState(TypedDict):
     """保存模型消息、待执行调用、工具失败次数和文档工具调用次数及最终结果。"""
 
+    runtime_state: NotRequired[dict[str, Any]]
+    version: NotRequired[int]
     messages: list[dict[str, Any]]
     tool_calls: list[dict[str, Any]]
     round_index: int

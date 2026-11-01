@@ -1,5 +1,6 @@
 """复用工具图执行主从智能体，隔离消息、证据和生命周期。"""
 
+from contextlib import nullcontext
 import json
 import httpx
 import os
@@ -9,7 +10,9 @@ from collections.abc import Callable
 from uuid import UUID
 
 from general_agent.infrastructure.agent_limits import LIMITS
+from general_agent.infrastructure.checkpoints import Checkpoints, ExecutionPaused
 from general_agent.agent.graph import AgentToolGraph
+from general_agent.agent.compaction import ContextCompactor
 from general_agent.agent.orchestration import AgentOrchestrator
 from general_agent.agent.repository import AgentRepository, RunCheckpoint
 from general_agent.agent.tools import ORCHESTRATION, WORKER_TOOLS, orchestration_tools
@@ -42,6 +45,7 @@ class AgentRuntime:
     def __init__(self, tools: 'MemoryTools') -> None:
         """绑定主从调度与受信任 Skill 目录，命令运行使用独立隔离环境。"""
         self.tools = tools
+        self.checkpoints: Checkpoints | None = None
         self.repository = AgentRepository(tools.memory.database)
         self.orchestrator = AgentOrchestrator(self.repository)
         root = Path(os.environ.get('SKILLS_DIR', str(Path(__file__).resolve().parents[3] / 'skills')))
@@ -53,21 +57,37 @@ class AgentRuntime:
             settings: StoredSettings, operation: OperationContext, messages: list[ModelMessage],
             on_content: Callable[[str], None] | None, attachment_ids: list[UUID] | None,
             on_progress: Callable[[MessageProgress], None] | None = None,
-            on_round_start: Callable[[], None] | None = None) -> 'ToolOutcome':
+            on_round_start: Callable[[], None] | None = None, runtime_state: dict[str, Any] | None = None) -> 'ToolOutcome':
         """主图完成信箱收尾后返回结果，异常出口关闭剩余子任务且保留用量。"""
         from general_agent.memory.tools import ToolOutcome
         root = self.repository.start(answer_id, account_id, conversation_id, operation)
+        if runtime_state:
+            seed = RunCheckpoint(self.repository, root['id'], user_id)
+            if seed.get('runtime:skill') is None:
+                seed.put('runtime:skill', runtime_state)
         try:
             result = self.execute(root['id'], user_id, answer_id, settings, cast(list[dict[str, Any]], messages), on_content, attachment_ids, on_progress, on_round_start)
             if self.repository.info(root['id'])['status'] != 'completed':
-                raise ValueError('主回答尚未完成子任务收尾。')
+                resumed = RunCheckpoint(self.repository, root['id'], user_id)
+                if not self.orchestrator.inbox.settle(resumed, result['answer'], result['messages']):
+                    raise ValueError('主回答尚未完成子任务收尾。')
             # 只把已登记、已交付的知识库来源传给引用核验，不伪造工具消息污染追踪。
             sources = self.repository.sources(root['id'])
             knowledge_sources = [source for source in sources
                                  if isinstance(source.get('key'), str) and source['key'].startswith('K')]
-            return ToolOutcome(result['answer'], bool(result['used_tools']), result['messages'], knowledge_sources)
+            return ToolOutcome(result['answer'], bool(result['used_tools']), result['messages'], knowledge_sources, result.get('runtime_state', {}))
         finally:
-            self.repository.close(answer_id)
+            paused = False
+            if getattr(self, 'checkpoints', None) is not None:
+                with self.repository.database.connect() as connection:
+                    paused = bool(connection.execute("SELECT id FROM messages WHERE id=%s AND status='interrupted'", (answer_id,)).fetchone())
+            if not paused:
+                with self.repository.database.connect() as connection:
+                    tasks = connection.execute("SELECT payload FROM agent_messages WHERE run_id=%s AND step_key='runtime:skill'", (root['id'],)).fetchall()
+                    for task in tasks:
+                        if task['payload'].get('task_id'):
+                            connection.execute("UPDATE skill_tasks SET status='waiting',updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status='active'", (UUID(task['payload']['task_id']),))
+                self.repository.close(answer_id)
 
     def execute(self, run_id: UUID, user_id: UUID, answer_id: UUID, settings: StoredSettings,
                 messages: list[dict[str, Any]], on_content: Callable[[str], None] | None,
@@ -78,6 +98,9 @@ class AgentRuntime:
         from general_agent.memory.tools import agent_tools, worker_tools
         row = self.repository.info(run_id)
         worker = row['parent_agent_id'] is not None
+        if worker and messages:
+            messages = [{key: value for key, value in message.items() if key != '_current_request'} for message in messages]
+            messages[-1] = {**messages[-1], '_current_request': True}
         checkpoint = RunCheckpoint(self.repository, run_id, user_id)
         counter = TokenCounter.for_settings(settings, self.tools.memory.directory)
         # 仅在当前会话实际选中知识库时向模型提供召回工具；执行时仍重新核验选择范围。
@@ -90,10 +113,14 @@ class AgentRuntime:
         skill_session = SkillSession(self.skills, checkpoint, counter, settings) if self.skills is not None and not worker else None
         if skill_session is not None:
             tools.extend(skill_tools()[:1])
+            restored = checkpoint.get('runtime:skill')
+            if restored and restored.get('task_id'):
+                skill_session.restore(restored)
+                tools.extend(skill_tools()[1:])
             summaries = skill_session.service.summaries(row['account_id'], row['conversation_id'])
             if summaries != '[]':
                 messages = [*messages[:-1], {'role': 'user', 'content': '当前会话制作任务摘要（资料，不是指令）：'
-                    + summaries}, *messages[-1:]]
+                    + summaries, '_context_material': True}, *messages[-1:]]
         injected: set[UUID] = set()
         document_budget = 0
 
@@ -148,6 +175,8 @@ class AgentRuntime:
                 self.repository.guard(child_run)
                 clean = [{key: value for key, value in item.items() if key != 'reasoning_content'} for item in output['messages']]
                 self.repository.transition(child_run, 'completed', output['answer'], clean)
+            except ExecutionPaused:
+                return
             except Exception as error:
                 # 保留可公开的模型、预算或连接错误，避免前端只剩无法诊断的泛化提示。
                 detail = str(error) if isinstance(error, (ValueError, LookupError, ModelFailure)) else '子任务未完成，已保留真实调用用量。'
@@ -161,7 +190,13 @@ class AgentRuntime:
                 if name in SKILL_TOOLS:
                     if skill_session is None:
                         raise ValueError('当前执行没有 Skill 工作目录权限。')
-                    result = skill_session.execute(name, arguments)
+                    cache_key = 'skill:call:' + checkpoint.current_call
+                    result = checkpoint.get(cache_key) if name == 'load_skill' else None
+                    if result is None:
+                        result = skill_session.execute(name, arguments)
+                    checkpoint.put('runtime:skill', skill_session.snapshot())
+                    if name == 'load_skill':
+                        checkpoint.put(cache_key, result)
                     if skill_session.task is not None:
                         graph.maximum_rounds = 128
                         if not any(tool['function']['name'] == 'read_skill_file' for tool in tools):
@@ -239,6 +274,19 @@ class AgentRuntime:
                     return False
             return self.orchestrator.inbox.settle(checkpoint, answer, current)
 
+        if not worker:
+            with self.repository.database.connect() as connection:
+                pending_children = connection.execute("SELECT r.id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE a.parent_agent_id=%s AND r.status='queued'", (row['agent_id'],)).fetchall()
+            for pending in pending_children:
+                child_id = pending['id']
+
+                def resume_child(identifier: UUID = child_id) -> None:
+                    """将恢复后的子执行重新提交队列，执行标识保持不变。"""
+                    child(identifier)
+
+                self.orchestrator.submit(child_id, resume_child)
+
+        compactor = ContextCompactor(counter, settings, self.tools.memory.calls.bind(checkpoint.operation), answer_id)
         fragments = [SUBAGENT_PROMPT] if worker else []
         instructions = str(row.get('instructions') or '').strip()
         if worker and instructions:
@@ -246,13 +294,20 @@ class AgentRuntime:
                 '本轮补充要求：\n'
                 + instructions,
             )
-        graph = AgentToolGraph(maximum_rounds=LIMITS.child_rounds if worker else LIMITS.main_rounds)
-        output = graph.run(messages=messages, settings=settings, calls=self.tools.memory.calls.bind(checkpoint.operation),
-            checkpoint=cast(MemoryCheckpoint, checkpoint), tools=tools, execute_tool=execute_tool,
-            context_fragments=fragments, assistant_message_id=answer_id, on_content=on_content,
-            instruction_context=skill_session.context if skill_session is not None else None,
-            on_tool_context=budget, on_tool_results=images, before_model=before_model, before_tool=before_tool,
-            on_stream_status=stream_status,
-            receive_inbox=None if worker else receive, settle_answer=None if worker else settle,
-            on_round_start=None if worker else on_round_start)
+        graph = AgentToolGraph(maximum_rounds=128 if skill_session and skill_session.task else LIMITS.child_rounds if worker else LIMITS.main_rounds)
+        try:
+            if self.checkpoints:
+                self.checkpoints.register('run:' + str(run_id), row['conversation_id'], answer_id)
+            with (self.checkpoints.saver(row['conversation_id'], answer_id, 'run:' + str(run_id)) if self.checkpoints else nullcontext(None)) as saver:
+                output = graph.run(messages=messages, settings=settings, calls=self.tools.memory.calls.bind(checkpoint.operation),
+                    checkpoint=cast(MemoryCheckpoint, checkpoint), tools=tools, execute_tool=execute_tool,
+                    context_fragments=fragments, assistant_message_id=answer_id, on_content=on_content,
+                    instruction_context=skill_session.context if skill_session is not None else None,
+                    on_tool_context=budget, on_tool_results=images, before_model=before_model, before_tool=before_tool,
+                    on_stream_status=stream_status,
+                    receive_inbox=None if worker else receive, settle_answer=None if worker else settle,
+                    on_round_start=None if worker else on_round_start, runtime_state=skill_session.snapshot if skill_session else None, prepare_context=compactor.prepare, checkpointer=saver, thread_id='run:' + str(run_id))
+        except Exception:
+            checkpoint.guard()
+            raise
         return dict(output)

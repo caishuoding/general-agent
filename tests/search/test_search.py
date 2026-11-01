@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
 from tests.auth.support import admin_client, authenticated_client, set_global_settings
+from tests.model_protocol import current_tool_messages
 from tests.attachments.test_attachments import configure
 
 
@@ -88,8 +89,8 @@ def last_user_content(payload: dict[str, Any]) -> str:
 
 
 def tool_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """返回当前工具循环已经收到的原始工具消息。"""
-    return [message for message in payload["messages"] if message.get("role") == "tool"]
+    """返回当前请求后的工具结果，历史工具不代表本次搜索已经执行。"""
+    return current_tool_messages(payload)
 
 
 def streaming_transport(provider: Callable[[httpx.Request], httpx.Response]) -> httpx.MockTransport:

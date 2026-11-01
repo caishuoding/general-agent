@@ -597,7 +597,7 @@ export function App() {
     }
   }
 
-  // 对当前回答发送停止或重试操作，并重新应用后端保存的真实状态。
+  // 对当前回答发送停止、检查点续接或重试操作，应用后端保存的真实状态。
   async function changeRun(event: MouseEvent<HTMLButtonElement>) {
     const id = activeId.current;
     const messageId = event.currentTarget.dataset.message;
@@ -695,8 +695,14 @@ export function App() {
         {message.status === "failed" && (
           <div className="message-error" role="alert">这次回答没有完成 · {message.error || "可以再试一次或检查模型设置。"}</div>
         )}
+        {message.status === "interrupted" && <div className="message-progress">执行已中断 · 可以从保存的位置继续</div>}
+        {message.status === "interrupted" && conversation?.messages.at(-1)?.id === message.id && (
+          <button className="retry-button" data-action="resume" data-message={message.id} onClick={changeRun} disabled={changingRun || !!pending}>
+            继续执行
+          </button>
+        )}
         {message.status === "stopped" && <div className="message-progress">已停止 · 已保留这部分回答</div>}
-        {(message.status === "failed" || message.status === "stopped") && conversation?.messages.at(-1)?.id === message.id && (
+        {(message.status === "failed" || message.status === "stopped" || message.status === "interrupted") && conversation?.messages.at(-1)?.id === message.id && (
           <button className="retry-button" data-action="retry" data-message={message.id} onClick={changeRun} disabled={changingRun || !!pending}>
             再试一次
           </button>

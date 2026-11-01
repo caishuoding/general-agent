@@ -1,8 +1,9 @@
 """用 LangGraph State 统一传递同步与流式回答的执行数据。"""
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 import logging
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast, NotRequired
 from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
@@ -12,6 +13,7 @@ from psycopg.types.json import Jsonb
 from general_agent.conversation.execution import ChatExecution
 from general_agent.conversation.progress import DRAFTING_PROGRESS, MessageProgress, update_message_progress
 from general_agent.infrastructure.database import Database
+from general_agent.infrastructure.checkpoints import Checkpoints, ExecutionPaused, STATE_VERSION
 from general_agent.infrastructure.operations import OperationContext
 from general_agent.infrastructure.provider import ModelFailure, ModelMessage
 from general_agent.infrastructure.settings import StoredSettings
@@ -22,6 +24,11 @@ LOGGER = logging.getLogger(__name__)
 class ConversationState(TypedDict):
     """共享本次回答的完整消息快照、材料来源、回答和错误，不携带凭据或连接。"""
 
+    version: NotRequired[int]
+    answer_id: NotRequired[str]
+    history_position: NotRequired[int]
+    source_snapshot: NotRequired[dict[str, Any]]
+    runtime_state: NotRequired[dict[str, Any]]
     messages: list[dict[str, Any]]
     source_attachment_ids: list[str]
     reserved_call_id: UUID | None
@@ -56,10 +63,11 @@ class ConversationContext:
 class ConversationGraph:
     """通过节点返回的 State 更新编排回答，业务持久化独立于运行中数据传递。"""
 
-    def __init__(self, database: Database, execution: ChatExecution) -> None:
-        """编译无持久化检查点的三步图，消息使用完整快照覆盖以免重复追加历史。"""
+    def __init__(self, database: Database, execution: ChatExecution, checkpoints: Checkpoints | None = None) -> None:
+        """保存图定义，生产执行绑定 PostgreSQL saver，消息按完整快照覆盖。"""
         self.database = database
         self.execution = execution
+        self.checkpoints = checkpoints
         builder = StateGraph(ConversationState, context_schema=ConversationContext)
         builder.add_node('prepare_context', self.prepare_context)
         builder.add_node('agent', self.agent)
@@ -68,13 +76,28 @@ class ConversationGraph:
         builder.add_edge('prepare_context', 'agent')
         builder.add_edge('agent', 'finalize')
         builder.add_edge('finalize', END)
+        self.builder = builder
         self.compiled = builder.compile(name='conversation')
 
     def run(self, context: ConversationContext, rows: list[dict[str, Any]], reserved_call_id: UUID | None = None) -> ConversationResult:
-        """把原始历史及技能快照作为初始 State，描述只在统一上下文准备时展开。"""
+        """从会话检查点恢复工作消息，仅合入新业务消息；旧会话首次使用完整历史。"""
+        position = max((int(row.get("position", 0)) for row in rows), default=0)
+        source_snapshot: dict[str, Any] = {}
+        inherited_runtime: dict[str, Any] = {}
+        if self.checkpoints is not None:
+            source_snapshot = self.execution.agent_runtime.repository.snapshot(context.conversation_id)
+            previous = self.checkpoints.values(str(context.conversation_id))
+            if (previous.get("version") == STATE_VERSION and not previous.get("failure")
+                    and previous.get("source_snapshot") == source_snapshot
+                    and previous.get("history_position", 0) < position):
+                inherited_runtime = previous.get('runtime_state', {})
+                recent = [{**message, "_model_message": True} for message in previous.get("messages", [])
+                          if message.get("role") != "system" and not message.get('_context_material')]
+                rows = [*recent, *(row for row in rows if int(row.get("position", 0)) > previous.get("history_position", 0))]
         initial: ConversationState = {
-            'messages': [{'role': str(row['role']), 'content': str(row['content']),
-                **({'skill_selections': row['skill_selections']} if row.get('skill_selections') else {})} for row in rows],
+            'version': STATE_VERSION, 'answer_id': str(context.assistant_message_id),
+            'history_position': position, 'source_snapshot': source_snapshot, 'runtime_state': inherited_runtime,
+            'messages': [dict(row) for row in rows],
             'source_attachment_ids': [],
             'reserved_call_id': reserved_call_id,
             'answer': '',
@@ -86,25 +109,32 @@ class ConversationGraph:
         }
         return self.invoke(initial, context)
 
-    def invoke(self, graph_input: ConversationState, context: ConversationContext) -> ConversationResult:
-        """观察框架生成的最新 State，图边界失败时据此收尾，不借用可变运行上下文。"""
+    def invoke(self, graph_input: ConversationState | None, context: ConversationContext) -> ConversationResult:
+        """短暂认领回答归属后推进图；空输入续接，旧回答不能覆盖新检查点。"""
         LOGGER.info('event=graph_start conversation_id=%s message_id=%s delivery=%s', context.conversation_id, context.assistant_message_id, context.delivery)
-        state = graph_input
+        state = graph_input or cast(ConversationState, self.checkpoints.values(str(context.conversation_id)) if self.checkpoints else {})
         try:
-            for snapshot in self.compiled.stream(
-                graph_input,
-                {
-                    'configurable': {'thread_id': str(context.assistant_message_id)},
-                    'metadata': {'conversation_id': str(context.conversation_id),
-                                 'assistant_message_id': str(context.assistant_message_id),
-                                 'session_id': str(context.conversation_id)},
-                },
-                context=context,
-                stream_mode='values',
-            ):
-                state = cast(ConversationState, snapshot)
+            if self.checkpoints:
+                with self.checkpoints.conversation(context.conversation_id, wait=True):
+                    self.checkpoints.register(str(context.conversation_id), context.conversation_id, context.assistant_message_id)
+            with (self.checkpoints.saver(context.conversation_id, context.assistant_message_id) if self.checkpoints else nullcontext(None)) as saver:
+                compiled = self.builder.compile(checkpointer=saver, name="conversation") if saver else self.compiled
+                for snapshot in compiled.stream(
+                    graph_input,
+                    {
+                        'configurable': {'thread_id': str(context.conversation_id)},
+                        'metadata': {'conversation_id': str(context.conversation_id),
+                                     'assistant_message_id': str(context.assistant_message_id),
+                                     'session_id': str(context.conversation_id)},
+                    },
+                    context=context,
+                    stream_mode='values', durability='sync' if saver else None,
+                ):
+                    state = cast(ConversationState, snapshot)
             LOGGER.info('event=graph_end message_id=%s failure=%s', context.assistant_message_id, bool(state['failure']))
             return {'answer': state['answer'], 'failure': state['failure']}
+        except ExecutionPaused:
+            return {"answer": state.get("answer", ""), "failure": None}
         except Exception:
             LOGGER.exception('LangGraph 对话执行失败 conversation_id=%s message_id=%s', context.conversation_id, context.assistant_message_id)
             return self.fail_terminal(context, state, self.unexpected_failure(context.delivery))
@@ -142,7 +172,7 @@ class ConversationGraph:
         context = runtime.context
         chunks: list[str] = []
         progress_started = False
-        draft_written = False
+        draft_written = bool(self.checkpoints)
 
         def on_progress(progress: MessageProgress) -> None:
             """只在流式入口写入最新工具状态，同步调用不需要临时进度。"""
@@ -191,12 +221,13 @@ class ConversationGraph:
                 on_progress=on_progress,
                 on_round_start=reset_draft,
                 source_attachment_ids=[UUID(identifier) for identifier in state['source_attachment_ids']],
+                **({'runtime_state': state.get('runtime_state', {})} if self.checkpoints else {}),
             )
             answer = outcome.answer or ''.join(chunks)
             if not answer:
                 raise ValueError('模型没有返回最终回答。')
             LOGGER.info('event=node agent message_id=%s used_tools=%s characters=%s', context.assistant_message_id, outcome.used_tools, len(answer))
-            return {'answer': answer, 'used_tools': outcome.used_tools,
+            return {'runtime_state': outcome.runtime_state, 'answer': answer, 'used_tools': outcome.used_tools,
                     'knowledge_source_candidates': outcome.knowledge_source_candidates,
                     'messages': outcome.messages if outcome.messages is not None else self.answered_messages(state['messages'], answer)}
         except (ValueError, ModelFailure) as error:
@@ -225,7 +256,10 @@ class ConversationGraph:
                 (state['reserved_call_id'],),
             )
         LOGGER.info('event=node finalize message_id=%s status=%s characters=%s', context.assistant_message_id, 'failed' if failure else 'complete', len(answer))
-        return {'answer': answer, 'web_sources': web_sources, 'knowledge_sources': knowledge_sources,
+        with self.database.connect() as connection:
+            saved = connection.execute('SELECT position FROM messages WHERE id=%s', (context.assistant_message_id,)).fetchone()
+        return {'history_position': int(saved['position']) if saved and self.checkpoints else state.get('history_position', 0),
+                'answer': answer, 'web_sources': web_sources, 'knowledge_sources': knowledge_sources,
                 'messages': self.answered_messages(state['messages'], answer)}
 
     @staticmethod

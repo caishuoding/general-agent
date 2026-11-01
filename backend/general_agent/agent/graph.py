@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any, Literal, cast
 from uuid import UUID
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from general_agent.agent.state import AgentState
@@ -71,8 +72,12 @@ class AgentToolGraph:
         receive_inbox: InboxReceiver | None = None,
         settle_answer: AnswerSettler | None = None,
         on_round_start: Callable[[], None] | None = None,
+        runtime_state: Callable[[], dict[str, Any]] | None = None,
+        prepare_context: Callable[[list[dict[str, Any]], list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
+        checkpointer: BaseCheckpointSaver[Any] | None = None,
+        thread_id: str | None = None,
     ) -> AgentState:
-        """按消息运行工具循环；每轮重新注入可信指令并计入真实请求预算，收尾接收子任务结果。"""
+        """恢复原执行的模型工具循环，完整步骤通过检查点保存且每轮重建可信指令。"""
 
         def inbox_update(state: AgentState, result: dict[str, Any]) -> dict[str, Any]:
             """将新批次作为不可信资料追加到 State，同时复用原图加载和批次去重。"""
@@ -95,30 +100,38 @@ class AgentToolGraph:
             result = receive_inbox(state['messages'], f'automatic:{state["round_index"]}', False)
             return inbox_update(state, result)
 
+        def model_input(current: list[dict[str, Any]], clean: bool = True) -> list[dict[str, Any]]:
+            """统一组装系统提示与动态指令，外发时去除内部消息标记。"""
+            system_parts = [str(message['content']) for message in current if message.get('role') == 'system']
+            fragments = [fragment.strip() for fragment in (context_fragments or []) if fragment.strip()]
+            if instruction_context is not None:
+                fragments.extend(instruction_context())
+            prompt = '\n\n'.join([*system_parts, *fragments]) if system_parts or fragments else base_system_prompt()
+            messages = [{'role': 'system', 'content': prompt}, *(message for message in current if message.get('role') != 'system')]
+            return [{key: value for key, value in item.items() if not clean or (not key.startswith('_') and not (key == 'tool_calls' and not value))} for item in messages]
+
+        def prepare_model(state: AgentState) -> dict[str, Any]:
+            """模型请求前压缩旧交互，节点返回后先持久化再执行实际模型调用。"""
+            if prepare_context is None:
+                return {}
+            updated = prepare_context(model_input(state['messages'], clean=False), tools)
+            return {'runtime_state': runtime_state() if runtime_state else {},
+                'messages': [*(message for message in state['messages'] if message.get('role') == 'system'),
+                *(message for message in updated if message.get('role') != 'system')]}
+
         def call_model(state: AgentState) -> dict[str, Any]:
             """组装唯一系统消息及完整活动 Skill 指令，外发前按实际请求检查预算。"""
             index = state["round_index"]
             if index >= self.maximum_rounds:
                 raise ValueError("工具调用达到本次执行上限；已完成的操作保留，请缩小范围后继续。")
-            if on_round_start is not None:
-                on_round_start()
             key = checkpoint.key("tools:round", [settings.revision, index, state["messages"]])
             reply = checkpoint.get(key)
             if reply is None:
-                # 主流程已有完整系统提示；子流程只有固定子任务提示，均只发送一条。
-                system_parts = [str(message['content']) for message in state['messages']
-                                if message.get('role') == 'system']
-                fragments = [fragment.strip() for fragment in (context_fragments or []) if fragment.strip()]
-                if instruction_context is not None:
-                    fragments.extend(instruction_context())
-                system_prompt = ('\n\n'.join([*system_parts, *fragments]) if system_parts or fragments
-                                 else base_system_prompt())
-                model_messages = [
-                    {"role": "system", "content": system_prompt},
-                    *(message for message in state['messages'] if message.get('role') != 'system'),
-                ]
+                model_messages = model_input(state['messages'])
                 if before_model is not None:
                     before_model(model_messages, tools)
+                if on_round_start is not None:
+                    on_round_start()
                 content: list[str] = []
                 reasoning: list[str] = []
                 partial_calls: dict[int, dict[str, Any]] = {}
@@ -375,26 +388,29 @@ class AgentToolGraph:
             return {"answer": answer or None, "handled": handled}
 
         builder = StateGraph(AgentState)
+        builder.add_node('prepare_model', prepare_model)
         builder.add_node('collect_inbox', collect_inbox)
         builder.add_node("call_model", call_model)
         builder.add_node("execute_tools", execute_tools)
         builder.add_node("finish", finish)
         builder.add_node('settle_answer', settle_candidate)
-        builder.add_edge(START, 'call_model')
-        builder.add_edge('collect_inbox', 'call_model')
+        builder.add_edge(START, 'prepare_model')
+        builder.add_edge('prepare_model', 'call_model')
+        builder.add_edge('collect_inbox', 'prepare_model')
         builder.add_conditional_edges(
             "call_model",
             route_model,
             {"execute_tools": "execute_tools", "settle_answer": "settle_answer"},
         )
         builder.add_conditional_edges('execute_tools', route_tools,
-                                      {'collect_inbox': 'collect_inbox', 'call_model': 'call_model'})
+                                      {'collect_inbox': 'collect_inbox', 'call_model': 'prepare_model'})
         builder.add_conditional_edges('settle_answer', route_settle,
                                       {'finish': 'finish', 'collect_inbox': 'collect_inbox'})
         builder.add_edge("finish", END)
-        graph = builder.compile()
+        graph = builder.compile(checkpointer=checkpointer)
         raw_messages = [*(context_messages or []), *messages]
         initial: AgentState = {
+            "version": 1, "runtime_state": runtime_state() if runtime_state else {},
             "messages": raw_messages,
             "tool_calls": [],
             "round_index": 0,
@@ -407,8 +423,15 @@ class AgentToolGraph:
             'settled': False,
             'watching_inbox': False,
         }
-        # thread_id 使用当前回答来源消息，后续接入持久化 checkpointer 时无需改变调用身份。
-        return cast(AgentState, graph.invoke(initial, {
-            "configurable": {"thread_id": str(checkpoint.message_id)},
-            "recursion_limit": max(self.maximum_rounds, 128 if instruction_context is not None else 0) * 3 + 4,
-        }))
+        config: Any = {
+            'configurable': {'thread_id': thread_id or str(checkpoint.message_id)},
+            'recursion_limit': max(self.maximum_rounds, 128 if instruction_context is not None else 0) * 4 + 8,
+        }
+        saved = graph.get_state(config) if checkpointer is not None else None
+        if saved and saved.values:
+            if saved.values.get("version") != 1:
+                raise ValueError("Agent 检查点版本不兼容，请重试。")
+            if saved.next:
+                return cast(AgentState, graph.invoke(None, config, durability='sync'))
+            return cast(AgentState, saved.values)
+        return cast(AgentState, graph.invoke(initial, config, durability='sync' if checkpointer is not None else None))

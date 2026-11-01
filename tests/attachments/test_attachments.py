@@ -70,11 +70,11 @@ def stream_answer(content: str) -> httpx.Response:
 
 
 def test_uploaded_text_is_read_on_demand_and_survives_restart(database_url: str, tmp_path: Path) -> None:
-    """首轮和重启后均只自动提供清单，模型调用后取得持久化原文。"""
+    """清单不自动携带正文，重启可保留已读交互并再次按需读取。"""
     requests: list[dict[str, Any]] = []
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """先确认清单不含正文，再请求原文并根据实际结果回答。"""
+        """核对当前清单不含正文，允许历史工具记录包含先前实际读取结果。"""
         payload = json.loads(request.content)
         requests.append(payload)
         documents = attachment_documents(payload)
@@ -82,7 +82,7 @@ def test_uploaded_text_is_read_on_demand_and_survives_restart(database_url: str,
         assert {'search_documents', 'read_document'} <= {tool['function']['name'] for tool in payload['tools']}
         tool_reply = document_tool_reply(payload)
         if tool_reply is not None:
-            assert '蓝鲸项目于星期五交付。' not in str(payload['messages'])
+            assert '蓝鲸项目于星期五交付。' not in str(documents)
             return tool_reply
         result = document_tool_result(payload)
         assert ''.join(block['content'] for block in result['content']) == '蓝鲸项目于星期五交付。\n负责人是林女士。'

@@ -16,8 +16,8 @@ from tests.auth.support import login_admin_http, switch_to_normal_user
 
 
 @pytest.mark.parametrize("stop_before_kill", [False, True])
-def test_killed_process_recovers_partial_answer_as_failed(database_url: str, tmp_path: Path, stop_before_kill: bool) -> None:
-    """强制终止生成或已停止待用量的后端后，保留部分内容并清除遗留在途状态。"""
+def test_killed_process_preserves_partial_answer_for_resume(database_url: str, tmp_path: Path, stop_before_kill: bool) -> None:
+    """强制终止后保留部分内容；运行中回答可继续，用户停止仍为终态。"""
     release = Event()
 
     class Provider(BaseHTTPRequestHandler):
@@ -83,7 +83,7 @@ def test_killed_process_recovers_partial_answer_as_failed(database_url: str, tmp
             process = launch()
             ready(client)
             restored = client.get(f"/api/conversations/{conversation_id}").json()["messages"][-1]
-            assert (restored["status"], restored["content"]) == ("stopped" if stop_before_kill else "failed", "persisted partial")
+            assert (restored["status"], restored["content"]) == ("stopped" if stop_before_kill else "interrupted", "persisted partial")
             if not stop_before_kill:
                 assert "重启" in restored["error"]
             usage = client.get("/api/usage").json()[0]

@@ -10,8 +10,8 @@ from tests.agent.test_multi_agent import response
 from tests.auth.support import authenticated_client, set_global_settings
 
 
-def test_model_selects_skill_and_resumes_task_without_automatic_activation(database_url: str, tmp_path: Path) -> None:
-    """模型主动加载完整入口，下一条普通消息只看到任务摘要并可显式续接。"""
+def test_model_selects_skill_and_next_message_restores_active_task(database_url: str, tmp_path: Path) -> None:
+    """首次由模型加载完整入口，下一条消息从持久状态恢复原任务及指令。"""
     task_id = ''
     loads = 0
 
@@ -24,14 +24,15 @@ def test_model_selects_skill_and_resumes_task_without_automatic_activation(datab
         names = {tool['function']['name'] for tool in payload.get('tools', [])}
         assert 'load_skill' in names
         tools = [json.loads(message['content']) for message in payload['messages'] if message['role'] == 'tool']
-        if not tools:
+        if not tools and not task_id:
             assert 'AI-driven presentation workflow' in system[0]
             assert '# PPT Master Skill' not in system[0]
-            if task_id:
-                assert task_id in str(payload['messages'])
             loads += 1
             return response(name='load_skill', arguments={'name': 'ppt-master', 'task_id': task_id or None})
-        task_id = tools[-1]['task_id']
+        if tools:
+            task_id = tools[-1]['task_id']
+        else:
+            assert 'read_work_file' in names
         assert '# PPT Master Skill' in system[0]
         assert '/opt/skills/ppt-master' in system[0]
         return response('制作方案已准备，请确认配色。')
@@ -44,4 +45,4 @@ def test_model_selects_skill_and_resumes_task_without_automatic_activation(datab
             result = client.post(f'/api/conversations/{conversation}/messages', json={'content': content})
             assert result.status_code == 200, result.text
             assert result.json()['messages'][-1]['status'] == 'complete', result.text
-        assert loads == 2
+        assert loads == 1

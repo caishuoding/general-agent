@@ -136,7 +136,7 @@ def test_agent_exports_native_pptx_and_user_can_annotate_preview(database_url: s
         if phase == 7:
             confirmation_url = messages[-1]['url']
             phase = 8
-            return response(name='save_skill_task', arguments={'task_id': task_id, 'status': 'completed', 'stage': '已通过上游检查并导出', 'route': 'generate'})
+            assert 'save_skill_task' not in [tool['function']['name'] for tool in payload['tools']]
         return response(f'制作完成。[下载 PPT]({download_url}) [预览]({preview_url})')
 
     set_global_settings(database_url, tmp_path, {'base_url': 'https://model.example/v1', 'model': 'controlled',

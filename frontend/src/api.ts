@@ -4,6 +4,8 @@ export type Settings = {
   api_key_configured: boolean;
   context_window_tokens?: number;
   output_reserve_tokens?: number;
+  compression_trigger_ratio?: number;
+  compression_target_ratio?: number;
 };
 export type AuthUser = {
   id: string;
@@ -24,7 +26,7 @@ export type Message = {
   role: "user" | "assistant";
   content: string;
   skill_selections?: SkillSelection[];
-  status: "generating" | "complete" | "stopped" | "failed";
+  status: "generating" | "complete" | "stopped" | "failed" | "interrupted";
   attachments: MessageAttachment[];
   agent_tasks?: AgentTask[];
   progress?: MessageProgress | null;

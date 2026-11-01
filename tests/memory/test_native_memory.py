@@ -15,7 +15,7 @@ from general_agent.app import create_app
 from tests.auth.support import authenticated_client
 from tests.memory.test_memory import configure_memory, explicit_memory_request, memory_final_answer, memory_provider, configure_memory_settings
 from tests.conversation.test_streaming import wait_message
-from tests.model_protocol import streaming_transport
+from tests.model_protocol import streaming_transport, current_tool_messages
 def json_reply(value: Any, *, stream: bool = False) -> httpx.Response:
     """构造受控模型 JSON 响应，包含可核对的实际用量字段。"""
     content = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
@@ -36,7 +36,7 @@ def tool_reply(name: str, arguments: dict[str, Any], *, stream: bool = False) ->
 
 
 def native_provider(request: httpx.Request) -> httpx.Response:
-    """只替换云端响应，原生事实提取、检索与动作执行全部使用真实 SDK。"""
+    """只替换云端响应并按当前请求的工具结果推进，原生记忆仍使用真实 SDK。"""
     body = json.loads(request.content)
     if request.url.path.endswith('/embeddings'):
         return memory_provider(request)
@@ -44,7 +44,7 @@ def native_provider(request: httpx.Request) -> httpx.Response:
     if body.get('tools'):
         stream = bool(body.get('stream'))
         user = [item['content'] for item in messages if item['role'] == 'user'][-1]
-        results = [json.loads(item['content']) for item in messages if item['role'] == 'tool']
+        results = [json.loads(item['content']) for item in current_tool_messages(body)]
         if user in ('我住在杭州', '我已经搬到苏州了', '我已不再喝咖啡', '请记住：我喜欢咖啡'):
             return json_reply('普通回答', stream=stream) if results else tool_reply('add_memory', {}, stream=stream)
         if user not in ('把我的居住地改成苏州', '忘掉我住在哪里这件事', '你记得我的住址吗'):
@@ -152,7 +152,7 @@ def test_tool_cannot_mutate_unobserved_id_or_borrow_quoted_permission(database_u
         """模拟错误工具调用，后续接收到拒绝结果后停止。"""
         body = json.loads(request.content)
         if body.get('tools'):
-            results = [json.loads(message['content']) for message in body['messages'] if message['role'] == 'tool']
+            results = [json.loads(message['content']) for message in current_tool_messages(body)]
             user = [message['content'] for message in body['messages'] if message['role'] == 'user'][-1]
             if explicit_memory_request(user):
                 return memory_provider(request)

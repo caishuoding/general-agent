@@ -54,8 +54,8 @@ class SkillService:
             raise ValueError('制作任务资料范围已变化，旧工作文件已清理，请重新创建任务。')
         return row
 
-    def activate(self, account: UUID, conversation: UUID, skill: str, task: UUID | None) -> dict[str, Any]:
-        """新建或显式续接固定版本任务；续接从入口重建活动指令并保留原阶段。"""
+    def activate(self, account: UUID, conversation: UUID, skill: str, task: UUID | None, creation_id: UUID | None = None) -> dict[str, Any]:
+        """新建或续接固定版本任务，稳定创建身份使重放不产生重复工作目录。"""
         self.conversation(account, conversation)
         entry = self.catalog.read(skill, 'SKILL.md')
         if task is not None:
@@ -68,7 +68,12 @@ class SkillService:
                 connection.execute("UPDATE skill_tasks SET status='active',updated_at=CURRENT_TIMESTAMP,instruction_files=%s WHERE id=%s", (Jsonb(row['instruction_files']), task))
             row['status'] = 'active'
             return row
-        identifier = uuid4()
+        identifier = creation_id or uuid4()
+        with self.database.connect() as connection:
+            existing = connection.execute('SELECT id FROM skill_tasks WHERE id=%s AND account_id=%s AND conversation_id=%s', (identifier, account, conversation)).fetchone()
+        if existing:
+            (self.directory / str(identifier) / 'workspace').mkdir(parents=True, mode=0o700, exist_ok=True)
+            return self.get(identifier, account, conversation)
         snapshot = self.repository.snapshot(conversation)
         files = {'SKILL.md': entry['file_digest']}
         with self.database.connect() as connection:
@@ -147,18 +152,26 @@ class SkillService:
             connection.execute('UPDATE skill_tasks SET status=%s,stage=%s,route=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s', (status, stage, route, task))
         return {'task_id': str(task), 'status': status, 'stage': stage, 'route': route}
 
-    def publish(self, task: UUID, account: UUID, conversation: UUID, answer: UUID, relative: str) -> dict[str, Any]:
-        """将真实产物复制为不可变下载副本，更新工作文件不会改写已交付版本。"""
+    def publish(self, task: UUID, account: UUID, conversation: UUID, answer: UUID, relative: str, artifact_id: UUID | None = None) -> dict[str, Any]:
+        """按稳定发布身份保存不可变副本，检查点重放复用原交付且不覆盖内容。"""
         self.get(task, account, conversation)
-        identifier = uuid4()
+        identifier = artifact_id or uuid4()
+        with self.database.connect() as connection:
+            existing = connection.execute('SELECT filename FROM skill_artifacts WHERE id=%s AND task_id=%s AND answer_id=%s', (identifier, task, answer)).fetchone()
+        if existing:
+            return {'artifact_id': str(identifier), 'filename': existing['filename'],
+                'url': f'/api/conversations/{conversation}/skill-artifacts/{identifier}/file'}
         storage = self.directory / str(task) / 'artifacts'
         storage.mkdir(exist_ok=True)
         destination = storage / str(identifier)
-        with SafeFiles(self.directory / str(task) / 'workspace').file(relative) as source:
-            data = source.read(200_000_001)
-        if len(data) > 200_000_000:
-            raise ValueError('产物超过 200 MB。')
-        destination.write_bytes(data)
+        if not destination.exists():
+            with SafeFiles(self.directory / str(task) / 'workspace').file(relative) as source:
+                data = source.read(200_000_001)
+            if len(data) > 200_000_000:
+                raise ValueError('产物超过 200 MB。')
+            temporary = storage / (str(identifier) + '.tmp')
+            temporary.write_bytes(data)
+            temporary.replace(destination)
         digest = hashlib.sha256(destination.read_bytes()).hexdigest()
         filename = Path(relative).name
         mime = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
