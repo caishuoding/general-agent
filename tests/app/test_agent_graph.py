@@ -1,6 +1,7 @@
 """验证 LangGraph 智能体编排的关键路由。"""
 
 import json
+from collections.abc import Iterator
 from typing import Any, cast
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -44,7 +45,6 @@ def test_graph_streams_answer_without_tools() -> None:
         on_content=emitted.append,
     )
 
-    assert result["handled"] is True
     assert result["answer"] == "你好，有什么需要？"
     assert emitted == ["你好", "，有什么需要？"]
     execute.assert_not_called()
@@ -54,7 +54,7 @@ def test_connection_interruption_resumes_from_visible_prefix(monkeypatch: pytest
     """连接中断后保留已出现正文，自动续写并写入可持久化的断点标记。"""
     monkeypatch.setattr('general_agent.agent.graph.time.sleep', lambda _: None)
 
-    def interrupted():
+    def interrupted() -> Iterator[StreamChunk]:
         """先返回一段正文，再模拟底层连接提前断开。"""
         yield StreamChunk(content='前文')
         raise ModelConnectionFailure('模型连接中断。')
@@ -147,9 +147,17 @@ def test_inbox_is_not_checked_before_any_orchestration_tool() -> None:
 
 
 def test_default_tool_retry_limit_is_shared_by_every_tool() -> None:
-    """默认工具图使用项目统一的五次失败重试，不允许单个工具另设默认值。"""
+    """默认工具图、文档读取和 Skill 运行均使用集中配置的执行上限。"""
     assert LIMITS.tool_retries == 5
     assert AgentToolGraph().maximum_tool_retries == LIMITS.tool_retries
+    assert LIMITS.document_calls == 5
+    assert LIMITS.skill_rounds == 128
+    assert LIMITS.skill_model_calls == 384
+    assert LIMITS.skill_seconds == 3600
+    assert LIMITS.skill_command_concurrency == 3
+    assert LIMITS.skill_command_seconds == 900
+    assert LIMITS.skill_command_default_seconds == 300
+    assert LIMITS.skill_poll_seconds == 20
 
 
 def test_time_tool_reads_fresh_clock_when_replaying_a_tool_call(monkeypatch: Any) -> None:
@@ -204,7 +212,6 @@ def test_graph_accumulates_streamed_tool_call_before_continuing() -> None:
         on_content=emitted.append,
     )
 
-    assert result["handled"] is True
     assert result["answer"] == "你住在杭州。"
     assert emitted == ["你住在杭州。"]
     assert result["messages"][-2]["role"] == "tool"
@@ -318,3 +325,60 @@ def test_retry_budget_replays_without_reexecuting_and_resets_for_new_answer() ->
         assert result['tool_failures'] == {'search_web': 6}
     assert executor.call_count == 12
     assert calls.stream.call_count == 7
+
+
+def test_connection_retry_is_compacted_before_resending(monkeypatch: pytest.MonkeyPatch) -> None:
+    """断线续写新增前缀和指令后再次执行压缩，实际续写请求使用压缩结果。"""
+    monkeypatch.setattr('general_agent.agent.graph.time.sleep', lambda _: None)
+
+    def interrupted() -> Iterator[StreamChunk]:
+        """先输出部分正文，再模拟连接中断。"""
+        yield StreamChunk(content='已经输出')
+        raise ModelConnectionFailure('连接中断。')
+
+    calls = MagicMock()
+    calls.stream.side_effect = [interrupted(), [StreamChunk(content='并继续')]]
+    prepared_inputs: list[list[dict[str, Any]]] = []
+
+    def prepare(messages: list[dict[str, Any]], _tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """记录每次请求前上下文，并在续写时插入一条摘要。"""
+        prepared_inputs.append(messages)
+        if len(prepared_inputs) == 1:
+            return messages
+        return [messages[0], {'role': 'user', 'content': '历史已压缩', '_context_summary': True}, *messages[-2:]]
+
+    result = AgentToolGraph().run(
+        messages=[{'role': 'user', 'content': '请继续说明'}],
+        settings=settings(), calls=calls, checkpoint=cast(MemoryCheckpoint, checkpoint()),
+        tools=[], execute_tool=MagicMock(), prepare_context=prepare,
+    )
+
+    assert len(prepared_inputs) == 2
+    retry_messages = calls.stream.call_args_list[1].args[1]
+    assert any(message.get('content') == '历史已压缩' for message in retry_messages)
+    assert not any('_context_summary' in message for message in retry_messages)
+    assert retry_messages[-1]['role'] == 'user'
+    assert result['answer'] == '已经输出[[STREAM_RESUMED]]并继续'
+
+
+def test_exhausted_tools_do_not_consume_context_compaction_budget() -> None:
+    """工具失败达到上限后，压缩准备和模型请求都只看到仍可调用的工具。"""
+    calls = MagicMock()
+    calls.stream.side_effect = [tool_chunks(['search_web'], 'fail'), [StreamChunk(content='无法搜索')]]
+    definitions_seen: list[list[dict[str, Any]]] = []
+
+    def prepare(messages: list[dict[str, Any]], active: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """记录实际可供模型选择的工具定义。"""
+        definitions_seen.append(active)
+        return messages
+
+    result = AgentToolGraph(maximum_tool_retries=0).run(
+        messages=[{'role': 'user', 'content': '查询'}], settings=settings(), calls=calls,
+        checkpoint=cast(MemoryCheckpoint, checkpoint()), tools=web_tools(),
+        execute_tool=MagicMock(return_value={'error': '查询失败'}), prepare_context=prepare,
+    )
+
+    assert len(definitions_seen) == 2
+    assert [tool['function']['name'] for tool in definitions_seen[1]] == ['fetch_web']
+    assert [tool['function']['name'] for tool in calls.stream.call_args_list[1].kwargs['tools']] == ['fetch_web']
+    assert result['answer'] == '无法搜索'

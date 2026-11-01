@@ -5,6 +5,7 @@ import logging
 from typing import Any, cast
 from uuid import UUID
 
+from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.infrastructure.calls import BoundCalls
 from general_agent.infrastructure.provider import ModelFailure, ModelMessage
 from general_agent.infrastructure.settings import StoredSettings
@@ -27,13 +28,12 @@ class ContextCompactor:
         self.counter, self.settings, self.calls, self.answer_id = counter, settings, calls, answer_id
 
     def used(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
-        """按外发协议字段估算请求成本，内部摘要标志不计入外发。"""
-        clean = [{key: value for key, value in message.items() if not key.startswith('_')} for message in messages]
-        return self.counter.count(json.dumps({'messages': clean, 'tools': tools}, ensure_ascii=False))
+        """返回实际外发请求计数，内部恢复和压缩标记不计入预算。"""
+        return self.counter.request_tokens(messages, tools)
 
     def prepare(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """超阈值时总结早期完整组；失败保留原上下文，真正超限才明确停止。"""
-        budget = self.settings.context_window_tokens - self.settings.output_reserve_tokens - 512
+        budget = self.counter.input_limit(self.settings)
         used = self.used(messages, tools)
         if used < budget * self.settings.compression_trigger_ratio:
             return messages
@@ -57,7 +57,7 @@ class ContextCompactor:
             if index not in pinned and not group[0].get('_context_summary'):
                 selected.add(index)
                 remaining = [item for number, items in enumerate(groups) if number not in selected for item in items if not item.get('_context_summary')]
-                if self.used(remaining, tools) < budget * self.settings.compression_target_ratio - min(2048, budget // 8):
+                if self.used(remaining, tools) < budget * self.settings.compression_target_ratio - min(LIMITS.compaction_target_margin_tokens, budget // 8):
                     break
         if not selected:
             if used >= budget:
@@ -65,7 +65,7 @@ class ContextCompactor:
             return messages
         candidates = [item for index, group in enumerate(groups) if index in selected for item in group]
         try:
-            summary = self.summarize('\n'.join(summaries), candidates, max(256, min(4096, budget // 8)))
+            summary = self.summarize('\n'.join(summaries), candidates, max(LIMITS.summary_tokens_min, min(LIMITS.summary_tokens_max, budget // 8)))
             result: list[dict[str, Any]] = []
             inserted = False
             for index, group in enumerate(groups):
@@ -93,7 +93,7 @@ class ContextCompactor:
         prompt = SUMMARY_PROMPT + f'\n最终摘要最多约 {limit} 个计数单位，必须简洁。'
         while payload:
             base = [{'role': 'system', 'content': prompt}, {'role': 'user', 'content': '已有摘要：\n' + summary}]
-            available = self.counter.available(self.settings, base, []) - 1024
+            available = self.counter.available(self.settings, base, []) - LIMITS.summary_request_reserve_tokens
             if available <= 0:
                 raise ValueError('既有摘要过长，无法继续压缩。')
             # JSON 文本作为资料片段传递，预留转义及消息封装的额外空间。

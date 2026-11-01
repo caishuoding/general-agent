@@ -30,7 +30,7 @@ class SkillService:
         """返回本会话任务摘要，普通聊天不自动激活旧任务的工作流。"""
         self.conversation(account, conversation)
         with self.database.connect() as connection:
-            return connection.execute('SELECT id,skill,version,status,stage,route,updated_at FROM skill_tasks WHERE account_id=%s AND conversation_id=%s ORDER BY updated_at DESC LIMIT 30', (account, conversation)).fetchall()
+            return connection.execute('SELECT id,skill,version,status,updated_at FROM skill_tasks WHERE account_id=%s AND conversation_id=%s ORDER BY updated_at DESC LIMIT 30', (account, conversation)).fetchall()
 
     def conversation(self, account: UUID, conversation: UUID) -> None:
         """每次访问核对所属账号和未删除会话，其他账号一律视为不存在。"""
@@ -50,7 +50,7 @@ class SkillService:
         if row['source_snapshot'] != self.repository.snapshot(conversation):
             shutil.rmtree(self.directory / str(task), ignore_errors=True)
             with self.database.connect() as connection:
-                connection.execute("UPDATE skill_tasks SET status='revoked',stage='资料范围已变化' WHERE id=%s", (task,))
+                connection.execute("UPDATE skill_tasks SET status='revoked',updated_at=CURRENT_TIMESTAMP WHERE id=%s", (task,))
             raise ValueError('制作任务资料范围已变化，旧工作文件已清理，请重新创建任务。')
         return row
 
@@ -142,15 +142,6 @@ class SkillService:
         with SafeFiles(self.directory / str(task) / 'workspace').file(relative, write=True) as destination:
             destination.write(content.encode('utf-8'))
         return {'path': '/workspace/' + relative, 'bytes': len(content.encode('utf-8'))}
-
-    def update(self, task: UUID, account: UUID, conversation: UUID, status: str, stage: str, route: str) -> dict[str, Any]:
-        """保存当前阶段及等待状态，供下一条用户消息显式续接。"""
-        self.get(task, account, conversation)
-        if status not in {'active', 'waiting', 'completed', 'interrupted'}:
-            raise ValueError('制作任务状态无效。')
-        with self.database.connect() as connection:
-            connection.execute('UPDATE skill_tasks SET status=%s,stage=%s,route=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s', (status, stage, route, task))
-        return {'task_id': str(task), 'status': status, 'stage': stage, 'route': route}
 
     def publish(self, task: UUID, account: UUID, conversation: UUID, answer: UUID, relative: str, artifact_id: UUID | None = None) -> dict[str, Any]:
         """按稳定发布身份保存不可变副本，检查点重放复用原交付且不覆盖内容。"""

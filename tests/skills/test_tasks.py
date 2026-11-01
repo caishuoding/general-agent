@@ -25,9 +25,8 @@ def test_task_load_resume_and_file_authorization(database_url: str, tmp_path: Pa
     task = service.activate(account['id'], conversation, 'ppt-master', None)
     assert '# PPT Master Skill' in service.instructions(task['id'], account['id'], conversation)
     service.write(task['id'], account['id'], conversation, 'draft.md', '制作方案')
-    service.update(task['id'], account['id'], conversation, 'waiting', '等待配色确认', 'generate')
     resumed = service.activate(account['id'], conversation, 'ppt-master', task['id'])
-    assert resumed['stage'] == '等待配色确认'
+    assert resumed['status'] == 'active'
     assert service.read(task['id'], account['id'], conversation, 'draft.md')['content'] == '制作方案'
     with pytest.raises(LookupError):
         service.read(task['id'], uuid4(), conversation, 'draft.md')
@@ -55,9 +54,7 @@ def test_rejected_instruction_does_not_poison_resumable_task(database_url: str, 
         service.load_file(task['id'], account['id'], conversation, 'workflows/routing.md', True, reject)
     assert 'workflows/routing.md' not in service.get(task['id'], account['id'], conversation)['instruction_files']
     service.load_file(task['id'], account['id'], conversation, 'workflows/routing.md', True)
-    service.update(task['id'], account['id'], conversation, 'waiting', '等待第二阶段确认', 'generate')
     resumed = service.activate(account['id'], conversation, 'ppt-master', task['id'])
     assert resumed['status'] == 'active'
-    assert resumed['stage'] == '等待第二阶段确认'
     assert 'workflows/routing.md' in resumed['previous_instruction_paths']
     assert list(resumed['instruction_files']) == ['SKILL.md']

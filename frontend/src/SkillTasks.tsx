@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, errorMessage } from './api';
 
-type Task = { id: string; skill: string; status: string; stage: string; artifacts: { id: string; filename: string }[] };
+type Task = { id: string; skill: string; status: string; artifacts: { id: string; filename: string }[] };
 
 /** 展示会话制作进度和真实交付文件，刷新后仍可读取已保存任务。 */
 export function SkillTasks({ conversationId }: { conversationId: string }) {
@@ -24,15 +24,14 @@ export function SkillTasks({ conversationId }: { conversationId: string }) {
 
   /** 真实交付使用服务端授权地址下载。 */
   function renderTask(task: Task) {
-    const labels: Record<string, string> = { active: '制作中', waiting: '等待确认', completed: '已完成', interrupted: '已中断，可继续', revoked: '资料已撤销' };
+    const labels: Record<string, string> = { active: '制作中', waiting: '等待下一步', completed: '已完成', interrupted: '已中断，可继续', revoked: '资料已撤销' };
     /** 依据交付身份生成下载入口，不使用模型生成的磁盘路径。 */
     function renderArtifact(file: Task['artifacts'][number]) {
       return <li key={file.id}><a href={`/api/conversations/${conversationId}/skill-artifacts/${file.id}/file`} download>{file.filename}</a></li>;
     }
     return <details key={task.id} className="skill-task"><summary>演示文稿 · {labels[task.status] || task.status}</summary>
-      <p>{task.stage || '正在准备制作任务'}</p>
       {task.status !== 'revoked' && <ul>{task.artifacts.map(renderArtifact)}</ul>}
-      {task.status === 'waiting' && <p className="field-help">在对话中回复制作方案，助手会继续这个任务。</p>}
+      {task.status === 'waiting' && <p className="field-help">在对话中给出下一步要求，助手会继续这个任务。</p>}
     </details>;
   }
   if (!tasks.length && !error) return null;

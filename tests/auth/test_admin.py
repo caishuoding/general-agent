@@ -179,8 +179,8 @@ def test_admin_can_view_all_user_content_read_only_and_audit_it(
             json={"content": "管理员不能代发"},
         ).status_code in {404, 405}
 
-        with psycopg.connect(database_url, row_factory=dict_row) as connection:
-            audit = connection.execute(
+        with psycopg.connect(database_url, row_factory=dict_row) as audit_connection:
+            audit = audit_connection.execute(
                 "SELECT admin_user_id, target_user_id, resource_type, action "
                 "FROM admin_audit_log WHERE target_user_id=%s ORDER BY created_at",
                 (bob_id,),

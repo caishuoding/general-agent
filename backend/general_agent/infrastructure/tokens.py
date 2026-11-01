@@ -10,6 +10,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from tokenizers import Tokenizer
 
+from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.infrastructure.settings import StoredSettings
 
 
@@ -119,10 +120,19 @@ class TokenCounter:
         """使用本次固定的适配器计数，具体方法可从 method 读取。"""
         return self._adapter.count(text)
 
+    def input_limit(self, settings: StoredSettings) -> int:
+        """返回扣除回答与聊天协议预留后的最大输入计数。"""
+        return max(0, settings.context_window_tokens - settings.output_reserve_tokens - LIMITS.context_protocol_reserve_tokens)
+
+    def request_tokens(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
+        """计算实际外发字段，忽略仅用于状态恢复和压缩的内部标记。"""
+        clean = [{key: value for key, value in message.items() if not key.startswith('_')
+                  and not (key == 'tool_calls' and not value)} for message in messages]
+        return self.count(json.dumps({'messages': clean, 'tools': tools}, ensure_ascii=False))
+
     def available(self, settings: StoredSettings, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
-        """估算消息和工具的文本预算并预留协议空间；整轮精确用量以模型 usage 为准。"""
-        serialized = json.dumps({'messages': messages, 'tools': tools}, ensure_ascii=False)
-        return max(0, settings.context_window_tokens - settings.output_reserve_tokens - self.count(serialized) - 512)
+        """按实际外发请求核算剩余输入计数；整轮精确用量仍以模型 usage 为准。"""
+        return max(0, self.input_limit(settings) - self.request_tokens(messages, tools))
 
     def prefix(self, text: str, budget: int) -> str:
         """寻找预算内的连续字符前缀；只切字符边界，并核验返回文本的实际计数。"""

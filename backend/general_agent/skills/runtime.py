@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID, uuid4, uuid5
 
 from general_agent.agent.repository import RunCheckpoint
+from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.attachments.service import AttachmentService
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.infrastructure.tokens import TokenCounter
@@ -28,7 +29,7 @@ class SkillRuntime:
         """绑定隔离执行和受保护来源读取，后台最多同时运行三个制作命令。"""
         self.service, self.attachments = service, attachments
         self.sandbox = DockerSandbox(service.directory.parent)
-        self.pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix='skill-command')
+        self.pool = ThreadPoolExecutor(max_workers=LIMITS.skill_command_concurrency, thread_name_prefix='skill-command')
         self.events: dict[UUID, threading.Event] = {}
         self.lock = threading.Lock()
         self.closed = False
@@ -79,6 +80,8 @@ class SkillRuntime:
 
     def start(self, task: UUID, checkpoint: RunCheckpoint, command: str, seconds: int) -> dict[str, Any]:
         """按原工具调用身份复用命令记录，避免检查点重放再次启动副作用。"""
+        if not 1 <= seconds <= LIMITS.skill_command_seconds:
+            raise ValueError('制作命令执行时限无效。')
         identifier = uuid4()
         answer_id = checkpoint.repository.info(checkpoint.run_id)['answer_attempt_id']
         call_key = str(checkpoint.run_id) + ':' + checkpoint.current_call if checkpoint.current_call else None
@@ -91,7 +94,7 @@ class SkillRuntime:
                 raise ValueError('制作执行环境正在关闭。')
             count = connection.execute("SELECT count(*) AS n FROM skill_commands WHERE status='running'").fetchone()
             assert count is not None
-            if count['n'] >= 3:
+            if count['n'] >= LIMITS.skill_command_concurrency:
                 raise ValueError('制作命令并发已满，请等待已有命令结束。')
             if connection.execute("SELECT id FROM skill_commands WHERE task_id=%s AND status='running'", (task,)).fetchone():
                 raise ValueError('当前任务已有命令正在执行，请先轮询该命令。')
@@ -231,7 +234,7 @@ class SkillSession:
         prospective = '\n\n'.join(self.context(replacement=instruction))
         messages = [{'role': 'system', 'content': base + '\n\n' + prospective}, *self.request_messages[1:]]
         tools = {tool['function']['name']: tool for tool in [*self.request_tools, *skill_tools()]}
-        if self.counter.available(self.settings, messages, list(tools.values())) < 2048:
+        if self.counter.available(self.settings, messages, list(tools.values())) < LIMITS.skill_instruction_reserve_tokens:
             raise ValueError('完整 Skill 指令超过当前模型上下文预算；请保留当前阶段必要文件或调整模型窗口后重试。')
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -248,10 +251,11 @@ class SkillSession:
                 self.task = previous
                 raise
             with self.service.database.connect() as connection:
-                connection.execute("UPDATE agents SET model_limit=384,deadline=GREATEST(deadline,created_at+INTERVAL '1 hour') WHERE answer_attempt_id=%s AND parent_agent_id IS NULL", (self.checkpoint.repository.info(self.checkpoint.run_id)['answer_attempt_id'],))
-                connection.execute("UPDATE agent_runs SET deadline=CURRENT_TIMESTAMP+INTERVAL '1 hour' WHERE id=%s", (self.checkpoint.run_id,))
+                limit = max(LIMITS.model_calls, LIMITS.skill_model_calls)
+                connection.execute("UPDATE agents SET model_limit=GREATEST(model_limit,%s),deadline=GREATEST(deadline,created_at+%s*INTERVAL '1 second') WHERE answer_attempt_id=%s AND parent_agent_id IS NULL", (limit, LIMITS.skill_seconds, self.checkpoint.repository.info(self.checkpoint.run_id)['answer_attempt_id']))
+                connection.execute("UPDATE agent_runs SET deadline=GREATEST(deadline,CURRENT_TIMESTAMP+%s*INTERVAL '1 second') WHERE id=%s", (LIMITS.skill_seconds, self.checkpoint.run_id))
             return {'task_id': str(self.task), 'skill': row['skill'], 'version': row['version'],
-                'stage': row['stage'], 'status': row['status'], 'skill_dir': f'/opt/skills/{row["skill"]}',
+                'status': row['status'], 'skill_dir': f'/opt/skills/{row["skill"]}',
                 'previous_instruction_paths': row.get('previous_instruction_paths', []),
                 'workspace': '/workspace', 'instructions_loaded': True}
         task = values.pop('task_id')

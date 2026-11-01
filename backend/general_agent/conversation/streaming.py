@@ -13,7 +13,6 @@ from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.checkpoints import STATE_VERSION, supersede_interrupted
 from general_agent.infrastructure.operations import OperationContext
 from general_agent.conversation.execution import ChatExecution
-from general_agent.infrastructure.calls import CallGateway
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.skills.selection import SkillSnapshot
 
@@ -21,10 +20,9 @@ from general_agent.skills.selection import SkillSnapshot
 class StreamingChat:
     """协调持久化的生成尝试与后台模型请求，每段文字提交后即可重新读取。"""
 
-    def __init__(self, database: Database, model: CallGateway, execution: ChatExecution, attachments: AttachmentService, graph: ConversationGraph) -> None:
+    def __init__(self, database: Database, execution: ChatExecution, attachments: AttachmentService, graph: ConversationGraph) -> None:
         """绑定共同动作和材料，流式层仅额外跟踪本进程工作线程。"""
         self.database = database
-        self.model = model
         self.execution = execution
         self.attachments = attachments
         self.graph = graph
@@ -57,14 +55,12 @@ class StreamingChat:
             if connection.execute("SELECT id FROM messages WHERE conversation_id = %s AND status='generating'", (conversation_id,)).fetchone():
                 raise ValueError("本会话正在生成回答，请先停止或等待完成。")
             supersede_interrupted(connection, conversation_id)
-            call_id = self.execution.reserve_first(content, settings, operation)
             user_id = uuid4()
             connection.execute("INSERT INTO messages (id, conversation_id, role, content, status,skill_selections) VALUES (%s, %s, 'user', %s, 'complete',%s)", (user_id, conversation_id, content,Jsonb(skill_selections or [])))
             self.attachments.bind_to_user_message(connection, conversation_id, user_id)
             connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to, operation_id, progress,resume_model_revision) VALUES (%s, %s, 'assistant', '', 'generating', %s, %s, %s,%s)", (message_id, conversation_id, user_id, operation.operation_id, Jsonb(PREPARING_PROGRESS),settings.revision))
             connection.execute("UPDATE conversations SET title = %s WHERE id = %s AND title = '新会话'", (content[:40], conversation_id))
-            connection.execute("UPDATE model_calls SET assistant_message_id=%s WHERE id=%s", (message_id, call_id))
-        thread = Thread(target=self.execute, args=(conversation_id, account_id, message_id, user_id, settings, operation, call_id), daemon=True)
+        thread = Thread(target=self.execute, args=(conversation_id, account_id, message_id, user_id, settings, operation), daemon=True)
         with self.lock:
             self.threads = {item for item in self.threads if item.is_alive()}
             self.threads.add(thread)
@@ -91,17 +87,15 @@ class StreamingChat:
                 user_id = original["id"]
             source = connection.execute("SELECT content FROM messages WHERE id=%s", (user_id,)).fetchone()
             assert source is not None
-            call_id = self.execution.reserve_first(source["content"], settings, operation, user_id)
             connection.execute("INSERT INTO messages (id, conversation_id, role, content, status, reply_to, operation_id, progress,resume_model_revision) VALUES (%s, %s, 'assistant', '', 'generating', %s, %s, %s,%s)", (new_id, conversation_id, user_id, operation.operation_id, Jsonb(PREPARING_PROGRESS),settings.revision))
-            connection.execute("UPDATE model_calls SET assistant_message_id=%s WHERE id=%s", (new_id, call_id))
-        thread = Thread(target=self.execute, args=(conversation_id, account_id, new_id, user_id, settings, operation, call_id), daemon=True)
+        thread = Thread(target=self.execute, args=(conversation_id, account_id, new_id, user_id, settings, operation), daemon=True)
         with self.lock:
             self.threads = {item for item in self.threads if item.is_alive()}
             self.threads.add(thread)
             thread.start()
         return new_id
 
-    def execute(self, conversation_id: UUID, account_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext, call_id: UUID | None) -> None:
+    def execute(self, conversation_id: UUID, account_id: UUID, message_id: UUID, user_id: UUID, settings: StoredSettings, operation: OperationContext) -> None:
         """读取带位置的原消息，恢复工作上下文时按水位合入新增历史。"""
         with self.database.connect() as connection:
             rows = connection.execute(
@@ -117,7 +111,7 @@ class StreamingChat:
             operation=operation,
             delivery="stream",
         )
-        self.graph.run(context, rows, call_id)
+        self.graph.run(context, rows)
 
     def resume(self, conversation_id: UUID, account_id: UUID, message_id: UUID, settings: StoredSettings) -> None:
         """重新认领最新中断回答，沿用原操作、调用额度和检查点，不创建用户消息。"""
@@ -158,7 +152,7 @@ class StreamingChat:
             self.graph.invoke(None, context)
         else:
             self.execute(context.conversation_id, context.account_id, context.assistant_message_id,
-                context.user_message_id, context.settings, context.operation, None)
+                context.user_message_id, context.settings, context.operation)
 
     def stop(self, conversation_id: UUID, account_id: UUID, message_id: UUID) -> None:
         """显式停止生成或中断回答并关闭子任务，已外发调用仍可回传真实用量。"""
@@ -168,6 +162,7 @@ class StreamingChat:
         with self.database.connect() as connection:
             connection.execute("UPDATE messages SET status = 'stopped', progress=NULL WHERE id = %s AND status IN ('generating','interrupted')", (message_id,))
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE WHERE id IN (SELECT operation_id FROM messages WHERE id=%s)", (message_id,))
+            connection.execute("UPDATE skill_tasks SET status='interrupted',updated_at=CURRENT_TIMESTAMP WHERE account_id=%s AND conversation_id=%s AND status='active'", (account_id, conversation_id))
             connection.execute("UPDATE model_calls SET status = 'stopped' WHERE assistant_message_id = %s AND status = 'generating' AND EXISTS (SELECT 1 FROM messages WHERE id = %s AND status = 'stopped')", (message_id, message_id))
 
         self.execution.agent_runtime.repository.close(message_id)

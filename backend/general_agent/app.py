@@ -148,8 +148,8 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     execution.agent_runtime.checkpoints = checkpoints
     conversation_graph = ConversationGraph(database, execution, checkpoints)
     source_deletion = SourceDeletion(execution.deletion, memory, attachments.delete_file)
-    chat = ChatService(database, model, execution, attachments, conversation_graph)
-    streaming = StreamingChat(database, model, execution, attachments, conversation_graph)
+    chat = ChatService(database, execution, attachments, conversation_graph)
+    streaming = StreamingChat(database, execution, attachments, conversation_graph)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

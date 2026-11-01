@@ -80,6 +80,7 @@ def supersede_interrupted(connection: Any, conversation_id: UUID) -> None:
     connection.execute('UPDATE agents SET closed=TRUE WHERE answer_attempt_id=ANY(%s)', (answers,))
     connection.execute("UPDATE agent_runs SET status='cancelled',paused_at=NULL,finished_at=CURRENT_TIMESTAMP WHERE agent_id IN (SELECT id FROM agents WHERE answer_attempt_id=ANY(%s)) AND status IN ('queued','running')", (answers,))
     connection.execute('UPDATE cloud_operations SET cancelled=TRUE WHERE id IN (SELECT operation_id FROM messages WHERE id=ANY(%s) UNION SELECT r.operation_id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=ANY(%s))', (answers, answers))
+    connection.execute("UPDATE skill_tasks SET status='interrupted',updated_at=CURRENT_TIMESTAMP WHERE conversation_id=%s AND status='active'", (conversation_id,))
 
 
 class Checkpoints:

@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from general_agent.infrastructure.agent_limits import LIMITS
+
 
 class SkillInput(BaseModel):
     """限定加载名称和可选的显式续接任务，不接受模型指定安装路径。"""
@@ -46,14 +48,14 @@ class WriteFileInput(TaskInput):
 class CommandInput(TaskInput):
     """在隔离任务容器异步执行命令，不提供 Docker 或宿主参数。"""
     command: str = Field(min_length=1, max_length=30000)
-    seconds: int = Field(default=300, ge=1, le=900)
+    seconds: int = Field(default=LIMITS.skill_command_default_seconds, ge=1, le=LIMITS.skill_command_seconds)
 
 
 class PollInput(TaskInput):
     """读取实际执行状态及有界日志，可短暂等待以免模型空轮询。"""
     command_id: str
     offset: int = Field(default=0, ge=0)
-    wait_seconds: int = Field(default=10, ge=0, le=20)
+    wait_seconds: int = Field(default=10, ge=0, le=LIMITS.skill_poll_seconds)
 
 
 class ImportInput(TaskInput):

@@ -31,7 +31,6 @@ class ConversationState(TypedDict):
     runtime_state: NotRequired[dict[str, Any]]
     messages: list[dict[str, Any]]
     source_attachment_ids: list[str]
-    reserved_call_id: UUID | None
     answer: str
     failure: str | None
     used_tools: bool
@@ -79,7 +78,7 @@ class ConversationGraph:
         self.builder = builder
         self.compiled = builder.compile(name='conversation')
 
-    def run(self, context: ConversationContext, rows: list[dict[str, Any]], reserved_call_id: UUID | None = None) -> ConversationResult:
+    def run(self, context: ConversationContext, rows: list[dict[str, Any]]) -> ConversationResult:
         """对齐已提交回答水位后恢复工作消息，仅合入新消息并按稳定身份去重。"""
         position = max((int(row.get("position", 0)) for row in rows), default=0)
         source_snapshot: dict[str, Any] = {}
@@ -110,7 +109,6 @@ class ConversationGraph:
             'history_position': position, 'source_snapshot': source_snapshot, 'runtime_state': inherited_runtime,
             'messages': [dict(row) for row in rows],
             'source_attachment_ids': [],
-            'reserved_call_id': reserved_call_id,
             'answer': '',
             'failure': None,
             'used_tools': False,
@@ -161,14 +159,12 @@ class ConversationGraph:
                 context.assistant_message_id,
                 context.settings,
                 context.operation,
-                state['reserved_call_id'],
                 state['messages'],
             )
             LOGGER.info('event=node prepare_context message_id=%s', context.assistant_message_id)
             return {
                 'messages': preparation.messages,
                 'source_attachment_ids': [str(identifier) for identifier in self.execution.material_attachment_ids(preparation.material)],
-                'reserved_call_id': preparation.reserved,
             }
         except (ValueError, ModelFailure) as error:
             return self.failure_update(context, str(error))
@@ -224,7 +220,6 @@ class ConversationGraph:
                 context.user_message_id,
                 str(state['messages'][-1]['content']),
                 context.operation,
-                state['reserved_call_id'],
                 context.settings,
                 messages=cast(list[ModelMessage], state['messages']),
                 assistant_message_id=context.assistant_message_id,
@@ -247,6 +242,29 @@ class ConversationGraph:
             LOGGER.exception('LangGraph 工具节点失败 conversation_id=%s message_id=%s', context.conversation_id, context.assistant_message_id)
             return self.failure_update(context, self.unexpected_failure(context.delivery), ''.join(chunks))
 
+    @staticmethod
+    def settle_skill_task(connection: Any, state: ConversationState,
+                          context: ConversationContext, status: str) -> None:
+        """将当前活动 Skill 任务与回答终态同步，失败和停止标记为可续接中断。"""
+        task_id = state.get('runtime_state', {}).get('task_id')
+        if not task_id:
+            saved = connection.execute(
+                "SELECT s.payload FROM agent_messages s JOIN agent_runs r ON r.id=s.run_id "
+                "JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s AND "
+                "a.parent_agent_id IS NULL AND s.step_key='runtime:skill'",
+                (context.assistant_message_id,),
+            ).fetchone()
+            payload = saved.get('payload') if isinstance(saved, dict) else None
+            candidate = payload.get('task_id') if isinstance(payload, dict) else None
+            task_id = candidate if isinstance(candidate, str) else None
+        if not task_id:
+            return
+        connection.execute(
+            "UPDATE skill_tasks SET status=%s,updated_at=CURRENT_TIMESTAMP "
+            "WHERE id=%s AND account_id=%s AND conversation_id=%s AND status='active'",
+            (status, UUID(task_id), context.account_id, context.conversation_id),
+        )
+
     def finalize(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
         """核验网页和知识库引用后保存终态，把正文及两类可信来源返回 State。"""
         context = runtime.context
@@ -262,10 +280,7 @@ class ConversationGraph:
                 (answer, 'failed' if failure else 'complete', failure, Jsonb(web_sources),
                  Jsonb(knowledge_sources), context.assistant_message_id),
             )
-            connection.execute(
-                "UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE id=%s AND status='reserved'",
-                (state['reserved_call_id'],),
-            )
+            self.settle_skill_task(connection, state, context, 'interrupted' if failure else 'waiting')
         LOGGER.info('event=node finalize message_id=%s status=%s characters=%s', context.assistant_message_id, 'failed' if failure else 'complete', len(answer))
         with self.database.connect() as connection:
             saved = connection.execute('SELECT position FROM messages WHERE id=%s', (context.assistant_message_id,)).fetchone()
@@ -292,7 +307,7 @@ class ConversationGraph:
         return '回答执行中断，已保留部分内容，可以重试。' if delivery == 'stream' else '记忆操作未完成，可以重试核对。'
 
     def fail_terminal(self, context: ConversationContext, state: ConversationState, detail: str) -> ConversationResult:
-        """图边界异常时使用最新 State 保存失败终态，保留部分回答并撤销预留调用。"""
+        """图边界异常时使用最新 State 保存失败终态并保留部分回答。"""
         answer = state['answer'] or (detail if context.delivery == 'sync' else '')
         try:
             self.execution.search.fail(context.operation, detail)
@@ -301,10 +316,7 @@ class ConversationGraph:
                     "UPDATE messages SET content=%s,status='failed',error=%s WHERE id=%s AND status='generating'",
                     (answer, detail, context.assistant_message_id),
                 )
-                connection.execute(
-                    "UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE id=%s AND status='reserved'",
-                    (state['reserved_call_id'],),
-                )
+                self.settle_skill_task(connection, state, context, 'interrupted')
         except Exception:
             # 数据库暂时不可用时，由既有启动恢复流程处理未结束消息。
             LOGGER.exception('回答失败终态暂未保存 message_id=%s', context.assistant_message_id)

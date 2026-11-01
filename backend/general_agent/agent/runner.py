@@ -82,11 +82,6 @@ class AgentRuntime:
                 with self.repository.database.connect() as connection:
                     paused = bool(connection.execute("SELECT id FROM messages WHERE id=%s AND status='interrupted'", (answer_id,)).fetchone())
             if not paused:
-                with self.repository.database.connect() as connection:
-                    tasks = connection.execute("SELECT payload FROM agent_messages WHERE run_id=%s AND step_key='runtime:skill'", (root['id'],)).fetchall()
-                    for task in tasks:
-                        if task['payload'].get('task_id'):
-                            connection.execute("UPDATE skill_tasks SET status='waiting',updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status='active'", (UUID(task['payload']['task_id']),))
                 self.repository.close(answer_id)
 
     def heartbeat(self) -> None:
@@ -178,13 +173,13 @@ class AgentRuntime:
         def budget(current: list[dict[str, Any]], definitions: list[dict[str, Any]]) -> None:
             """按本执行的实际消息核算读取预算，不借用其他子智能体用量。"""
             nonlocal document_budget
-            document_budget = max(0, counter.available(settings, current, definitions) - 256)
+            document_budget = max(0, counter.available(settings, current, definitions) - LIMITS.context_tool_reserve_tokens)
             with self.repository.database.connect() as connection:
                 usage = connection.execute("SELECT prompt_tokens,completion_tokens FROM model_calls WHERE agent_run_id=%s AND unit='chat_tokens' ORDER BY created_at DESC,id DESC LIMIT 1", (run_id,)).fetchone()
             if usage is not None and usage['prompt_tokens'] is not None:
                 last_assistant = max((index for index, message in enumerate(current) if message['role'] == 'assistant'), default=len(current))
                 appended = counter.count(json.dumps(current[last_assistant:], ensure_ascii=False))
-                observed = settings.context_window_tokens - settings.output_reserve_tokens - usage['prompt_tokens'] - (usage['completion_tokens'] or 0) - appended - 768
+                observed = counter.input_limit(settings) - usage['prompt_tokens'] - (usage['completion_tokens'] or 0) - appended - LIMITS.context_tool_reserve_tokens
                 document_budget = max(0, min(document_budget, observed))
             elif any(isinstance(item.get('content'), list) for item in current):
                 document_budget = 0
@@ -225,7 +220,7 @@ class AgentRuntime:
                     if name == 'load_skill':
                         checkpoint.put(cache_key, result)
                     if skill_session.task is not None:
-                        graph.maximum_rounds = 128
+                        graph.maximum_rounds = LIMITS.skill_rounds
                         if not any(tool['function']['name'] == 'read_skill_file' for tool in tools):
                             tools.extend(skill_tools()[1:])
                     return result
@@ -296,7 +291,7 @@ class AgentRuntime:
                 with self.repository.database.connect() as connection:
                     command = connection.execute("SELECT id FROM skill_commands WHERE task_id=%s AND status='running'", (skill_session.task,)).fetchone()
                 if command:
-                    result = skill_session.runtime.poll(skill_session.task, command['id'], 0, 20)
+                    result = skill_session.runtime.poll(skill_session.task, command['id'], 0, LIMITS.skill_poll_seconds)
                     current.append({'role': 'user', 'content': '后台制作命令实际状态（请完成轮询后再交付）：' + json.dumps(result, ensure_ascii=False)})
                     return False
             return self.orchestrator.inbox.settle(checkpoint, answer, current)
@@ -321,7 +316,7 @@ class AgentRuntime:
                 '本轮补充要求：\n'
                 + instructions,
             )
-        graph = AgentToolGraph(maximum_rounds=128 if skill_session and skill_session.task else LIMITS.child_rounds if worker else LIMITS.main_rounds)
+        graph = AgentToolGraph(maximum_rounds=LIMITS.skill_rounds if skill_session and skill_session.task else LIMITS.child_rounds if worker else LIMITS.main_rounds)
         try:
             if self.checkpoints:
                 self.checkpoints.register('run:' + str(run_id), row['conversation_id'], answer_id)

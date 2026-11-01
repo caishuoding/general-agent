@@ -53,3 +53,29 @@ def test_next_message_restores_skill_without_model_save_tool(database_url: str, 
         assert next_answer.status_code == 200, next_answer.text
         assert next_answer.json()['messages'][-1]['content'] == '已读取原任务文件。'
         assert len(client.get(f'/api/conversations/{conversation}/skill-tasks').json()) == 1
+
+
+def test_skill_task_becomes_interrupted_when_answer_fails(database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skill 已激活但后续模型失败时，任务不能继续显示为制作中。"""
+    catalog = tmp_path / 'catalog' / 'demo'
+    catalog.mkdir(parents=True)
+    (catalog / 'SKILL.md').write_text('---\nname: demo\ndescription: 工作文件\n---\n# 测试指令')
+    monkeypatch.setenv('SKILLS_DIR', str(catalog.parent))
+    calls = 0
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """首轮加载 Skill，第二轮模拟模型服务端失败。"""
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return response(name='load_skill', arguments={'name': 'demo'})
+        return httpx.Response(400, json={'error': {'message': 'controlled failure'}})
+
+    set_global_settings(database_url, tmp_path, {'base_url': 'https://model.example/v1',
+        'model': 'controlled', 'api_key': 'test-key', 'context_window_tokens': 262144})
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
+        conversation = client.post('/api/conversations', json={}).json()['id']
+        failed = client.post(f'/api/conversations/{conversation}/messages', json={'content': '创建制作任务'})
+        assert failed.status_code == 502
+        tasks = client.get(f'/api/conversations/{conversation}/skill-tasks').json()
+        assert len(tasks) == 1 and tasks[0]['status'] == 'interrupted'

@@ -59,7 +59,6 @@ class AgentToolGraph:
         checkpoint: MemoryCheckpoint,
         tools: list[dict[str, Any]],
         execute_tool: ToolExecutor,
-        context_messages: list[dict[str, Any]] | None = None,
         context_fragments: list[str] | None = None,
         instruction_context: Callable[[], list[str]] | None = None,
         assistant_message_id: UUID | None = None,
@@ -100,21 +99,34 @@ class AgentToolGraph:
             result = receive_inbox(state['messages'], f'automatic:{state["round_index"]}', False)
             return inbox_update(state, result)
 
+        def outbound(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            """移除仅用于压缩和恢复的内部标记，避免进入外部模型协议。"""
+            return [{key: value for key, value in item.items()
+                     if not key.startswith('_') and not (key == 'tool_calls' and not value)}
+                    for item in messages]
+
         def model_input(current: list[dict[str, Any]], clean: bool = True) -> list[dict[str, Any]]:
-            """统一组装系统提示与动态指令，外发时去除内部消息标记。"""
+            """统一组装系统提示与动态指令，可保留内部标记交给压缩器。"""
             system_parts = [str(message['content']) for message in current if message.get('role') == 'system']
             fragments = [fragment.strip() for fragment in (context_fragments or []) if fragment.strip()]
             if instruction_context is not None:
                 fragments.extend(instruction_context())
             prompt = '\n\n'.join([*system_parts, *fragments]) if system_parts or fragments else base_system_prompt()
             messages = [{'role': 'system', 'content': prompt}, *(message for message in current if message.get('role') != 'system')]
-            return [{key: value for key, value in item.items() if not clean or (not key.startswith('_') and not (key == 'tool_calls' and not value))} for item in messages]
+            return outbound(messages) if clean else messages
+
+        def active_tools(state: AgentState) -> list[dict[str, Any]]:
+            """只返回仍可调用的工具，使模型协议和上下文预算使用同一集合。"""
+            return [tool for tool in tools
+                    if (state['document_calls'].get(tool['function']['name'], 0) < LIMITS.document_calls
+                        if tool['function']['name'] in DOCUMENT_TOOLS else
+                        state['tool_failures'].get(tool['function']['name'], 0) <= self.maximum_tool_retries)]
 
         def prepare_model(state: AgentState) -> dict[str, Any]:
             """模型请求前压缩旧交互，节点返回后先持久化再执行实际模型调用。"""
             if prepare_context is None:
                 return {}
-            updated = prepare_context(model_input(state['messages'], clean=False), tools)
+            updated = prepare_context(model_input(state['messages'], clean=False), active_tools(state))
             return {'runtime_state': runtime_state() if runtime_state else {},
                 'messages': [*(message for message in state['messages'] if message.get('role') == 'system'),
                 *(message for message in updated if message.get('role') != 'system')]}
@@ -128,8 +140,7 @@ class AgentToolGraph:
             reply = checkpoint.get(key)
             if reply is None:
                 model_messages = model_input(state['messages'])
-                if before_model is not None:
-                    before_model(model_messages, tools)
+                available_tools = active_tools(state)
                 if on_round_start is not None:
                     on_round_start()
                 content: list[str] = []
@@ -137,8 +148,19 @@ class AgentToolGraph:
                 partial_calls: dict[int, dict[str, Any]] = {}
                 attempt_messages = model_messages
                 for attempt in range(1, LIMITS.stream_attempts + 1):
-                    if attempt > 1 and before_model is not None:
-                        before_model(attempt_messages, tools)
+                    if attempt > 1:
+                        prefix = visible_stream_content(content)
+                        if prefix.strip():
+                            retry_messages: list[dict[str, Any]] = [
+                                *model_input(state['messages'], clean=False),
+                                {'role': 'assistant', 'content': prefix},
+                                {'role': 'user', 'content': STREAM_CONTINUATION_PROMPT, '_context_pinned': True},
+                            ]
+                            if prepare_context is not None:
+                                retry_messages = prepare_context(retry_messages, available_tools)
+                            attempt_messages = outbound(retry_messages)
+                    if before_model is not None:
+                        before_model(attempt_messages, available_tools)
                     attempt_calls: dict[int, dict[str, Any]] = {}
                     attempt_reasoning: list[str] = []
                     resume_marker_pending = bool(visible_stream_content(content).strip())
@@ -147,10 +169,7 @@ class AgentToolGraph:
                             settings,
                             cast(list[ModelMessage], attempt_messages),
                             assistant_message_id=assistant_message_id,
-                            tools=[tool for tool in tools
-                                   if (state['document_calls'].get(tool['function']['name'], 0) < 5
-                                       if tool['function']['name'] in DOCUMENT_TOOLS else
-                                       state['tool_failures'].get(tool['function']['name'], 0) <= self.maximum_tool_retries)] or None,
+                            tools=available_tools or None,
                         ):
                             if chunk.content:
                                 # 第一批恢复内容前写入持久标记，用户能看到真实的断点位置。
@@ -185,14 +204,6 @@ class AgentToolGraph:
                             ) from None
                         if on_stream_status is not None:
                             on_stream_status('retrying', attempt, LIMITS.stream_attempts)
-                        prefix = visible_stream_content(content)
-                        if prefix.strip():
-                            # Chat Completions 不支持 Token 级续传，沿用已出现正文并追加临时续写要求。
-                            attempt_messages = [
-                                *model_messages,
-                                {'role': 'assistant', 'content': prefix},
-                                {'role': 'user', 'content': STREAM_CONTINUATION_PROMPT},
-                            ]
                         checkpoint.guard()
                         time.sleep(0.25 * attempt)
                         checkpoint.guard()
@@ -250,8 +261,9 @@ class AgentToolGraph:
                 if name in DOCUMENT_TOOLS:
                     if name not in known_tools:
                         result = {'error': '未知工具，不允许执行。'}
-                    elif document_calls.get(name, 0) >= 5:
-                        result = {'error': '该工具本轮最多调用五次，已达到调用上限。', 'call_limit': 5, 'call_exhausted': True}
+                    elif document_calls.get(name, 0) >= LIMITS.document_calls:
+                        result = {'error': f'该工具在本次回答中最多调用 {LIMITS.document_calls} 次，已达到调用上限。',
+                                  'call_limit': LIMITS.document_calls, 'call_exhausted': True}
                     else:
                         document_calls[name] = document_calls.get(name, 0) + 1
                         try:
@@ -263,8 +275,8 @@ class AgentToolGraph:
                         except (ValueError, LookupError, ModelFailure) as error:
                             result = {'error': str(error)}
                         # 文档读取不复用历史工具缓存，避免到期或删除后重放旧正文。
-                        result = {**result, 'call_count': document_calls[name], 'call_limit': 5,
-                                  'call_exhausted': document_calls[name] >= 5}
+                        result = {**result, 'call_count': document_calls[name], 'call_limit': LIMITS.document_calls,
+                                  'call_exhausted': document_calls[name] >= LIMITS.document_calls}
                     tool_messages.append({'role': 'tool', 'tool_call_id': call['id'],
                                           'content': json.dumps(result, ensure_ascii=False)})
                     executed_results.append(result)
@@ -385,9 +397,8 @@ class AgentToolGraph:
             """返回最后一轮流式文本作为回答，并保留是否执行过工具。"""
             reply = state["messages"][-1]
             answer = str(reply.get("content") or "").strip()
-            handled = bool(answer)
             LOGGER.info("event=tool_finish used_tools=%s round=%s", state["used_tools"], state["round_index"])
-            return {"answer": answer or None, "handled": handled}
+            return {"answer": answer or None}
 
         builder = StateGraph(AgentState)
         builder.add_node('prepare_model', prepare_model)
@@ -410,7 +421,7 @@ class AgentToolGraph:
                                       {'finish': 'finish', 'collect_inbox': 'collect_inbox'})
         builder.add_edge("finish", END)
         graph = builder.compile(checkpointer=checkpointer)
-        raw_messages = [*(context_messages or []), *messages]
+        raw_messages = [*messages]
         initial: AgentState = {
             "version": 1, "runtime_state": runtime_state() if runtime_state else {},
             "messages": raw_messages,
@@ -420,14 +431,17 @@ class AgentToolGraph:
             "tool_failures": {},
             "document_calls": {},
             "answer": None,
-            "handled": False,
             'inbox_deliveries': [],
             'settled': False,
             'watching_inbox': False,
         }
+        # Skill 可在运行中把业务轮数上限提高到 128；图递归上限必须提前预留，
+        # 否则 LangGraph 会在调用模型的业务上限生效前截断执行。
+        recursion_rounds = (max(self.maximum_rounds, LIMITS.skill_rounds)
+                            if instruction_context is not None else self.maximum_rounds)
         config: Any = {
             'configurable': {'thread_id': thread_id or str(checkpoint.message_id)},
-            'recursion_limit': max(self.maximum_rounds, 128 if instruction_context is not None else 0) * 4 + 8,
+            'recursion_limit': recursion_rounds * 4 + 8,
         }
         saved = graph.get_state(config) if checkpointer is not None else None
         if saved and saved.values:

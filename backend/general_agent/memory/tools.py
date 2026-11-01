@@ -2,13 +2,10 @@
 
 from dataclasses import dataclass, field
 import json
-from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 from uuid import UUID, uuid5
 
-import httpx
 from pydantic import BaseModel, ConfigDict, Field
-from psycopg.types.json import Jsonb
 
 from general_agent.infrastructure.operations import OperationContext
 from general_agent.memory.service import MemoryService
@@ -16,10 +13,8 @@ from general_agent.memory.correction import MemoryCorrection
 from general_agent.memory.deletion import MemoryDeletion
 from general_agent.memory.automatic import AutomaticMemory, MemoryCheckpoint
 from general_agent.infrastructure.settings import StoredSettings
-from general_agent.infrastructure.provider import ModelFailure, ModelMessage
 from general_agent.prompts import TOOL_DESCRIPTIONS
 from general_agent.search.service import FetchWebInput, SearchService, SearchWebInput, search_web_tool
-from general_agent.agent.graph import AgentToolGraph
 from general_agent.agent.time import current_time_tool, get_current_time
 from general_agent.attachments.service import AttachmentService
 from general_agent.attachments.tools import document_tools
@@ -96,7 +91,6 @@ class MemoryTools:
                  attachments: AttachmentService | None = None, knowledge: KnowledgeTools | None = None) -> None:
         """绑定各自独立的记忆、搜索、附件与知识库边界，兼容既有独立工具测试。"""
         self.memory, self.automatic, self.web_search = memory, automatic, search
-        self.graph = AgentToolGraph()
         self.attachments = attachments
         self.knowledge = knowledge
 
@@ -215,124 +209,3 @@ class MemoryTools:
             public = {'status': result['status'], 'memory_id': mutation_input.memory_id, 'action': 'deleted'}
         checkpoint.put(key, public)
         return public
-
-    def prepare(
-        self,
-        conversation_id: UUID,
-        account_id: UUID,
-        message_id: UUID,
-        content: str,
-        settings: StoredSettings,
-        operation: OperationContext,
-        *,
-        messages: list[ModelMessage],
-        assistant_message_id: UUID,
-        on_content: Callable[[str], None] | None = None,
-        source_attachment_ids: list[UUID] | None = None,
-    ) -> ToolOutcome:
-        """按本轮 LLM 分词核算预算，命中原图分别核验后加入下一轮模型上下文。"""
-        if self.memory.account_id_for_conversation(conversation_id) != account_id:
-            raise LookupError("会话不存在。")
-        counter = TokenCounter.for_settings(settings, self.memory.directory)
-        document_budget = 0
-        injected_images: set[UUID] = set()
-
-        def update_document_budget(current_messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> None:
-            """读取前用实际模型用量和当前消息核对预算，包含图片开销及同批已返回内容。"""
-            nonlocal document_budget
-            document_budget = max(0, counter.available(settings, current_messages, tools) - 256)
-            with self.memory.database.connect() as connection:
-                usage = connection.execute(
-                    "SELECT prompt_tokens,completion_tokens FROM model_calls WHERE assistant_message_id=%s "
-                    "AND unit='chat_tokens' ORDER BY created_at DESC,id DESC LIMIT 1",
-                    (assistant_message_id,),
-                ).fetchone()
-            if usage is not None and usage['prompt_tokens'] is not None:
-                last_assistant = max((index for index, message in enumerate(current_messages)
-                                      if message['role'] == 'assistant'), default=len(current_messages))
-                appended = counter.count(json.dumps(current_messages[last_assistant:], ensure_ascii=False))
-                observed = settings.context_window_tokens - settings.output_reserve_tokens - usage['prompt_tokens'] - (usage['completion_tokens'] or 0) - appended - 768
-                document_budget = max(0, min(document_budget, observed))
-            elif any(isinstance(message.get('content'), list) and any(part.get('type') == 'file' for part in message['content'])
-                     for message in current_messages):
-                # 文件身份不能代表图片实际 Token；缺少真实用量时不能假定剩余空间。
-                document_budget = 0
-
-        def execute(current: MemoryCheckpoint, name: str, arguments: dict[str, Any], current_settings: StoredSettings) -> dict[str, Any]:
-            """把模型请求交给业务执行器，预算仅应用于原文读取，不裁剪检索切片。"""
-            return self.execute(current, name, arguments, current_settings, source_attachment_ids, document_budget, counter)
-
-        def tool_images(results: list[dict[str, Any]]) -> list[ModelMessage]:
-            """按切片来源加载附件或会话绑定知识库原图，共享单批五张和去重限制。"""
-            messages: list[ModelMessage] = []
-            selected: list[UUID] = []
-            knowledge_results = [
-                result for result in results
-                if any(isinstance(item, dict) and 'knowledge_base_id' in item
-                       for item in result.get('results', []) if isinstance(result.get('results'), list))
-            ]
-            attachment_results = [
-                result for result in results if not any(result is knowledge for knowledge in knowledge_results)
-            ]
-            try:
-                if self.attachments is not None:
-                    message, selected = self.attachments.document_image_message(
-                        conversation_id, account_id, attachment_results, injected_images,
-                    )
-                    if message is not None:
-                        messages.append(message)
-                if self.knowledge is not None and len(selected) < 5:
-                    message, knowledge_selected = self.knowledge.image_message(
-                        conversation_id, account_id, knowledge_results,
-                        injected_images | set(selected), limit=5 - len(selected),
-                    )
-                    selected.extend(knowledge_selected)
-                    if message is not None:
-                        messages.append(message)
-                checkpoint.guard()
-            except (ValueError, LookupError, OSError, ModelFailure, httpx.HTTPError):
-                messages.append({
-                    'role': 'user',
-                    'content': '部分文档原图本次未能加载，请仅根据工具返回的文字描述回答，并明确无法核对原图。',
-                })
-            injected_images.update(selected)
-            return messages
-        checkpoint = MemoryCheckpoint(self.memory, message_id, conversation_id, operation)
-        with self.memory.database.connect() as connection:
-            previous = connection.execute('SELECT status,result FROM memory_tool_runs WHERE message_id=%s', (message_id,)).fetchone()
-        if previous and previous['status'] == 'complete':
-            saved = previous['result']
-            answer = saved.get('answer')
-            restored: list[dict[str, Any]] = [dict(message) for message in messages]
-            if answer:
-                restored.append({'role': 'assistant', 'content': answer})
-            return ToolOutcome(answer, bool(saved.get('used_tools')), restored)
-        if self.memory.source_suppressed(message_id):
-            return ToolOutcome(None, False)
-        with self.memory.database.connect() as connection:
-            self.memory.guard_source(connection, conversation_id, message_id, operation)
-            connection.execute("INSERT INTO memory_tool_runs(message_id,operation_id,status) VALUES(%s,%s,'pending') ON CONFLICT(message_id) DO UPDATE SET operation_id=EXCLUDED.operation_id", (message_id, operation.operation_id))
-        # 独立工具图也只声明当前会话真实可用的检索能力；图片附件不属于可读取文档。
-        knowledge_enabled = self.knowledge is not None and bool(self.knowledge.service.selected(conversation_id, account_id))
-        documents_enabled = self.attachments is not None and bool(source_attachment_ids)
-        result = self.graph.run(
-            messages=cast(list[dict[str, Any]], messages),
-            settings=settings,
-            calls=self.memory.calls.bind(operation),
-            checkpoint=checkpoint,
-            tools=agent_tools(knowledge_enabled, documents_enabled),
-            assistant_message_id=assistant_message_id,
-            on_content=on_content,
-            execute_tool=execute,
-            on_tool_context=update_document_budget,
-            on_tool_results=tool_images,
-        )
-        outcome = ToolOutcome(result['answer'], bool(result['used_tools']), result['messages'])
-        with self.memory.database.connect() as connection:
-            self.memory.guard_source(connection, conversation_id, message_id, operation)
-            connection.execute(
-                "UPDATE memory_tool_runs SET status='complete',result=%s WHERE message_id=%s",
-                (Jsonb({'answer': outcome.answer, 'used_tools': outcome.used_tools}), message_id),
-            )
-            connection.execute('DELETE FROM memory_native_steps WHERE message_id=%s AND step_key LIKE %s', (message_id, 'tools:%'))
-        return outcome

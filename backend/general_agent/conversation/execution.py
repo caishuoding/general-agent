@@ -32,7 +32,6 @@ class AnswerPreparation:
     """统一回答材料和本地可复用结果，传输入口只负责发送与持久化各自的答案。"""
     messages: list[ModelMessage]
     material: AttachmentContext
-    reserved: UUID | None
 
 
 class ChatExecution:
@@ -61,16 +60,9 @@ class ChatExecution:
         search = self.search.settings.read()
         return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
 
-    def reserve_first(self, content: str, settings: StoredSettings, operation: OperationContext, user_id: UUID | None = None) -> UUID | None:
-        """不做前置预留；Agent 工具与最终回答分别在真实调用点创建调用记录，始终返回空。"""
-        return None
-
-    def prepare_answer(self, user_id: UUID, content: str, operation: OperationContext, reserved: UUID | None) -> list[ModelMessage]:
-        """提供正式相关记忆及原生自动处理结果，回答只能根据实际状态声称已记住。"""
-        with self.memory.database.connect() as connection:
-            row=connection.execute('SELECT unit,status FROM model_calls WHERE id=%s',(reserved,)).fetchone() if reserved else None
-        material=self.recall.prepare(user_id,content,operation,reserved,skip=bool(row and row['unit']=='chat_tokens'))
-        return material
+    def prepare_answer(self, user_id: UUID, content: str, operation: OperationContext) -> list[ModelMessage]:
+        """提供正式相关记忆，回答只能根据实际状态声称已记住。"""
+        return self.recall.prepare(user_id, content, operation)
 
     def prepare_response(
         self,
@@ -80,14 +72,12 @@ class ChatExecution:
         message_id: UUID,
         settings: StoredSettings,
         operation: OperationContext,
-        reserved: UUID | None,
         rows: list[dict[str, Any]],
     ) -> AnswerPreparation:
         """刷新记忆与附件并合入工作消息，仅对新增用户原文展开技能描述。"""
         content = str(rows[-1]['content'])
-        chat_reserved = self.chat_reservation(content, reserved)
         material = self.search.attachments.prepare(conversation_id, account_id)
-        memory_material = self.prepare_answer(user_id, content, operation, reserved)
+        memory_material = self.prepare_answer(user_id, content, operation)
         system_prompt: ModelMessage = {
             'role': 'system',
             'content': base_system_prompt(),
@@ -101,15 +91,7 @@ class ChatExecution:
                 conversation.append(cast(ModelMessage, {'role': str(row['role']), 'content': user_skill_content(str(row['content']), row.get('skill_selections') or [])
                     if row['role'] == 'user' else str(row['content']), **({'_message_id': str(row['id'])} if row.get('id') else {}),
                     **({'_current_request': True} if index == len(rows) - 1 else {})}))
-        return AnswerPreparation(conversation, material, chat_reserved)
-
-    def chat_reservation(self, content: str, reserved: UUID | None) -> UUID | None:
-        """仅复用尚未启动的聊天预留；保存或召回已经用过的请求不得再次启动。"""
-        if reserved is None:
-            return None
-        with self.memory.database.connect() as connection:
-            row=connection.execute('SELECT unit,status FROM model_calls WHERE id=%s',(reserved,)).fetchone()
-        return reserved if row and row['unit']=='chat_tokens' and row['status']=='reserved' else None
+        return AnswerPreparation(conversation, material)
 
     def prepare(
         self,
@@ -118,8 +100,7 @@ class ChatExecution:
         user_id: UUID,
         content: str,
         operation: OperationContext,
-        reserved: UUID | None,
-        settings: StoredSettings | None = None,
+        settings: StoredSettings,
         *,
         messages: list[ModelMessage],
         assistant_message_id: UUID,
@@ -130,8 +111,6 @@ class ChatExecution:
         runtime_state: dict[str, Any] | None = None,
     ) -> ToolOutcome:
         """把 State 材料和草稿轮次回调交给主从模块，返回主回答及可信证据快照。"""
-        if settings is None:
-            return ToolOutcome(None, False)
         return self.agent_runtime.run(conversation_id, account_id, user_id, assistant_message_id,
             settings, operation, messages, on_content, source_attachment_ids, on_progress, on_round_start, runtime_state)
 

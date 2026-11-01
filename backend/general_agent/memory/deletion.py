@@ -74,11 +74,9 @@ class MemoryDeletion:
         operations.update(row['operation_id'] for row in searches)
         observed = connection.execute('SELECT message_id FROM memory_tool_observations WHERE action_id=%s',(action_id,)).fetchall()
         observed_sources = sources | {row['message_id'] for row in observed}
-        operations.update(row['operation_id'] for row in connection.execute('SELECT operation_id FROM memory_tool_runs WHERE message_id=ANY(%s)',(list(observed_sources),)).fetchall())
         operations.update(row['operation_id'] for row in connection.execute('SELECT operation_id FROM memory_native_runs WHERE message_id=ANY(%s)',(list(observed_sources),)).fetchall())
         connection.execute('DELETE FROM memory_native_steps WHERE message_id=ANY(%s)',(list(observed_sources),))
         connection.execute("UPDATE memory_native_runs SET status='skipped',detail='该来源已停止后续处理。' WHERE message_id=ANY(%s)",(list(sources),))
-        connection.execute("UPDATE memory_tool_runs SET result='{}' WHERE message_id=ANY(%s)",(list(observed_sources),))
         operations.discard(active_operation)
         connection.execute("UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,result=NULL,response_status=NULL WHERE id=ANY(%s)",(list(operations),))
         connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE operation_id=ANY(%s) AND status='reserved'",(list(operations),))

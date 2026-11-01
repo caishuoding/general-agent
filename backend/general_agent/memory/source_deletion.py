@@ -84,7 +84,6 @@ class SourceDeletion:
         row=connection.execute('SELECT * FROM source_deletions WHERE id=%s',(identifier,)).fetchone()
         message_ids=row['message_ids']
         connection.execute('DELETE FROM memory_native_steps WHERE message_id=ANY(%s)',(message_ids,))
-        connection.execute("UPDATE memory_tool_runs SET result='{}' WHERE message_id=ANY(%s)",(message_ids,))
         operations={item['operation_id'] for item in connection.execute('SELECT operation_id FROM messages WHERE (id=ANY(%s) OR reply_to=ANY(%s)) AND operation_id IS NOT NULL',(message_ids,message_ids)).fetchall()}
         if row['kind'] == 'attachment':
             operations.update(item['operation_id'] for item in connection.execute("SELECT operation_id FROM messages WHERE conversation_id=%s AND status='generating' AND operation_id IS NOT NULL",(row['conversation_id'],)).fetchall())

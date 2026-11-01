@@ -60,7 +60,6 @@ def test_complete_graph_streams_final_answer_after_tool_execution() -> None:
     execution.prepare_response.return_value = AnswerPreparation(
         messages=[{"role": "user", "content": "你好"}],
         material=AttachmentContext(),
-        reserved=None,
     )
     context = run_context()
 
@@ -86,7 +85,6 @@ def test_complete_graph_prepares_generates_and_finalizes_answer() -> None:
     execution.prepare_response.return_value = AnswerPreparation(
         messages=[{"role": "user", "content": "你好"}],
         material=AttachmentContext(),
-        reserved=None,
     )
     context = run_context()
 
@@ -118,16 +116,16 @@ def test_context_failure_is_finalized_without_calling_model() -> None:
 def initial_state() -> ConversationState:
     """提供节点追踪测试的实际图输入，身份及私密配置只由 context 注入。"""
     return {'messages': [{'role': 'user', 'content': '你好'}], 'source_attachment_ids': [],
-            'reserved_call_id': None, 'answer': '', 'failure': None, 'used_tools': False,
+            'answer': '', 'failure': None, 'used_tools': False,
             'knowledge_source_candidates': [], 'web_sources': [], 'knowledge_sources': []}
 
 
 def test_nodes_share_preparation_tools_and_final_answer_through_state() -> None:
     """实际节点更新包含准备材料、工具消息和核验后回答，且不重复历史或暴露配置。"""
     graph, database, execution = graph_dependencies()
-    source, reserved = uuid4(), uuid4()
+    source = uuid4()
     prepared: list[ModelMessage] = [{'role': 'system', 'content': '系统提示'}, {'role': 'user', 'content': '你好'}]
-    execution.prepare_response.return_value = AnswerPreparation(messages=prepared, material=AttachmentContext(), reserved=reserved)
+    execution.prepare_response.return_value = AnswerPreparation(messages=prepared, material=AttachmentContext())
     execution.material_attachment_ids.return_value = [source]
     tool_messages: list[dict[str, Any]] = [*[dict(message) for message in prepared],
         {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'call-1'}]},
@@ -147,8 +145,6 @@ def test_nodes_share_preparation_tools_and_final_answer_through_state() -> None:
     preparation, agent, final = [next(iter(update.values())) for update in updates]
     assert preparation['messages'] == prepared
     assert preparation['source_attachment_ids'] == [str(source)]
-    assert preparation['reserved_call_id'] == reserved
-    assert execution.prepare.call_args.args[5] == reserved
     assert execution.prepare.call_args.kwargs['messages'] == prepared
     assert execution.prepare.call_args.kwargs['source_attachment_ids'] == [source]
     assert agent['messages'] == tool_messages and agent['used_tools'] is True
@@ -176,7 +172,7 @@ def test_graph_trace_exposes_state_updates_without_runtime_credentials() -> None
     """通过真实本地追踪 SDK 核对节点材料和回答可见，运行配置密钥不进入输入输出。"""
     graph, database, execution = graph_dependencies()
     prepared: list[ModelMessage] = [{'role': 'system', 'content': '系统提示'}, {'role': 'user', 'content': '你好'}]
-    execution.prepare_response.return_value = AnswerPreparation(messages=prepared, material=AttachmentContext(), reserved=None)
+    execution.prepare_response.return_value = AnswerPreparation(messages=prepared, material=AttachmentContext())
     execution.prepare.return_value = ToolOutcome('实际回答', False)
     context = run_context()
     client = Client(api_url='http://localhost:1', api_key='local-test', info={}, auto_batch_tracing=False)
@@ -202,7 +198,7 @@ def test_streaming_failure_returns_partial_answer_in_state() -> None:
     """模型中断后将部分正文通过 State 传给收尾，并保存失败而非丢弃文字。"""
     graph, database, execution = graph_dependencies()
     execution.prepare_response.return_value = AnswerPreparation(
-        messages=[{'role': 'user', 'content': '你好'}], material=AttachmentContext(), reserved=None)
+        messages=[{'role': 'user', 'content': '你好'}], material=AttachmentContext())
 
     def fail_after_content(*args: object, **kwargs: object) -> ToolOutcome:
         """模拟一次已有文字分片的真实模型错误。"""
@@ -226,7 +222,7 @@ def test_graph_boundary_failure_uses_last_state() -> None:
     """收尾节点意外失败时，边界处理从最新框架 State 保留已生成回答。"""
     graph, database, execution = graph_dependencies()
     execution.prepare_response.return_value = AnswerPreparation(
-        messages=[{'role': 'user', 'content': '你好'}], material=AttachmentContext(), reserved=None)
+        messages=[{'role': 'user', 'content': '你好'}], material=AttachmentContext())
     execution.prepare.return_value = ToolOutcome('已经完成的模型回答', False)
     execution.search.resolve.side_effect = RuntimeError('收尾边界失败')
     context = replace(run_context(), delivery='stream')

@@ -15,7 +15,6 @@ class AgentState(TypedDict):
     document_calls: dict[str, int]
     used_tools: bool
     answer: str | None
-    handled: bool
     inbox_deliveries: list[str]
     settled: bool
     watching_inbox: bool

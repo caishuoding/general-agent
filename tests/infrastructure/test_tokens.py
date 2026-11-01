@@ -36,6 +36,10 @@ def test_available_budget_includes_tools_and_existing_results() -> None:
     occupied = counter.available(settings, [{'role': 'tool', 'content': '原文' * 200}], [{'description': '工具参数'}])
     assert 0 < occupied < empty < 4096 - 1000
     assert counter.available(settings, [{'role': 'tool', 'content': '正文' * 2000}], []) == 0
+    assert counter.input_limit(settings) == 4096 - 1000 - 512
+    internal = [{'role': 'user', 'content': '摘要', '_context_summary': True}]
+    clean = [{'role': 'user', 'content': '摘要'}]
+    assert counter.request_tokens(internal, []) == counter.request_tokens(clean, [])
 
 
 def test_registry_routes_by_endpoint_and_model_without_changing_interface(tmp_path: Path) -> None:

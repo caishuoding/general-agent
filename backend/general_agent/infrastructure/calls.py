@@ -30,11 +30,11 @@ class BoundCalls:
         self.gateway, self.context = gateway, context
 
     @contextmanager
-    def call(self, settings: StoredSettings, unit: Unit, reserved: UUID | None = None, assistant_message_id: UUID | None = None,
+    def call(self, settings: StoredSettings, unit: Unit, assistant_message_id: UUID | None = None,
              web_kind: WebKind | None = None) -> Iterator[UUID]:
-        """输入配置、计量单位及可选联网类别，记录外发用量；拒绝时清理预留并产出调用标识。"""
+        """输入配置、计量单位及可选联网类别，记录外发用量；拒绝时清理未开始记录并产出调用标识。"""
         operations = self.gateway.operations
-        call_id = reserved or operations.reserve(self.context, settings, unit)
+        call_id = operations.reserve(self.context, settings, unit)
         try:
             operations.begin(self.context, call_id, settings, assistant_message_id, web_kind=web_kind)
         except ValueError:
@@ -51,9 +51,9 @@ class BoundCalls:
         else:
             operations.record(call_id, TokenUsage(), "complete")
 
-    def complete(self, settings: StoredSettings, messages: list[ModelMessage], reserved: UUID | None = None, assistant_message_id: UUID | None = None) -> Completion:
-        """复用可选预留并关联回答尝试，记录同步文字、视觉或分段请求的实际用量。"""
-        with self.call(settings, "chat_tokens", reserved, assistant_message_id) as call_id:
+    def complete(self, settings: StoredSettings, messages: list[ModelMessage], assistant_message_id: UUID | None = None) -> Completion:
+        """关联回答尝试，记录同步文字、视觉或分段请求的实际用量。"""
+        with self.call(settings, "chat_tokens", assistant_message_id=assistant_message_id) as call_id:
             result = self.gateway.provider.complete(settings, messages)
             self.gateway.operations.record(call_id, result.usage)
             return result
@@ -65,9 +65,9 @@ class BoundCalls:
             self.gateway.operations.record(call_id, result.usage)
             return result
 
-    def embed(self, settings: StoredEmbeddingSettings, texts: list[str], reserved: UUID | None = None) -> Embedding:
-        """复用可选首步预留，按实际批量嵌入记录输入用量，不要求不存在的输出用量。"""
-        with self.call(settings, "embedding_tokens", reserved) as call_id:
+    def embed(self, settings: StoredEmbeddingSettings, texts: list[str]) -> Embedding:
+        """按实际批量嵌入记录输入用量，不要求不存在的输出用量。"""
+        with self.call(settings, "embedding_tokens") as call_id:
             result = self.gateway.provider.embed(settings, texts)
             self.gateway.operations.record(call_id, result.usage)
             return result
@@ -76,12 +76,11 @@ class BoundCalls:
         self,
         settings: StoredSettings,
         messages: list[ModelMessage],
-        reserved: UUID | None = None,
         assistant_message_id: UUID | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> Iterator[StreamChunk]:
         """消费统一的文字、推理与工具调用流，先记录用量尾帧再交给调用方。"""
-        with self.call(settings, "chat_tokens", reserved, assistant_message_id) as call_id:
+        with self.call(settings, "chat_tokens", assistant_message_id=assistant_message_id) as call_id:
             for chunk in self.gateway.provider.stream(settings, messages, tools):
                 if chunk.usage is not None:
                     self.gateway.operations.record(call_id, chunk.usage)

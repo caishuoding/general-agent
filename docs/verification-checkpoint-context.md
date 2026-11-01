@@ -48,3 +48,14 @@
 PPT Master 隔离镜像及出口代理重新构建并启动。启用 TEST_SKILL_DOCKER 后，原生 PPTX 导出、用户下载及预览标注闭环测试 1 passed（15.73s），测试使用隔离数据库。
 
 正式服务的数据源确认与重启阻断已解除。首次从 /admin 使用初始管理员登录并强制改密，然后创建普通账号。
+
+
+## 关联代码二次审计（2026-11-01）
+
+删除旧 `ChatExecution` 首次聊天预留链、`reserved_call_id`、`AnswerPreparation.reserved`、聊天服务未使用的模型依赖、`AgentToolGraph.context_messages`、`AgentState.handled`，以及无调用方的 `MemoryTools.prepare` 独立工具图。对应 `memory_tool_runs` 由迁移 063 删除。
+
+断线续写在新增 assistant 前缀和 continuation 消息后重新进入压缩；压缩和真实模型请求只使用当前仍可调用的工具定义。文档调用、Skill 轮数、模型调用、执行时长、命令并发和命令时限集中到 `AgentLimits`；LangGraph 为 Skill 能力的后续轮数预留递归空间。
+
+Skill `stage`/`route` 失去生产写入方，已通过迁移 064 删除；前端改为按真实状态显示“等待下一步”等文案。回答成功收尾、失败和用户停止分别把活动任务原子转为 waiting、interrupted；新请求替代旧中断回答时也不会继续显示“制作中”。旧库迁移测试在独立管理员表出现前直接构造旧普通用户，修复了其自身的前置条件错误。
+
+本次清理后的最终集中回归 53 passed；`mypy backend tests` 检查 182 个文件通过；前端生产构建通过；真实 Docker PPT 导出/下载/预览 1 passed。追加失败任务终态测试后，目标 Skill/PG 相关回归继续通过。

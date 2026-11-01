@@ -8,7 +8,6 @@ from general_agent.agent.conversation import ConversationContext, ConversationGr
 from general_agent.infrastructure.database import Database
 from general_agent.infrastructure.checkpoints import supersede_interrupted
 from general_agent.infrastructure.operations import OperationContext
-from general_agent.infrastructure.calls import CallGateway
 from general_agent.conversation.execution import ChatExecution
 from general_agent.infrastructure.provider import ModelFailure
 from general_agent.infrastructure.settings import StoredSettings
@@ -18,9 +17,9 @@ from general_agent.skills.selection import SkillSnapshot
 class ChatService:
     """同步调用与流式入口共享明确保存规则和原用户来源。"""
 
-    def __init__(self, database: Database, model: CallGateway, execution: ChatExecution, attachments: AttachmentService, graph: ConversationGraph) -> None:
+    def __init__(self, database: Database, execution: ChatExecution, attachments: AttachmentService, graph: ConversationGraph) -> None:
         """绑定持久化与统一调用，材料编排复用共同执行器。"""
-        self.database, self.model, self.execution = database, model, execution
+        self.database, self.execution = database, execution
         self.attachments = attachments
         self.graph = graph
 
@@ -34,7 +33,6 @@ class ChatService:
             if connection.execute("SELECT id FROM messages WHERE conversation_id=%s AND status='generating'", (conversation_id,)).fetchone():
                 raise ValueError('本会话正在生成回答，请先停止或等待完成。')
             supersede_interrupted(connection, conversation_id)
-            reserved = self.execution.reserve_first(content, settings, operation)
             connection.execute("INSERT INTO messages(id,conversation_id,role,content,status,skill_selections) VALUES(%s,%s,'user',%s,'complete',%s)", (user_id,conversation_id,content,Jsonb(skill_selections or [])))
             self.attachments.bind_to_user_message(connection, conversation_id, user_id)
             connection.execute("INSERT INTO messages(id,conversation_id,role,content,status,reply_to,operation_id,resume_model_revision) VALUES(%s,%s,'assistant','','generating',%s,%s,%s)", (answer_id,conversation_id,user_id,operation.operation_id,settings.revision))
@@ -48,6 +46,6 @@ class ChatService:
             settings=settings,
             operation=operation,
             delivery="sync",
-        ), rows, reserved)
+        ), rows)
         if result["failure"]:
             raise ModelFailure(result["failure"])
