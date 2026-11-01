@@ -10,6 +10,7 @@ from uuid import UUID
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
+from general_agent.agent.message_protocol import protocol_messages
 from general_agent.agent.state import AgentState
 from general_agent.agent.tools import ORCHESTRATION
 from general_agent.infrastructure.agent_limits import LIMITS
@@ -23,7 +24,7 @@ from general_agent.search.failures import WebRequestFailure
 
 ToolExecutor = Callable[[MemoryCheckpoint, str, dict[str, Any], StoredSettings], dict[str, Any]]
 ToolResultImages = Callable[[list[dict[str, Any]]], list[ModelMessage]]
-InboxReceiver = Callable[[list[dict[str, Any]], str, bool], dict[str, Any]]
+InboxReceiver = Callable[[list[dict[str, Any]], str, bool, list[dict[str, Any]]], dict[str, Any]]
 AnswerSettler = Callable[[list[dict[str, Any]], str], bool]
 LOGGER = logging.getLogger(__name__)
 DOCUMENT_TOOLS = {'search_documents', 'read_document', 'search_knowledge'}
@@ -38,6 +39,22 @@ STREAM_CONTINUATION_PROMPT = (
 def visible_stream_content(parts: list[str]) -> str:
     """移除仅供前端渲染的恢复标记，得到可重新发送给模型的已出现正文。"""
     return ''.join(parts).replace(STREAM_RESUMED_MARKER, '')
+
+def tool_is_available(name: str, failures: dict[str, int], document_calls: dict[str, int],
+                      maximum_tool_retries: int) -> bool:
+    """按当前回答的失败和文档调用次数判断工具是否仍可调用。"""
+    if name in DOCUMENT_TOOLS:
+        return document_calls.get(name, 0) < LIMITS.document_calls
+    return failures.get(name, 0) <= maximum_tool_retries
+
+
+def available_tool_definitions(tools: list[dict[str, Any]], failures: dict[str, int],
+                               document_calls: dict[str, int], maximum_tool_retries: int) -> list[dict[str, Any]]:
+    """返回当前仍可调用的工具定义，供模型协议和各类预算共同使用。"""
+    return [tool for tool in tools if tool_is_available(
+        tool['function']['name'], failures, document_calls, maximum_tool_retries)]
+
+
 
 
 class AgentToolGraph:
@@ -96,14 +113,8 @@ class AgentToolGraph:
             """完整工具回复之后自动领取当前回答的结果，等待逻辑不占模型轮次。"""
             if receive_inbox is None:
                 return {}
-            result = receive_inbox(state['messages'], f'automatic:{state["round_index"]}', False)
+            result = receive_inbox(state['messages'], f'automatic:{state["round_index"]}', False, active_tools(state))
             return inbox_update(state, result)
-
-        def outbound(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            """移除仅用于压缩和恢复的内部标记，避免进入外部模型协议。"""
-            return [{key: value for key, value in item.items()
-                     if not key.startswith('_') and not (key == 'tool_calls' and not value)}
-                    for item in messages]
 
         def model_input(current: list[dict[str, Any]], clean: bool = True) -> list[dict[str, Any]]:
             """统一组装系统提示与动态指令，可保留内部标记交给压缩器。"""
@@ -113,14 +124,12 @@ class AgentToolGraph:
                 fragments.extend(instruction_context())
             prompt = '\n\n'.join([*system_parts, *fragments]) if system_parts or fragments else base_system_prompt()
             messages = [{'role': 'system', 'content': prompt}, *(message for message in current if message.get('role') != 'system')]
-            return outbound(messages) if clean else messages
+            return protocol_messages(messages) if clean else messages
 
         def active_tools(state: AgentState) -> list[dict[str, Any]]:
-            """只返回仍可调用的工具，使模型协议和上下文预算使用同一集合。"""
-            return [tool for tool in tools
-                    if (state['document_calls'].get(tool['function']['name'], 0) < LIMITS.document_calls
-                        if tool['function']['name'] in DOCUMENT_TOOLS else
-                        state['tool_failures'].get(tool['function']['name'], 0) <= self.maximum_tool_retries)]
+            """返回当前回答仍可调用的工具，供模型、压缩和执行预算共同使用。"""
+            return available_tool_definitions(
+                tools, state['tool_failures'], state['document_calls'], self.maximum_tool_retries)
 
         def prepare_model(state: AgentState) -> dict[str, Any]:
             """模型请求前压缩旧交互，节点返回后先持久化再执行实际模型调用。"""
@@ -158,7 +167,7 @@ class AgentToolGraph:
                             ]
                             if prepare_context is not None:
                                 retry_messages = prepare_context(retry_messages, available_tools)
-                            attempt_messages = outbound(retry_messages)
+                            attempt_messages = protocol_messages(retry_messages)
                     if before_model is not None:
                         before_model(attempt_messages, available_tools)
                     attempt_calls: dict[int, dict[str, Any]] = {}
@@ -261,7 +270,7 @@ class AgentToolGraph:
                 if name in DOCUMENT_TOOLS:
                     if name not in known_tools:
                         result = {'error': '未知工具，不允许执行。'}
-                    elif document_calls.get(name, 0) >= LIMITS.document_calls:
+                    elif not tool_is_available(name, failures, document_calls, self.maximum_tool_retries):
                         result = {'error': f'该工具在本次回答中最多调用 {LIMITS.document_calls} 次，已达到调用上限。',
                                   'call_limit': LIMITS.document_calls, 'call_exhausted': True}
                     else:
@@ -270,7 +279,10 @@ class AgentToolGraph:
                             if not isinstance(arguments, dict):
                                 raise ValueError('工具参数必须是有效的 JSON 对象。')
                             if name == 'read_document' and on_tool_context is not None:
-                                on_tool_context([*state['messages'], *tool_messages], tools)
+                                on_tool_context(
+                                    [*state['messages'], *tool_messages],
+                                    available_tool_definitions(tools, failures, document_calls, self.maximum_tool_retries),
+                                )
                             result = execute_tool(checkpoint, name, arguments, settings)
                         except (ValueError, LookupError, ModelFailure) as error:
                             result = {'error': str(error)}
@@ -289,7 +301,8 @@ class AgentToolGraph:
                         from general_agent.agent.tools import WaitInput
                         WaitInput.model_validate(arguments)
                         result = receive_inbox([*state['messages'], *tool_messages],
-                                               f'wait:{state["round_index"] - 1}:{call["id"]}', True)
+                                               f'wait:{state["round_index"] - 1}:{call["id"]}', True,
+                                               available_tool_definitions(tools, failures, document_calls, self.maximum_tool_retries))
                     tool_messages.append({'role': 'tool', 'tool_call_id': call['id'],
                                           'content': json.dumps(result, ensure_ascii=False)})
                     executed_results.append(result)
@@ -306,7 +319,7 @@ class AgentToolGraph:
                     cached = checkpoint.get(tool_key)
                     if cached is not None and "error" not in cached and cached.get("status") != "failed":
                         result = cached
-                exhausted = failures.get(name, 0) > self.maximum_tool_retries
+                exhausted = not tool_is_available(name, failures, document_calls, self.maximum_tool_retries)
                 blocked = (checkpoint.get(provider_key) or checkpoint.get(web_key)) if web_tool else None
                 if blocked is not None:
                     result = {**blocked, 'cached_failure': True}
@@ -386,7 +399,7 @@ class AgentToolGraph:
             if settle_answer is None or settle_answer(state['messages'], answer):
                 return {'settled': True}
             assert receive_inbox is not None
-            result = receive_inbox(state['messages'], f'settle:{state["round_index"]}', True)
+            result = receive_inbox(state['messages'], f'settle:{state["round_index"]}', True, active_tools(state))
             return {**inbox_update(state, result), 'settled': False}
 
         def route_settle(state: AgentState) -> Literal['finish', 'collect_inbox']:

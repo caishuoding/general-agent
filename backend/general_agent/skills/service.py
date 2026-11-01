@@ -183,6 +183,31 @@ class SkillService:
             raise LookupError('生成文件已丢失或变化。')
         return path, row
 
+    def runtime_state_for_answer(self, connection: Any, answer_id: UUID) -> dict[str, Any]:
+        """读取主执行保存的 Skill 运行快照，供恢复和终态迁移共同使用。"""
+        saved = connection.execute(
+            "SELECT s.payload FROM agent_messages s JOIN agent_runs r ON r.id=s.run_id "
+            "JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s AND "
+            "a.parent_agent_id IS NULL AND s.step_key='runtime:skill'",
+            (answer_id,),
+        ).fetchone()
+        payload = saved.get('payload') if isinstance(saved, dict) else None
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def settle_answer(self, connection: Any, answer_id: UUID, account: UUID,
+                      conversation: UUID, status: str, runtime_state: dict[str, Any]) -> None:
+        """按优先使用当前 State 的规则把活动任务同步为回答终态。"""
+        task_id = runtime_state.get('task_id') if isinstance(runtime_state, dict) else None
+        if not task_id:
+            task_id = self.runtime_state_for_answer(connection, answer_id).get('task_id')
+        if not isinstance(task_id, str):
+            return
+        connection.execute(
+            "UPDATE skill_tasks SET status=%s,updated_at=CURRENT_TIMESTAMP "
+            "WHERE id=%s AND account_id=%s AND conversation_id=%s AND status='active'",
+            (status, UUID(task_id), account, conversation),
+        )
+
     def summaries(self, account: UUID, conversation: UUID) -> str:
         """仅序列化任务摘要，不在普通聊天恢复过去的制作工作流。"""
         return json.dumps(self.list(account, conversation), ensure_ascii=False, default=str)

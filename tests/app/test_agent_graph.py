@@ -382,3 +382,72 @@ def test_exhausted_tools_do_not_consume_context_compaction_budget() -> None:
     assert [tool['function']['name'] for tool in definitions_seen[1]] == ['fetch_web']
     assert [tool['function']['name'] for tool in calls.stream.call_args_list[1].kwargs['tools']] == ['fetch_web']
     assert result['answer'] == '无法搜索'
+
+
+def test_document_budget_excludes_tools_disabled_earlier_in_same_batch() -> None:
+    """同批搜索失败后，文档读取预算只计算仍可调用的文档工具。"""
+    calls = MagicMock()
+    calls.stream.side_effect = [
+        [
+            StreamChunk(tool_call=ToolCallDelta(index=0, id='search', name='search_web', arguments='{"query":"x"}')),
+            StreamChunk(tool_call=ToolCallDelta(index=1, id='read', name='read_document', arguments='{"document_id":"doc"}')),
+        ],
+        [StreamChunk(content='已完成')],
+    ]
+    definitions_seen: list[list[dict[str, Any]]] = []
+
+    def context_budget(_messages: list[dict[str, Any]], active: list[dict[str, Any]]) -> None:
+        """记录文档读取前可用于预算的当前工具集合。"""
+        definitions_seen.append(active)
+
+    def execute(_checkpoint: MemoryCheckpoint, name: str, _arguments: dict[str, Any], _settings: StoredSettings) -> dict[str, Any]:
+        """让搜索失败并让文档读取成功。"""
+        if name == 'search_web':
+            raise ValueError('搜索失败')
+        return {'content': [{'chunk_id': 1, 'content': '正文'}]}
+
+    AgentToolGraph(maximum_tool_retries=0).run(
+        messages=[{'role': 'user', 'content': '读取文档'}], settings=settings(), calls=calls,
+        checkpoint=cast(MemoryCheckpoint, checkpoint()),
+        tools=[{'type': 'function', 'function': {'name': 'search_web'}},
+               {'type': 'function', 'function': {'name': 'read_document'}}],
+        execute_tool=execute, on_tool_context=context_budget,
+    )
+
+    assert definitions_seen
+    assert [tool['function']['name'] for tool in definitions_seen[0]] == ['read_document']
+
+
+def test_subagent_delivery_budget_excludes_disabled_tools() -> None:
+    """工具失败后等待子任务时，交付预算只统计当前仍可用的编排工具。"""
+    calls = MagicMock()
+    calls.stream.side_effect = [
+        tool_chunks(['search_web'], 'failed'),
+        [StreamChunk(tool_call=ToolCallDelta(index=0, id='wait', name='wait_agents', arguments='{}'))],
+        [StreamChunk(content='已完成')],
+    ]
+    definitions_seen: list[list[dict[str, Any]]] = []
+
+    def receive(_messages: list[dict[str, Any]], _key: str, _wait: bool,
+                definitions: list[dict[str, Any]]) -> dict[str, Any]:
+        """记录交付校验收到的当前工具集合。"""
+        definitions_seen.append(definitions)
+        return {'status': 'idle', 'agents': [], 'active_count': 0}
+
+    def execute(_checkpoint: MemoryCheckpoint, name: str, _arguments: dict[str, Any], _settings: StoredSettings) -> dict[str, Any]:
+        """让搜索失败，等待工具由信箱回调处理。"""
+        if name == 'search_web':
+            raise ValueError('搜索失败')
+        return {'status': 'idle'}
+
+    AgentToolGraph(maximum_tool_retries=0).run(
+        messages=[{'role': 'user', 'content': '查询并等待'}], settings=settings(), calls=calls,
+        checkpoint=cast(MemoryCheckpoint, checkpoint()),
+        tools=[{'type': 'function', 'function': {'name': 'search_web'}},
+               {'type': 'function', 'function': {'name': 'wait_agents'}}],
+        execute_tool=execute, receive_inbox=receive,
+    )
+
+    assert definitions_seen
+    assert all([tool['function']['name'] for tool in definitions] == ['wait_agents']
+               for definitions in definitions_seen)

@@ -242,27 +242,12 @@ class ConversationGraph:
             LOGGER.exception('LangGraph 工具节点失败 conversation_id=%s message_id=%s', context.conversation_id, context.assistant_message_id)
             return self.failure_update(context, self.unexpected_failure(context.delivery), ''.join(chunks))
 
-    @staticmethod
-    def settle_skill_task(connection: Any, state: ConversationState,
+    def settle_skill_task(self, connection: Any, state: ConversationState,
                           context: ConversationContext, status: str) -> None:
-        """将当前活动 Skill 任务与回答终态同步，失败和停止标记为可续接中断。"""
-        task_id = state.get('runtime_state', {}).get('task_id')
-        if not task_id:
-            saved = connection.execute(
-                "SELECT s.payload FROM agent_messages s JOIN agent_runs r ON r.id=s.run_id "
-                "JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s AND "
-                "a.parent_agent_id IS NULL AND s.step_key='runtime:skill'",
-                (context.assistant_message_id,),
-            ).fetchone()
-            payload = saved.get('payload') if isinstance(saved, dict) else None
-            candidate = payload.get('task_id') if isinstance(payload, dict) else None
-            task_id = candidate if isinstance(candidate, str) else None
-        if not task_id:
-            return
-        connection.execute(
-            "UPDATE skill_tasks SET status=%s,updated_at=CURRENT_TIMESTAMP "
-            "WHERE id=%s AND account_id=%s AND conversation_id=%s AND status='active'",
-            (status, UUID(task_id), context.account_id, context.conversation_id),
+        """将会话终态交给 Skill 边界同步，找不到当前任务时保持幂等空操作。"""
+        self.execution.settle_skill_answer(
+            connection, context.assistant_message_id, context.account_id,
+            context.conversation_id, status, state.get('runtime_state', {}),
         )
 
     def finalize(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
@@ -274,13 +259,16 @@ class ConversationGraph:
         answer, web_sources = self.execution.search.resolve(context.operation, state['answer'])
         answer, knowledge_sources = self.execution.resolve_knowledge_citations(state['knowledge_source_candidates'], answer)
         with self.database.connect() as connection:
-            connection.execute(
+            completed = connection.execute(
                 "UPDATE messages SET content=%s,status=%s,error=%s,web_sources=%s,knowledge_sources=%s,progress=NULL "
-                "WHERE id=%s AND status='generating'",
+                "WHERE id=%s AND status='generating' RETURNING id",
                 (answer, 'failed' if failure else 'complete', failure, Jsonb(web_sources),
                  Jsonb(knowledge_sources), context.assistant_message_id),
-            )
+            ).fetchone()
             self.settle_skill_task(connection, state, context, 'interrupted' if failure else 'waiting')
+        if completed:
+            # Agent 已在正常路径关闭；仅剩 finalize 的恢复路径在这里幂等关闭主执行。
+            self.execution.close_agent_execution(context.assistant_message_id)
         LOGGER.info('event=node finalize message_id=%s status=%s characters=%s', context.assistant_message_id, 'failed' if failure else 'complete', len(answer))
         with self.database.connect() as connection:
             saved = connection.execute('SELECT position FROM messages WHERE id=%s', (context.assistant_message_id,)).fetchone()
@@ -312,11 +300,13 @@ class ConversationGraph:
         try:
             self.execution.search.fail(context.operation, detail)
             with self.database.connect() as connection:
-                connection.execute(
-                    "UPDATE messages SET content=%s,status='failed',error=%s WHERE id=%s AND status='generating'",
+                completed = connection.execute(
+                    "UPDATE messages SET content=%s,status='failed',error=%s WHERE id=%s AND status='generating' RETURNING id",
                     (answer, detail, context.assistant_message_id),
-                )
+                ).fetchone()
                 self.settle_skill_task(connection, state, context, 'interrupted')
+            if completed:
+                self.execution.close_agent_execution(context.assistant_message_id)
         except Exception:
             # 数据库暂时不可用时，由既有启动恢复流程处理未结束消息。
             LOGGER.exception('回答失败终态暂未保存 message_id=%s', context.assistant_message_id)

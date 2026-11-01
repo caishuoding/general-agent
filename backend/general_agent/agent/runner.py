@@ -13,6 +13,7 @@ from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.infrastructure.checkpoints import Checkpoints, ExecutionPaused
 from general_agent.agent.graph import AgentToolGraph
 from general_agent.agent.compaction import ContextCompactor
+from general_agent.agent.message_protocol import protocol_messages
 from general_agent.agent.orchestration import AgentOrchestrator
 from general_agent.agent.repository import AgentRepository, RunCheckpoint
 from general_agent.agent.tools import ORCHESTRATION, WORKER_TOOLS, orchestration_tools
@@ -100,10 +101,9 @@ class AgentRuntime:
             raise ValueError('资料范围已变化，请重新提问。')
         if root and root['deadline'] <= message['interrupted_at']:
             raise ValueError('原执行在中断前已超时，请重试。')
-        states = connection.execute("SELECT s.payload FROM agent_messages s JOIN agent_runs r ON r.id=s.run_id JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s AND a.parent_agent_id IS NULL AND s.step_key='runtime:skill'", (answer_id,)).fetchall()
-        for state in states:
-            if self.skills and state['payload'].get('task_id'):
-                self.skills.service.instructions(UUID(state['payload']['task_id']), account_id, conversation_id)
+        runtime_state = self.skills.service.runtime_state_for_answer(connection, answer_id) if self.skills else {}
+        if self.skills and runtime_state.get('task_id'):
+            self.skills.service.instructions(UUID(runtime_state['task_id']), account_id, conversation_id)
         operation = connection.execute('SELECT * FROM cloud_operations WHERE id=%s', (message['operation_id'],)).fetchone()
         if not operation or operation['cancelled'] or operation['invalidated']:
             raise ValueError('原操作已停止或来源已失效，请重新提问。')
@@ -173,12 +173,12 @@ class AgentRuntime:
         def budget(current: list[dict[str, Any]], definitions: list[dict[str, Any]]) -> None:
             """按本执行的实际消息核算读取预算，不借用其他子智能体用量。"""
             nonlocal document_budget
-            document_budget = max(0, counter.available(settings, current, definitions) - LIMITS.context_tool_reserve_tokens)
+            document_budget = max(0, counter.available(settings, protocol_messages(current), definitions) - LIMITS.context_tool_reserve_tokens)
             with self.repository.database.connect() as connection:
                 usage = connection.execute("SELECT prompt_tokens,completion_tokens FROM model_calls WHERE agent_run_id=%s AND unit='chat_tokens' ORDER BY created_at DESC,id DESC LIMIT 1", (run_id,)).fetchone()
             if usage is not None and usage['prompt_tokens'] is not None:
                 last_assistant = max((index for index, message in enumerate(current) if message['role'] == 'assistant'), default=len(current))
-                appended = counter.count(json.dumps(current[last_assistant:], ensure_ascii=False))
+                appended = counter.count(json.dumps(protocol_messages(current[last_assistant:]), ensure_ascii=False))
                 observed = counter.input_limit(settings) - usage['prompt_tokens'] - (usage['completion_tokens'] or 0) - appended - LIMITS.context_tool_reserve_tokens
                 document_budget = max(0, min(document_budget, observed))
             elif any(isinstance(item.get('content'), list) for item in current):
@@ -267,12 +267,13 @@ class AgentRuntime:
             checkpoint.guard()
             return output
 
-        def receive(current: list[dict[str, Any]], key: str, wait: bool) -> dict[str, Any]:
-            """主动与被动交付共用信箱，在标记已交付前校验文本上下文预算。"""
+        def receive(current: list[dict[str, Any]], key: str, wait: bool,
+                    active_definitions: list[dict[str, Any]]) -> dict[str, Any]:
+            """主动与被动交付共用信箱，以当前可用工具集合校验文本上下文预算。"""
             def validate(result: dict[str, Any]) -> None:
                 """完整结果无法容纳时拒绝交付，不静默截断或丢弃未读事件。"""
                 extra = {'role': 'user', 'content': json.dumps({'type': 'subagent_results', **result}, ensure_ascii=False)}
-                if counter.available(settings, [*current, extra], tools) <= 0:
+                if counter.available(settings, protocol_messages([*current, extra]), active_definitions) <= 0:
                     raise ValueError('子任务交付超过上下文预算，请缩小任务范围。')
 
             if wait and on_progress is not None:

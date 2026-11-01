@@ -59,3 +59,12 @@ PPT Master 隔离镜像及出口代理重新构建并启动。启用 TEST_SKILL_
 Skill `stage`/`route` 失去生产写入方，已通过迁移 064 删除；前端改为按真实状态显示“等待下一步”等文案。回答成功收尾、失败和用户停止分别把活动任务原子转为 waiting、interrupted；新请求替代旧中断回答时也不会继续显示“制作中”。旧库迁移测试在独立管理员表出现前直接构造旧普通用户，修复了其自身的前置条件错误。
 
 本次清理后的最终集中回归 53 passed；`mypy backend tests` 检查 182 个文件通过；前端生产构建通过；真实 Docker PPT 导出/下载/预览 1 passed。追加失败任务终态测试后，目标 Skill/PG 相关回归继续通过。
+
+
+## 复审闭环（2026-11-01）
+
+Spec 复审发现并修复 3 项：外层仅有 finalize 待执行时，恢复后现在幂等关闭根 Agent；文档读取和子任务交付预算改为当前可用工具集合；直接删除长期记忆会清理受影响会话的派生检查点，同时保留原始聊天。新增 `before_finalize` 故障注入、同批工具禁用、子任务交付预算和记忆检查点清理测试。
+
+Standards 复审要求集中工具有效性、把 Skill 快照与终态迁移收回到 SkillService、把 Agent 私有消息字段清理放在 Agent 边界。相应新增 `message_protocol.py` 和共享工具策略；会话层通过 ChatExecution 的生命周期接口执行 Agent 关闭与 Skill 终态，不再直接访问内部仓储。
+
+最终复审补丁：35 passed；全项目 mypy 183 files 无错误。Standards 与 Spec 复审均无剩余阻断项。

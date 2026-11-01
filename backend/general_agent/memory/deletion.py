@@ -5,6 +5,8 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
+from general_agent.infrastructure.agent_cleanup import forget_checkpoint_material
+
 from general_agent.memory.service import MemoryService
 
 
@@ -61,10 +63,12 @@ class MemoryDeletion:
 
     def clear_dependents(self, connection: Any, action_id: UUID, active_operation: UUID | None = None) -> None:
         """清正文、旧许可及原生缓存，原来源标记为已忘记；当前删除回合仅保留执行身份。"""
-        action=connection.execute('SELECT message_id,operation_id FROM memory_actions WHERE id=%s',(action_id,)).fetchone()
+        action=connection.execute('SELECT message_id,operation_id,conversation_id FROM memory_actions WHERE id=%s',(action_id,)).fetchone()
         updates=connection.execute('SELECT * FROM memory_updates WHERE action_id=%s',(action_id,)).fetchall()
         sources=({action['message_id']} if action['message_id'] else set()) | {row['source_message_id'] for row in updates if row['source_message_id']}
+        conversations={action['conversation_id']} | {row['source_conversation_id'] for row in updates if row['source_conversation_id']}
         operations={action['operation_id']} | {row['operation_id'] for row in updates}
+        forget_checkpoint_material(connection, sorted(conversations))
         for table,column,identifiers in [('memory_update_operations','update_id',[row['id'] for row in updates])]:
             operations.update(row['operation_id'] for row in connection.execute(f'SELECT operation_id FROM {table} WHERE {column}=ANY(%s)',(identifiers,)).fetchall())
         operations.update(row['operation_id'] for row in connection.execute('SELECT operation_id FROM messages WHERE reply_to=ANY(%s) AND operation_id IS NOT NULL',(list(sources),)).fetchall())

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import httpx
+import psycopg
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
@@ -34,6 +35,8 @@ def test_delete_memory_preserves_chat_and_other_entries_without_cloud_calls(data
         assert original['messages'][0]['content'] == '请记住：我喜欢简洁的中文回答'
         assert original['messages'][1]['memory_action']['status'] == 'deleted'
         assert original['messages'][1]['memory_action']['fact'] == ''
+        with psycopg.connect(database_url) as connection:
+            assert connection.execute('SELECT count(*) FROM checkpoint_threads WHERE conversation_id=%s', (source,)).fetchone() == (0,)
     configure_memory_settings(database_url, tmp_path)
     with authenticated_client(database_url, tmp_path, transport) as client:
         assert client.get('/api/memories').json()[0]['id'] == other['id']

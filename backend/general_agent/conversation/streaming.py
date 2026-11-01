@@ -165,7 +165,7 @@ class StreamingChat:
             connection.execute("UPDATE skill_tasks SET status='interrupted',updated_at=CURRENT_TIMESTAMP WHERE account_id=%s AND conversation_id=%s AND status='active'", (account_id, conversation_id))
             connection.execute("UPDATE model_calls SET status = 'stopped' WHERE assistant_message_id = %s AND status = 'generating' AND EXISTS (SELECT 1 FROM messages WHERE id = %s AND status = 'stopped')", (message_id, message_id))
 
-        self.execution.agent_runtime.repository.close(message_id)
+        self.execution.close_agent_execution(message_id)
 
     def close(self) -> None:
         """停机将活动回答转为可续接状态，有界等待旧线程退出。"""

@@ -125,10 +125,8 @@ class TokenCounter:
         return max(0, settings.context_window_tokens - settings.output_reserve_tokens - LIMITS.context_protocol_reserve_tokens)
 
     def request_tokens(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
-        """计算实际外发字段，忽略仅用于状态恢复和压缩的内部标记。"""
-        clean = [{key: value for key, value in message.items() if not key.startswith('_')
-                  and not (key == 'tool_calls' and not value)} for message in messages]
-        return self.count(json.dumps({'messages': clean, 'tools': tools}, ensure_ascii=False))
+        """计算调用方提供的协议字段；Agent 私有字段须在进入这里前移除。"""
+        return self.count(json.dumps({'messages': messages, 'tools': tools}, ensure_ascii=False))
 
     def available(self, settings: StoredSettings, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
         """按实际外发请求核算剩余输入计数；整轮精确用量仍以模型 usage 为准。"""

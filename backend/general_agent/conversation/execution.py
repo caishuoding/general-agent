@@ -114,6 +114,19 @@ class ChatExecution:
         return self.agent_runtime.run(conversation_id, account_id, user_id, assistant_message_id,
             settings, operation, messages, on_content, source_attachment_ids, on_progress, on_round_start, runtime_state)
 
+    def close_agent_execution(self, answer_id: UUID) -> None:
+        """幂等关闭根 Agent 及遗留子任务，供回答最终业务提交后调用。"""
+        self.agent_runtime.repository.close(answer_id)
+
+    def settle_skill_answer(self, connection: Any, answer_id: UUID, account_id: UUID,
+                            conversation_id: UUID, status: str, runtime_state: dict[str, Any]) -> None:
+        """把回答终态转交 Skill 服务，未配置 Skill 时保持空操作。"""
+        runtime = self.agent_runtime.skills
+        if runtime is not None:
+            runtime.service.settle_answer(
+                connection, answer_id, account_id, conversation_id, status, runtime_state,
+            )
+
     @staticmethod
     def material_attachment_ids(material: AttachmentContext | None) -> list[UUID]:
         """从文档清单中提取稳定附件标识，供搜索操作记录关联来源。"""

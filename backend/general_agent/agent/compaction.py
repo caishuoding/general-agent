@@ -5,6 +5,7 @@ import logging
 from typing import Any, cast
 from uuid import UUID
 
+from general_agent.agent.message_protocol import protocol_messages
 from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.infrastructure.calls import BoundCalls
 from general_agent.infrastructure.provider import ModelFailure, ModelMessage
@@ -29,7 +30,7 @@ class ContextCompactor:
 
     def used(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
         """返回实际外发请求计数，内部恢复和压缩标记不计入预算。"""
-        return self.counter.request_tokens(messages, tools)
+        return self.counter.request_tokens(protocol_messages(messages), tools)
 
     def prepare(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """超阈值时总结早期完整组；失败保留原上下文，真正超限才明确停止。"""

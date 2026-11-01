@@ -12,12 +12,13 @@ from time import monotonic, sleep
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 
 from tests.auth.support import login_admin_http, switch_to_normal_user
 
 
-@pytest.mark.parametrize('window', ['before_input', 'after_finalize', 'offline'])
+@pytest.mark.parametrize('window', ['before_input', 'after_finalize', 'before_finalize', 'offline'])
 def test_recovery_handles_commit_windows_and_offline_time(database_url: str, tmp_path: Path, window: str) -> None:
     """首次检查点前或收尾提交后崩溃不丢失上下文，离线超过期限仍保留剩余时长。"""
     observed: list[dict[str, Any]] = []
@@ -49,6 +50,16 @@ def put(self, config, checkpoint, metadata, new_versions):
         Event().wait(30)
     return original(self, config, checkpoint, metadata, new_versions)
 PostgresSaver.put = put
+if mode == 'before_finalize':
+    from general_agent.agent.conversation import ConversationGraph
+    original_finalize = ConversationGraph.finalize
+    def finalize(self, state, runtime):
+        """在 Agent 已完成、业务 finalize 尚未提交时暂停一次。"""
+        if not marker.exists():
+            marker.write_text('reached')
+            Event().wait(30)
+        return original_finalize(self, state, runtime)
+    ConversationGraph.finalize = finalize
 '''
     (tmp_path / 'recovery_hook.py').write_text(hook)
 
@@ -145,11 +156,18 @@ PostgresSaver.put = put
                 resumed = client.post(f"/api/conversations/{conversation}/messages/{rows[-1]['id']}/resume")
                 assert resumed.status_code == 202, resumed.text
             final = messages(client, conversation, 'complete')
-            if window != 'offline':
+            if window in ('before_input', 'after_finalize'):
                 assert [item.get('content') for item in observed[-1]['messages']].count('第一轮唯一回答') == 1
                 assert len(final) == 4
             else:
                 assert len(final) == 2
+                assert final[-1]['content'] in {'第一轮唯一回答', '后续回答'}
+            with psycopg.connect(database_url) as connection:
+                closed = connection.execute(
+                    "SELECT closed FROM agents WHERE answer_attempt_id=%s AND parent_agent_id IS NULL",
+                    (final[-1]['id'],),
+                ).fetchone()
+            assert closed == (True,)
     finally:
         process.terminate()
         process.wait(timeout=10)

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
 
+from general_agent.agent.message_protocol import protocol_messages
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.infrastructure.tokens import TokenCounter
 
@@ -39,7 +40,7 @@ def test_available_budget_includes_tools_and_existing_results() -> None:
     assert counter.input_limit(settings) == 4096 - 1000 - 512
     internal = [{'role': 'user', 'content': '摘要', '_context_summary': True}]
     clean = [{'role': 'user', 'content': '摘要'}]
-    assert counter.request_tokens(internal, []) == counter.request_tokens(clean, [])
+    assert counter.request_tokens(protocol_messages(internal), []) == counter.request_tokens(clean, [])
 
 
 def test_registry_routes_by_endpoint_and_model_without_changing_interface(tmp_path: Path) -> None:
