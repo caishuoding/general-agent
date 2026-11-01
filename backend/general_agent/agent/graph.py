@@ -120,7 +120,7 @@ class AgentToolGraph:
                 *(message for message in updated if message.get('role') != 'system')]}
 
         def call_model(state: AgentState) -> dict[str, Any]:
-            """组装唯一系统消息及完整活动 Skill 指令，外发前按实际请求检查预算。"""
+            """组装完整活动指令，每次实际外发及断线续写都按请求重新检查预算。"""
             index = state["round_index"]
             if index >= self.maximum_rounds:
                 raise ValueError("工具调用达到本次执行上限；已完成的操作保留，请缩小范围后继续。")
@@ -137,6 +137,8 @@ class AgentToolGraph:
                 partial_calls: dict[int, dict[str, Any]] = {}
                 attempt_messages = model_messages
                 for attempt in range(1, LIMITS.stream_attempts + 1):
+                    if attempt > 1 and before_model is not None:
+                        before_model(attempt_messages, tools)
                     attempt_calls: dict[int, dict[str, Any]] = {}
                     attempt_reasoning: list[str] = []
                     resume_marker_pending = bool(visible_stream_content(content).strip())
