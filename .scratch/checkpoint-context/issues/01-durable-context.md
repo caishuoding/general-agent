@@ -18,3 +18,6 @@ Status: ready-for-agent
 
 
 复审修复完成：finalize-only 恢复幂等关闭根 Agent；文档/子任务预算使用活跃工具；长期记忆删除清理派生检查点。工具策略、消息协议和 Skill 状态查询已移动到对应边界。复审补丁 35 passed，mypy 183 files；双轴剩余阻断 0。
+
+
+finalize 与活跃工具复审补丁已完成：新增 before_finalize 故障注入、活跃工具预算、记忆检查点清理、消息协议边界和 Skill 状态服务边界；35 passed、52 passed，mypy 183 files。

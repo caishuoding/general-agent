@@ -68,3 +68,10 @@ Spec 复审发现并修复 3 项：外层仅有 finalize 待执行时，恢复�
 Standards 复审要求集中工具有效性、把 Skill 快照与终态迁移收回到 SkillService、把 Agent 私有消息字段清理放在 Agent 边界。相应新增 `message_protocol.py` 和共享工具策略；会话层通过 ChatExecution 的生命周期接口执行 Agent 关闭与 Skill 终态，不再直接访问内部仓储。
 
 最终复审补丁：35 passed；全项目 mypy 183 files 无错误。Standards 与 Spec 复审均无剩余阻断项。
+
+
+## finalize 与活跃工具复审补丁
+
+补充修复 Agent 已完成但 outer finalize 未提交时的根执行关闭；文档读取、子任务等待、自动交付和最终收信均使用当前可用工具集合。直接删除长期记忆现在清理受影响会话的派生检查点。Agent 私有字段移除与 Skill 快照查询分别下沉到 `message_protocol.py` 和 `SkillService`。
+
+最终复审补丁：35 passed；同轮扩展回归 52 passed；全项目 mypy 183 files 无错误。双轴复审无剩余实质问题。
