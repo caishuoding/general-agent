@@ -83,7 +83,7 @@ def test_attachment_delete_clears_search_links_and_original_file(database_url: s
         deleted = client.request('DELETE', path, json={'preview_revision': preview['revision']})
         assert deleted.status_code == 200
         message = next(item for item in client.get(f'/api/conversations/{conversation}').json()['messages'] if item['id'] == answer['id'])
-        assert message['search_action']['status'] == 'expired' and message['search_action']['query'] == ''
+        assert message['search_action']['status'] == 'cancelled' and message['search_action']['query'] == ''
         assert message['web_sources'] == []
         with psycopg.connect(database_url) as connection:
             assert connection.execute('SELECT count(*) FROM attachments WHERE id=%s', (uploaded['id'],)).fetchone() == (0,)

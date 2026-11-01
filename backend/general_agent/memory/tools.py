@@ -1,13 +1,11 @@
 """为对话智能体注册真实记忆工具，执行前核对观察结果、版本和当前来源。"""
 
 from dataclasses import dataclass, field
-import json
 from typing import Any
 from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from general_agent.infrastructure.operations import OperationContext
 from general_agent.memory.service import MemoryService
 from general_agent.memory.correction import MemoryCorrection
 from general_agent.memory.deletion import MemoryDeletion
@@ -94,7 +92,7 @@ class MemoryTools:
         self.attachments = attachments
         self.knowledge = knowledge
 
-    def add(self, checkpoint: MemoryCheckpoint, arguments: dict[str, Any], settings: StoredSettings) -> dict[str, Any]:
+    def add(self, checkpoint: MemoryCheckpoint, arguments: dict[str, Any]) -> dict[str, Any]:
         """从已持久化的少量会话构造 Mem0 输入；工具参数不能伪造记忆正文，返回实际处理状态。"""
         AddMemoryInput.model_validate(arguments)
         checkpoint.guard()
@@ -107,7 +105,7 @@ class MemoryTools:
                 (checkpoint.conversation_id, current['position']),
             ).fetchall()
         messages = [{'role': str(row['role']), 'content': str(row['content'])} for row in reversed(rows)]
-        detail = self.automatic.process_messages(checkpoint.conversation_id, checkpoint.message_id, messages, settings, checkpoint.operation, explicit=True)
+        detail = self.automatic.process_messages(checkpoint.conversation_id, checkpoint.message_id, messages, checkpoint.operation, explicit=True)
         if detail.startswith('自动记忆未完成：'):
             raise ValueError(detail)
         return {'status': 'complete', 'action': 'memory_added', 'detail': detail}
@@ -143,7 +141,6 @@ class MemoryTools:
         name: str,
         arguments: dict[str, Any],
         settings: StoredSettings,
-        source_attachment_ids: list[UUID] | None = None,
         document_budget: int = 0,
         token_counter: TokenCounter | None = None,
     ) -> dict[str, Any]:
@@ -167,7 +164,7 @@ class MemoryTools:
             return self.attachments.documents.read(checkpoint.conversation_id, account_id, arguments,
                                                    token_counter or TokenCounter.for_settings(settings, self.memory.directory), document_budget)
         if name == 'add_memory':
-            return self.add(checkpoint, arguments, settings)
+            return self.add(checkpoint, arguments)
         if name == 'search_memories':
             return self.search(checkpoint, SearchMemoryInput.model_validate(arguments).query)
         if name in ('search_web', 'fetch_web'):
@@ -180,7 +177,6 @@ class MemoryTools:
                 checkpoint.message_id,
                 query,
                 checkpoint.operation,
-                source_attachment_ids,
                 kind="search" if name == "search_web" else "fetch",
                 ori_question=search_input.ori_question if search_input is not None else None,
             )

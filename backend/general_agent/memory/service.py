@@ -3,7 +3,7 @@
 from collections.abc import Iterator, Callable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 from uuid import UUID, uuid5
 
 import httpx
@@ -102,8 +102,8 @@ class MemoryService:
         if active is None or active['cancelled'] or active['invalidated']:
             raise ValueError('操作已停止或来源已删除，旧批准不能继续提交。')
 
-    def save(self, conversation_id: UUID, message_id: UUID, fact: str, operation: OperationContext, action_id: UUID | None = None, validate_source: Callable[[], None] | None = None, cached: dict[str, List[float]] | None = None) -> dict[str, Any]:
-        """按稳定身份核对部分提交，可复用原生向量；空间租约至发布结束，删除墓碑优先。"""
+    def save(self, conversation_id: UUID, message_id: UUID, fact: str, operation: OperationContext, action_id: UUID | None = None, validate_source: Callable[[], None] | None = None) -> dict[str, Any]:
+        """按稳定身份核对部分提交；空间租约持续到发布结束，并优先处理删除墓碑。"""
         account_id = self.account_id_for_conversation(conversation_id)
         if validate_source:
             validate_source()

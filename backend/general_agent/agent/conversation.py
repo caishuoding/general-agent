@@ -119,7 +119,7 @@ class ConversationGraph:
         return self.invoke(initial, context)
 
     def invoke(self, graph_input: ConversationState | None, context: ConversationContext) -> ConversationResult:
-        """短暂认领回答归属后推进图；空输入续接，旧回答不能覆盖新检查点。"""
+        """推进或续接回答图，并在不可续接终态清除已停用记忆的派生状态。"""
         LOGGER.info('event=graph_start conversation_id=%s message_id=%s delivery=%s', context.conversation_id, context.assistant_message_id, context.delivery)
         state = graph_input or cast(ConversationState, self.checkpoints.values(str(context.conversation_id)) if self.checkpoints else {})
         try:
@@ -141,23 +141,41 @@ class ConversationGraph:
                 ):
                     state = cast(ConversationState, snapshot)
             LOGGER.info('event=graph_end message_id=%s failure=%s', context.assistant_message_id, bool(state['failure']))
+            self.discard_deleted_memory_checkpoint(
+                context.conversation_id, context.user_message_id, context.assistant_message_id,
+            )
             return {'answer': state['answer'], 'failure': state['failure']}
         except ExecutionPaused:
             return {"answer": state.get("answer", ""), "failure": None}
         except Exception:
             LOGGER.exception('LangGraph 对话执行失败 conversation_id=%s message_id=%s', context.conversation_id, context.assistant_message_id)
-            return self.fail_terminal(context, state, self.unexpected_failure(context.delivery))
+            result = self.fail_terminal(context, state, self.unexpected_failure(context.delivery))
+            self.discard_deleted_memory_checkpoint(
+                context.conversation_id, context.user_message_id, context.assistant_message_id,
+            )
+            return result
+
+    def discard_deleted_memory_checkpoint(self, conversation_id: UUID, user_message_id: UUID,
+                                          assistant_message_id: UUID) -> None:
+        """回答进入不可续接终态后尽力清除已停用记忆的派生线程并记录清理故障。"""
+        try:
+            if self.checkpoints and self.execution.memory_deletion_invalidates_checkpoint(user_message_id):
+                self.checkpoints.discard_answer(conversation_id, assistant_message_id)
+        except Exception:
+            LOGGER.exception(
+                'event=deleted_memory_checkpoint_cleanup_failed conversation_id=%s message_id=%s',
+                conversation_id,
+                assistant_message_id,
+            )
 
     def prepare_context(self, state: ConversationState, runtime: Runtime[ConversationContext]) -> dict[str, Any]:
-        """返回准备好的模型消息、来源标识和调用预留，不修改固定运行上下文。"""
+        """返回准备好的模型消息和资料标识，不修改固定运行上下文。"""
         context = runtime.context
         try:
             preparation = self.execution.prepare_response(
                 context.conversation_id,
                 context.account_id,
                 context.user_message_id,
-                context.assistant_message_id,
-                context.settings,
                 context.operation,
                 state['messages'],
             )
@@ -218,7 +236,6 @@ class ConversationGraph:
                 context.conversation_id,
                 context.account_id,
                 context.user_message_id,
-                str(state['messages'][-1]['content']),
                 context.operation,
                 context.settings,
                 messages=cast(list[ModelMessage], state['messages']),

@@ -15,6 +15,7 @@ from general_agent.agent.state import AgentState
 from general_agent.agent.tools import ORCHESTRATION
 from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.infrastructure.calls import BoundCalls
+from general_agent.infrastructure.checkpoints import STATE_VERSION
 from general_agent.infrastructure.provider import ModelConnectionFailure, ModelFailure, ModelMessage
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.memory.automatic import MemoryCheckpoint
@@ -436,7 +437,7 @@ class AgentToolGraph:
         graph = builder.compile(checkpointer=checkpointer)
         raw_messages = [*messages]
         initial: AgentState = {
-            "version": 1, "runtime_state": runtime_state() if runtime_state else {},
+            "version": STATE_VERSION, "runtime_state": runtime_state() if runtime_state else {},
             "messages": raw_messages,
             "tool_calls": [],
             "round_index": 0,
@@ -458,7 +459,7 @@ class AgentToolGraph:
         }
         saved = graph.get_state(config) if checkpointer is not None else None
         if saved and saved.values:
-            if saved.values.get("version") != 1:
+            if saved.values.get("version") != STATE_VERSION:
                 raise ValueError("Agent 检查点版本不兼容，请重试。")
             if saved.next:
                 return cast(AgentState, graph.invoke(None, config, durability='sync'))

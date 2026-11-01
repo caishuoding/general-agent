@@ -166,7 +166,6 @@ class SearchService:
         user_message_id: UUID,
         query: str,
         operation: OperationContext,
-        source_attachment_ids: list[UUID] | None = None,
         *,
         kind: Literal["search", "fetch"] = "search",
         ori_question: str | None = None,
@@ -225,7 +224,7 @@ class SearchService:
                   or (kind == 'fetch' and item.get('kind') == 'fetch' and item['url'] == query)]
         if row['status'] in ('complete', 'failed') and (cached or (kind == 'search' and query in row['completed_queries'])):
             return {'query': query, 'results': cached}
-        if row['status'] in ('cancelled', 'rejected', 'expired'):
+        if row['status'] == 'cancelled':
             raise ValueError('该搜索已经结束或失效，请重新发送问题。')
         with self.database.connect() as connection:
             connection.execute(
@@ -265,7 +264,7 @@ class SearchService:
         with self.database.connect() as connection:
             connection.execute(
                 "UPDATE search_requests SET status='failed',error=%s "
-                "WHERE operation_id=%s AND status IN ('planning','pending','approved')",
+                "WHERE operation_id=%s AND status='approved'",
                 (detail, operation.operation_id),
             )
 
@@ -278,7 +277,7 @@ class SearchService:
         with self.database.connect() as connection:
             connection.execute(
                 "UPDATE search_requests SET status='cancelled' "
-                "WHERE operation_id=%s AND status IN ('planning','pending','approved')",
+                "WHERE operation_id=%s AND status='approved'",
                 (operation_id,),
             )
 

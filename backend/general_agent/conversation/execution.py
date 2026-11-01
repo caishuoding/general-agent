@@ -50,7 +50,7 @@ class ChatExecution:
         self.knowledge = knowledge
         self.agent_runtime = AgentRuntime(self.memory_tools)
 
-    def embedding_revision(self, content: str) -> str | None:
+    def embedding_revision(self) -> str | None:
         """返回当前嵌入配置版本；Agent 每轮都可能选择记忆工具，因此每轮都绑定版本。"""
         embedding = self.memory.embedding.store.read()
         return embedding.revision if embedding else None
@@ -58,7 +58,7 @@ class ChatExecution:
     def scope(self, content: str, settings: StoredSettings) -> list[str | None]:
         """返回聊天、嵌入及搜索配置版本组成的幂等范围，防止操作结果跨配置复用。"""
         search = self.search.settings.read()
-        return [content, settings.revision, self.embedding_revision(content), search.revision if search else None]
+        return [content, settings.revision, self.embedding_revision(), search.revision if search else None]
 
     def prepare_answer(self, user_id: UUID, content: str, operation: OperationContext) -> list[ModelMessage]:
         """提供正式相关记忆，回答只能根据实际状态声称已记住。"""
@@ -69,8 +69,6 @@ class ChatExecution:
         conversation_id: UUID,
         account_id: UUID,
         user_id: UUID,
-        message_id: UUID,
-        settings: StoredSettings,
         operation: OperationContext,
         rows: list[dict[str, Any]],
     ) -> AnswerPreparation:
@@ -98,7 +96,6 @@ class ChatExecution:
         conversation_id: UUID,
         account_id: UUID,
         user_id: UUID,
-        content: str,
         operation: OperationContext,
         settings: StoredSettings,
         *,
@@ -129,7 +126,7 @@ class ChatExecution:
 
     @staticmethod
     def material_attachment_ids(material: AttachmentContext | None) -> list[UUID]:
-        """从文档清单中提取稳定附件标识，供搜索操作记录关联来源。"""
+        """从文档清单中提取稳定附件标识，供执行判断是否开放会话文档工具。"""
         identifiers: list[UUID] = []
         for message in material.messages if material is not None else []:
             content = message.get("content")
@@ -153,3 +150,14 @@ class ChatExecution:
         if self.knowledge is None:
             return answer, []
         return self.knowledge.resolve_citations(sources, answer)
+
+    def memory_deletion_invalidates_checkpoint(self, user_message_id: UUID) -> bool:
+        """判断本轮是否已停用观察到的记忆，以便终态清除派生会话检查点。"""
+        with self.memory.database.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM memory_tool_observations o "
+                "JOIN memory_actions a ON a.id=o.action_id "
+                "WHERE o.message_id=%s AND a.status IN ('deleting','deleted') LIMIT 1",
+                (user_message_id,),
+            ).fetchone()
+        return row is not None

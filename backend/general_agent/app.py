@@ -25,7 +25,7 @@ from general_agent.memory.source_deletion_api import source_deletion_router
 from general_agent.auth.api import ADMIN_COOKIE_NAME, COOKIE_NAME, auth_router
 from general_agent.auth.admin_api import admin_router
 from general_agent.auth.dependencies import current_user, require_admin
-from general_agent.auth.service import AuthService, AuthenticatedUser
+from general_agent.auth.service import AuthService
 from general_agent.attachments.api import attachment_router
 from general_agent.attachments.service import AttachmentService
 from general_agent.knowledge.service import KnowledgeService

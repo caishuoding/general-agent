@@ -62,9 +62,3 @@ def update_message_progress(database: Database, message_id: UUID, progress: Mess
             "UPDATE messages SET progress=%s WHERE id=%s AND status='generating'",
             (Jsonb(progress), message_id),
         )
-
-
-def clear_message_progress(database: Database, message_id: UUID) -> None:
-    """清除回答终态的临时进度，界面完成后不再保留动态状态。"""
-    with database.connect() as connection:
-        connection.execute("UPDATE messages SET progress=NULL WHERE id=%s", (message_id,))

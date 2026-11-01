@@ -230,7 +230,14 @@ class AgentRuntime:
                     return self.orchestrator.execute(checkpoint, name, arguments, child)
                 if worker and name not in WORKER_TOOLS:
                     raise ValueError('子智能体不能执行该工具。')
-                result = self.tools.execute(current, name, arguments, configured, attachment_ids, document_budget, counter)
+                result = self.tools.execute(
+                    current,
+                    name,
+                    arguments,
+                    configured,
+                    document_budget=document_budget,
+                    token_counter=counter,
+                )
                 checkpoint.guard()
                 self.repository.record_sources(run_id, [result])
                 return result

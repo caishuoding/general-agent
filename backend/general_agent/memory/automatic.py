@@ -9,7 +9,6 @@ from psycopg.types.json import Jsonb
 
 from general_agent.infrastructure.operations import OperationContext
 from general_agent.infrastructure.provider import ModelFailure
-from general_agent.infrastructure.settings import StoredSettings
 from general_agent.memory.mem0_adapter import Mem0ApiError
 from general_agent.memory.service import MemoryService
 
@@ -59,11 +58,11 @@ class AutomaticMemory:
             self.memory.guard_source(connection, checkpoint.conversation_id, checkpoint.message_id, checkpoint.operation)
             connection.execute("INSERT INTO memory_native_runs(message_id,operation_id,status,detail) VALUES(%s,%s,%s,%s) ON CONFLICT(message_id) DO UPDATE SET operation_id=EXCLUDED.operation_id,status=EXCLUDED.status,detail=EXCLUDED.detail,updated_at=CURRENT_TIMESTAMP", (checkpoint.message_id, checkpoint.operation.operation_id, status, detail))
 
-    def process(self, conversation_id: UUID, message_id: UUID, content: str, settings: StoredSettings, operation: OperationContext, explicit: bool = False) -> str:
+    def process(self, conversation_id: UUID, message_id: UUID, content: str, operation: OperationContext, explicit: bool = False) -> str:
         """处理单条当前用户消息。"""
-        return self.process_messages(conversation_id, message_id, [{"role": "user", "content": content}], settings, operation, explicit=explicit)
+        return self.process_messages(conversation_id, message_id, [{"role": "user", "content": content}], operation, explicit=explicit)
 
-    def process_messages(self, conversation_id: UUID, message_id: UUID, messages: list[dict[str, str]], settings: StoredSettings, operation: OperationContext, track_run: bool = True, explicit: bool = False) -> str:
+    def process_messages(self, conversation_id: UUID, message_id: UUID, messages: list[dict[str, str]], operation: OperationContext, track_run: bool = True, explicit: bool = False) -> str:
         """调用 Mem0 add(infer=True)，并把新增结果登记到业务账本。"""
         account_id = self.memory.account_id_for_conversation(conversation_id)
         checkpoint = MemoryCheckpoint(self.memory, message_id, conversation_id, operation)

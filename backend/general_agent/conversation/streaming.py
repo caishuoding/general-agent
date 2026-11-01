@@ -30,12 +30,19 @@ class StreamingChat:
         self.lock = Lock()
 
     def recover(self) -> None:
-        """重启保留可续接回答及执行身份，遗留外部请求只结算为中断。"""
+        """重启保留新版本回答供续接，并终结旧版回答及其外部执行身份。"""
         with self.database.connect() as connection:
             connection.execute("UPDATE messages SET status='interrupted',error='应用重启中断了执行，可从保存的位置继续。',progress=NULL,interrupted_at=coalesce(interrupted_at,execution_heartbeat,created_at) WHERE status='generating' AND resume_model_revision IS NOT NULL")
-            connection.execute("UPDATE agent_runs r SET paused_at=coalesce(paused_at,m.interrupted_at) FROM agents a,messages m WHERE r.agent_id=a.id AND a.answer_attempt_id=m.id AND m.status='interrupted' AND r.status IN ('queued','running')")
-            connection.execute("UPDATE cloud_operations SET cancelled=TRUE WHERE id IN (SELECT operation_id FROM messages WHERE status='generating')")
-            connection.execute("UPDATE messages SET status='failed',error='旧版本执行没有检查点，请重试。',progress=NULL WHERE status='generating'")
+            legacy = connection.execute(
+                "UPDATE messages SET status='failed',error='旧版本执行没有检查点，请重试。',progress=NULL "
+                "WHERE status='generating' RETURNING id,operation_id"
+            ).fetchall()
+            legacy_operations = [row['operation_id'] for row in legacy if row['operation_id']]
+            if legacy_operations:
+                connection.execute(
+                    "UPDATE cloud_operations SET cancelled=TRUE WHERE id=ANY(%s)",
+                    (legacy_operations,),
+                )
             connection.execute("UPDATE model_calls SET status = 'failed',finished_at=CURRENT_TIMESTAMP WHERE status = 'generating'")
             connection.execute("UPDATE model_calls SET finished_at=CURRENT_TIMESTAMP WHERE status = 'stopped' AND finished_at IS NULL")
             connection.execute("UPDATE model_calls SET status = 'cancelled',finished_at=CURRENT_TIMESTAMP WHERE status = 'reserved'")
@@ -43,6 +50,8 @@ class StreamingChat:
             connection.execute("UPDATE memory_deletions SET status='failed',error='应用重启中断了清理，请重试；该条目仍停止召回。' WHERE status='pending'")
             connection.execute("UPDATE memory_actions SET status='failed',error='应用重启中断了记忆同步，请重试核对已有写入。' WHERE status='saving'")
             connection.execute("UPDATE memory_native_runs SET status='failed',detail='应用重启中断了自动记忆，可重试原来源；已完成步骤会先核对。' WHERE status='pending' AND operation_id IN (SELECT id FROM cloud_operations WHERE cancelled)")
+        for row in legacy:
+            self.execution.close_agent_execution(row['id'])
 
     def start(self, conversation_id: UUID, account_id: UUID, content: str, settings: StoredSettings, operation: OperationContext,
               skill_selections: list[SkillSnapshot] | None = None) -> UUID:
@@ -155,7 +164,7 @@ class StreamingChat:
                 context.user_message_id, context.settings, context.operation)
 
     def stop(self, conversation_id: UUID, account_id: UUID, message_id: UUID) -> None:
-        """显式停止生成或中断回答并关闭子任务，已外发调用仍可回传真实用量。"""
+        """停止生成、关闭子任务并清除已停用记忆的派生状态，保留真实用量回传。"""
         message=self.message(conversation_id, account_id, message_id)
         if message.get('operation_id'):
             self.execution.search.cancel(message['operation_id'])
@@ -165,7 +174,11 @@ class StreamingChat:
             connection.execute("UPDATE skill_tasks SET status='interrupted',updated_at=CURRENT_TIMESTAMP WHERE account_id=%s AND conversation_id=%s AND status='active'", (account_id, conversation_id))
             connection.execute("UPDATE model_calls SET status = 'stopped' WHERE assistant_message_id = %s AND status = 'generating' AND EXISTS (SELECT 1 FROM messages WHERE id = %s AND status = 'stopped')", (message_id, message_id))
 
-        self.execution.close_agent_execution(message_id)
+        try:
+            self.execution.close_agent_execution(message_id)
+        finally:
+            if message.get('reply_to'):
+                self.graph.discard_deleted_memory_checkpoint(conversation_id, message['reply_to'], message_id)
 
     def close(self) -> None:
         """停机将活动回答转为可续接状态，有界等待旧线程退出。"""

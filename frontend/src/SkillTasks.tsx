@@ -24,7 +24,7 @@ export function SkillTasks({ conversationId }: { conversationId: string }) {
 
   /** 真实交付使用服务端授权地址下载。 */
   function renderTask(task: Task) {
-    const labels: Record<string, string> = { active: '制作中', waiting: '等待下一步', completed: '已完成', interrupted: '已中断，可继续', revoked: '资料已撤销' };
+    const labels: Record<string, string> = { active: '制作中', waiting: '等待下一步', interrupted: '已中断，可继续', revoked: '资料已撤销' };
     /** 依据交付身份生成下载入口，不使用模型生成的磁盘路径。 */
     function renderArtifact(file: Task['artifacts'][number]) {
       return <li key={file.id}><a href={`/api/conversations/${conversationId}/skill-artifacts/${file.id}/file`} download>{file.filename}</a></li>;

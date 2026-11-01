@@ -1,5 +1,7 @@
 """从公开接口验证忘记记忆、原文保留与旧授权失效，正式存储使用真实 Mem0。"""
 
+import json
+from threading import Event
 from pathlib import Path
 
 import httpx
@@ -8,8 +10,10 @@ from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
 from tests.auth.support import authenticated_client
-from tests.memory.test_memory import configure_memory, configure_memory_settings
+from tests.fake_mem0 import FakeMem0
+from tests.memory.test_memory import configure_memory, configure_memory_settings, memory_agent_response
 from tests.memory.test_memory_recall import recall_provider
+from tests.model_protocol import current_tool_messages
 
 
 def test_delete_memory_preserves_chat_and_other_entries_without_cloud_calls(database_url: str, tmp_path: Path) -> None:
@@ -70,6 +74,8 @@ def test_explicit_chat_delete_is_local_and_ambiguous_request_only_clarifies(data
         finished = wait_message(client, source, 'complete')
         assert finished['status'] == 'complete'
         assert client.get('/api/memories').json() == []
+        with psycopg.connect(database_url) as connection:
+            assert connection.execute('SELECT count(*) FROM checkpoint_threads WHERE conversation_id=%s', (source,)).fetchone() == (0,)
 
 
 def test_delete_during_inflight_update_cannot_be_overwritten_by_late_result(database_url: str, tmp_path: Path) -> None:
@@ -115,3 +121,80 @@ def test_delete_during_inflight_update_cannot_be_overwritten_by_late_result(data
         stopped = wait_message(client, source, 'stopped')
         assert stopped['memory_update']['status'] == 'deleted'
         assert client.get('/api/memories').json() == []
+
+
+def test_failed_chat_delete_does_not_leave_observed_memory_in_next_checkpoint(database_url: str, tmp_path: Path) -> None:
+    """远端清理失败仍已停止召回时，完成回答后不能把旧记忆工具结果带给下一轮。"""
+    memories = FakeMem0()
+    fail_delete = False
+    captured: list[dict[str, object]] = []
+
+    def mem0_provider(request: httpx.Request) -> httpx.Response:
+        """只让正式删除失败，其他 Mem0 请求仍按真实接口形状返回。"""
+        if fail_delete and request.method == 'DELETE':
+            return httpx.Response(503, json={'error': 'temporary delete failure'})
+        return memories.handle(request)
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """执行记忆查找与删除，并记录下一轮实际收到的完整模型上下文。"""
+        payload = json.loads(request.content)
+        current = next((str(item.get('content')) for item in reversed(payload['messages']) if item.get('role') == 'user'), '')
+        if current == '普通隔离问题':
+            captured.append(payload)
+        return memory_agent_response(payload)
+
+    configure_memory_settings(database_url, tmp_path)
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider), httpx.MockTransport(mem0_provider)) as client:
+        conversation = configure_memory(client)
+        assert client.post(f'/api/conversations/{conversation}/messages', json={'content': '请记住：我喜欢简洁的中文回答'}).status_code == 200
+        target = client.get('/api/memories').json()[0]
+        fail_delete = True
+        response = client.post(f'/api/conversations/{conversation}/messages', json={'content': f"删除记忆 {target['id']}"})
+        assert response.status_code == 200
+        assert response.json()['messages'][-1]['status'] == 'complete'
+        assert client.get('/api/memories').json()[0]['status'] == 'deleting'
+        with psycopg.connect(database_url) as connection:
+            assert connection.execute('SELECT count(*) FROM checkpoint_threads WHERE conversation_id=%s', (conversation,)).fetchone() == (0,)
+
+        fail_delete = False
+        assert client.post(f'/api/conversations/{conversation}/messages', json={'content': '普通隔离问题'}).status_code == 200
+    context = json.dumps(captured[-1], ensure_ascii=False)
+    assert captured and context.count('我喜欢简洁的中文回答') == 1
+
+
+def test_stopping_after_chat_delete_discards_checkpoint_with_observed_memory(database_url: str, tmp_path: Path) -> None:
+    """删除成功后用户立即停止生成，终态也必须清除含旧记忆工具结果的检查点。"""
+    release = Event()
+    memories = FakeMem0()
+
+    def mem0_provider(request: httpx.Request) -> httpx.Response:
+        """使用真实 Mem0 接口契约完成正式记忆删除。"""
+        return memories.handle(request)
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """删除工具完成后阻塞最终模型流，供公开停止接口制造中间终态。"""
+        from tests.conversation.test_streaming import ControlledStream
+
+        payload = json.loads(request.content)
+        results = [json.loads(item['content']) for item in current_tool_messages(payload)]
+        if results and results[-1].get('status') == 'complete' and results[-1].get('action') == 'deleted':
+            return httpx.Response(200, headers={'content-type': 'text/event-stream'}, stream=ControlledStream(release))
+        return memory_agent_response(payload)
+
+    configure_memory_settings(database_url, tmp_path)
+    with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider), httpx.MockTransport(mem0_provider)) as client:
+        from tests.conversation.test_streaming import wait_message
+
+        conversation = configure_memory(client)
+        assert client.post(f'/api/conversations/{conversation}/messages', json={'content': '请记住：我喜欢简洁的中文回答'}).status_code == 200
+        target = client.get('/api/memories').json()[0]
+        started = client.post(f'/api/conversations/{conversation}/runs', json={'content': f"删除记忆 {target['id']}"})
+        assert started.status_code == 202
+        try:
+            answer = wait_message(client, conversation, 'generating', 'first ')
+            assert client.post(f"/api/conversations/{conversation}/messages/{answer['id']}/stop").status_code == 200
+            wait_message(client, conversation, 'stopped', 'first ')
+        finally:
+            release.set()
+        with psycopg.connect(database_url) as connection:
+            assert connection.execute('SELECT count(*) FROM checkpoint_threads WHERE conversation_id=%s', (conversation,)).fetchone() == (0,)

@@ -183,12 +183,21 @@ class AgentRepository:
         return {'agent_id': str(agent_id), 'run_id': str(row['run_id']), 'status': row['status']}
 
     def close(self, answer_id: UUID, purge: bool = False) -> None:
-        """关闭根分派并取消全部子任务；来源撤销时清除执行正文及缓存。"""
+        """关闭根分派、取消活动子任务与残留搜索许可；来源撤销时清除执行正文。"""
         with self.database.connect() as connection:
             connection.execute('SELECT id FROM agents WHERE answer_attempt_id=%s AND parent_agent_id IS NULL FOR UPDATE', (answer_id,))
             connection.execute('UPDATE agents SET closed=TRUE WHERE answer_attempt_id=%s', (answer_id,))
             connection.execute("UPDATE cloud_operations SET cancelled=TRUE WHERE id IN (SELECT r.operation_id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s AND a.parent_agent_id IS NOT NULL AND r.status IN ('queued','running'))", (answer_id,))
             connection.execute("UPDATE agent_runs SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE agent_id IN (SELECT id FROM agents WHERE answer_attempt_id=%s) AND status IN ('queued','running')", (answer_id,))
+            connection.execute(
+                "UPDATE search_requests SET status='cancelled',error=coalesce(error,'回答已结束，未完成的联网请求已取消。') "
+                "WHERE status='approved' AND operation_id IN ("
+                "SELECT operation_id FROM messages WHERE id=%s AND operation_id IS NOT NULL "
+                "UNION SELECT r.operation_id FROM agent_runs r JOIN agents a ON a.id=r.agent_id "
+                "WHERE a.answer_attempt_id=%s"
+                ")",
+                (answer_id, answer_id),
+            )
             if purge:
                 connection.execute("UPDATE agent_runs SET result=NULL,task='',messages='[]',error='source_invalidated' WHERE agent_id IN (SELECT id FROM agents WHERE answer_attempt_id=%s)", (answer_id,))
                 for table in ('agent_sources', 'agent_messages'):

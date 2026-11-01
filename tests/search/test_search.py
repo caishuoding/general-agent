@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from general_agent.app import create_app
+from general_agent.infrastructure.agent_limits import LIMITS
 from tests.auth.support import admin_client, authenticated_client, set_global_settings
 from tests.model_protocol import current_tool_messages
 from tests.attachments.test_attachments import configure
@@ -604,7 +605,8 @@ def test_multiple_queries_keep_independent_results_and_retry_failures(
     """同步和流式搜索的临时错误由后端恢复，成功和空结果按查询独立缓存。"""
     from tests.conversation.test_streaming import wait_message
 
-    queries = ['北京天气', '上海天气', '北京天气', '空结果', '空结果', '暂时失败', '广州天气', '暂时失败']
+    # 七次模型搜索决定只产生五次真实外发：三次复用缓存，失败请求重试一次。
+    queries = ['北京天气', '上海天气', '北京天气', '空结果', '空结果', '暂时失败', '北京天气']
     outbound: list[str] = []
 
     def provider(request: httpx.Request) -> httpx.Response:
@@ -635,7 +637,7 @@ def test_multiple_queries_keep_independent_results_and_retry_failures(
                 'query': queries[len(messages)],
                 'ori_question': '搜索并比较多个城市的天气',
             }, f'query-{len(messages)}')
-        keys = [json.loads(messages[index]['content'])['results'][0]['key'] for index in (0, 1, 6, 7)]
+        keys = [json.loads(messages[index]['content'])['results'][0]['key'] for index in (0, 1, 5, 6)]
         return structured_text('已完成比较。' + ''.join(f'[{key}]' for key in keys))
 
     configure_search_settings(database_url, tmp_path, 'https://search.example')
@@ -647,8 +649,9 @@ def test_multiple_queries_keep_independent_results_and_retry_failures(
         message = (wait_message(client, conversation, 'complete', timeout=20) if streaming
                    else response.json()['messages'][-1])
         assert message['status'] == 'complete'
-        assert outbound == ['北京天气', '上海天气', '空结果', '暂时失败', '暂时失败', '广州天气']
-        assert len(message['web_sources']) == 4
-        assert len({item['key'] for item in message['web_sources']}) == 4
+        assert outbound == ['北京天气', '上海天气', '空结果', '暂时失败', '暂时失败']
+        assert len(outbound) == LIMITS.search_calls
+        assert len(message['web_sources']) == 3
+        assert len({item['key'] for item in message['web_sources']}) == 3
         usage = [call for call in client.get('/api/usage').json() if call['unit'] == 'credits']
-        assert sorted(Decimal(call['credits']) for call in usage) == [0, 0, 1, 1, 1, 1]
+        assert sorted(Decimal(call['credits']) for call in usage) == [0, 0, 1, 1, 1]

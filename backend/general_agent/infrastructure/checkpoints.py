@@ -12,6 +12,7 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from psycopg.rows import dict_row
 
+from general_agent.infrastructure.agent_cleanup import forget_checkpoint_material
 from general_agent.infrastructure.database import Database
 
 STATE_VERSION = 1
@@ -128,6 +129,11 @@ class Checkpoints:
         with self.saver() as saver:
             saved = saver.get_tuple({'configurable': {'thread_id': thread_id}})
             return dict(saved.checkpoint['channel_values']) if saved else {}
+
+    def discard_answer(self, conversation_id: UUID, answer_id: UUID) -> None:
+        """回答完成后清除包含已删除记忆派生材料的会话线程和所有执行线程。"""
+        with self.database.connect() as connection:
+            forget_checkpoint_material(connection, [conversation_id], [answer_id])
 
     def prune(self) -> None:
         """清理孤立线程并收缩完成执行历史，只保留最新快照引用的通道版本。"""

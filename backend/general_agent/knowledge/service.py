@@ -8,7 +8,6 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
-from psycopg.types.json import Jsonb
 
 from general_agent.infrastructure.agent_cleanup import invalidate_agent_material
 from general_agent.attachments.service import AttachmentService

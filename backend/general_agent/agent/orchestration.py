@@ -123,7 +123,8 @@ class AgentOrchestrator:
                 self.condition.notify_all()
             return result
         elif name == 'wait_agents':
-            return self.wait(checkpoint, WaitInput.model_validate(arguments))
+            WaitInput.model_validate(arguments)
+            return self.wait(checkpoint)
         else:
             raise ValueError('未知编排工具。')
         run_id = UUID(result['run_id'])
@@ -135,14 +136,18 @@ class AgentOrchestrator:
         self.submit(run_id, run)
         return result
 
-    def wait(self, checkpoint: RunCheckpoint, request: WaitInput) -> dict[str, Any]:
+    def wait(self, checkpoint: RunCheckpoint) -> dict[str, Any]:
         """通过统一信箱等待任意结果，等待失败由执行层终止而非耗尽工具重试额度。"""
         return self.inbox.wait(checkpoint, 'wait:' + checkpoint.current_call)
 
     def recover(self) -> None:
         """检查点负责续接；启动只登记待恢复执行，不关闭原主从身份。"""
         with self.repository.database.connect() as connection:
-            connection.execute("UPDATE agent_runs SET paused_at=coalesce(paused_at,CURRENT_TIMESTAMP) WHERE status IN ('queued','running')")
+            connection.execute(
+                "UPDATE agent_runs r SET paused_at=coalesce(paused_at,CURRENT_TIMESTAMP) "
+                "FROM agents a JOIN messages m ON m.id=a.answer_attempt_id "
+                "WHERE r.agent_id=a.id AND m.status='interrupted' AND r.status IN ('queued','running')"
+            )
 
     def close(self) -> None:
         """停止进程内队列并有界等待，数据库状态留给检查点续接。"""

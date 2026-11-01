@@ -75,3 +75,14 @@ Standards 复审要求集中工具有效性、把 Skill 快照与终态迁移收
 补充修复 Agent 已完成但 outer finalize 未提交时的根执行关闭；文档读取、子任务等待、自动交付和最终收信均使用当前可用工具集合。直接删除长期记忆现在清理受影响会话的派生检查点。Agent 私有字段移除与 Skill 快照查询分别下沉到 `message_protocol.py` 和 `SkillService`。
 
 最终复审补丁：35 passed；同轮扩展回归 52 passed；全项目 mypy 183 files 无错误。双轴复审无剩余实质问题。
+
+
+## 全仓库新版一致性审计（2026-11-01）
+
+独立复审发现聊天内删除长期记忆会同时删除当前回答的外层和主执行线程，导致删除工具已经成功但回答无法继续进入模型收尾。清理现在跳过当前删除回合的两个活动线程，允许真实结果写回；回答完成后再次清除该回答的派生线程。直接删除长期记忆仍立即清理所有相关检查点。
+
+同一轮审查删除了无调用方的搜索旧状态。迁移 066 把遗留 `planning/pending/rejected/expired` 归一为 `cancelled`，约束只保留 `approved/complete/failed/cancelled`；记忆和来源删除也统一写入 `cancelled`。迁移 067 移除 Skill 任务中无法再产生的 `completed` 状态，旧值转为 `waiting`；迁移 065 删除无读写方的 `agents.web_count`。
+
+二次独立复核补齐了删除记忆后的失败、主动停止和异常终态清理，并让旧版无检查点回答在重启时关闭主从执行、取消子操作和残留搜索批准。迁移测试先在 064 结构写入真实旧行，再执行 065–067，验证旧状态转换和字段删除。
+
+验证结果：核心 checkpoint、记忆删除终态和迁移回归 5 passed；checkpoint/上下文压缩/Skill 续接组 38 passed；附件组 141 passed、5 skipped；搜索主流程 16 passed、重试额度 18 passed、历史搜索迁移 1 passed；Mypy 183 files 无错误，前端 TypeScript 与 Vite 构建通过。全量 pytest 跑到 94% 时为 319 passed、8 skipped，随后本机 PostgreSQL 端口异常关闭并使 53 个 fixture 连接报错；单例复跑通过，受影响记忆、搜索和 Skill 组已分段复验。PPT Master Docker 用例本轮因环境条件跳过。

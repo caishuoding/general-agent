@@ -9,7 +9,6 @@ import re
 from typing import Any
 from uuid import UUID, uuid4
 
-from docx import Document
 from docx.document import Document as WordDocument
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
