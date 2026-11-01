@@ -6,9 +6,9 @@
 
 交接说明见 [LangGraph 重构交接文档](docs/handoff-langgraph.md)。
 
-回答流程为 `prepare_context → agent → finalize`；内部由模型决定是否进入工具循环。后端不按“记住、忘记、修改记忆”等关键词分类请求或隐藏图片，统一提供当前会话的有效文档清单、图片 file_id 和可用工具。附件所属账号、会话及有效期仍在读取时核验。
+回答流程为一张 LangGraph：`prepare_context → prepare_model ⇄ call_model → execute_tools → finalize`。模型自主决定是否调用工具；自动收取子任务结果属于 `prepare_model`，结束前的子任务和后台命令检查属于 `finalize`。后端不按“记住、忘记、修改记忆”等关键词分类请求或隐藏图片，统一提供当前会话的有效文档清单、图片 file_id 和可用工具。附件所属账号、会话及有效期仍在读取时核验。
 
-各节点通过 State 返回并共享消息、材料来源、工具结果、回答及错误；`runtime.context` 只保存本次运行固定的身份、模型配置和传输方式。外层会话图和主、子工具循环使用官方 PostgreSQL 检查点，服务重启后由用户点击“继续执行”恢复；聊天正文、流式增量、操作幂等及用量仍保存在现有业务表。每次模型调用前会按输入预算压缩较早历史。运行与持久化的边界见 [ADR 0021](docs/adr/0021-durable-context-and-compaction.md)。
+各节点通过同一份工作 State 共享消息、Skill、工具结果、子任务交付、回答及错误；系统提示、工具定义和运行客户端在请求时重建，不持久化。主回答使用稳定会话线程和官方 PostgreSQL 检查点，子智能体按 Run 使用独立检查点；服务重启后由用户点击“继续执行”恢复。聊天正文、流式增量、操作幂等及用量仍保存在现有业务表。每次模型调用前会按输入预算压缩较早历史。运行与持久化的边界见 [ADR 0023](docs/adr/0023-unified-answer-graph.md) 和 [ADR 0021](docs/adr/0021-durable-context-and-compaction.md)。
 
 2026-10-17：附件只用于当前会话的问答和资料处理，不再从附件提取长期记忆。聊天记忆仍使用 Mem0 原生自动记忆和对话记忆工具；详见 [ADR 0005](docs/adr/0005-native-automatic-memory.md) 与 [ADR 0006](docs/adr/0006-attachments-do-not-create-memories.md)。
 

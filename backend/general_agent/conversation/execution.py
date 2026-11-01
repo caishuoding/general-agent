@@ -22,9 +22,6 @@ from general_agent.knowledge.tools import KnowledgeTools
 from general_agent.agent.graph import TurnFinalizer, TurnPreparer
 from general_agent.agent.runner import AgentRuntime
 from general_agent.conversation.progress import MessageProgress
-from general_agent.prompts import (
-    base_system_prompt,
-)
 
 
 @dataclass(frozen=True)
@@ -78,12 +75,9 @@ class ChatExecution:
         content = str(current['content'])
         material = self.search.attachments.prepare(conversation_id, account_id)
         memory_material = self.prepare_answer(user_id, content, operation)
-        system_prompt: ModelMessage = {
-            'role': 'system',
-            'content': base_system_prompt(),
-        }
         data_messages: list[ModelMessage] = [cast(ModelMessage, {**message, '_context_material': True}) for message in [*memory_material, *material.messages]]
-        conversation: list[ModelMessage] = [system_prompt, *data_messages]
+        # 系统提示属于运行配置，由每次模型请求重新组装，不写入可恢复工作 State。
+        conversation: list[ModelMessage] = [*data_messages]
         for index, row in enumerate(rows):
             if row.get('role') == 'system' or row.get('_context_material'):
                 continue

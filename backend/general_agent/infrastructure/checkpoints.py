@@ -124,6 +124,20 @@ class Checkpoints:
             finally:
                 connection.execute('SELECT pg_advisory_unlock(%s)', (key,))
 
+    @contextmanager
+    def execution(self, identifier: UUID, wait: bool = True) -> Iterator[None]:
+        """串行化同一主回答图的完整执行，使用与检查点写入锁分离的 advisory key。"""
+        with self.database.connect() as connection:
+            connection.autocommit = True
+            key = (identifier.int ^ 0x6A09E667F3BCC909) % (2**63 - 1)
+            row = connection.execute('SELECT pg_advisory_lock(%s) AS acquired' if wait else 'SELECT pg_try_advisory_lock(%s) AS acquired', (key,)).fetchone()
+            if not wait and (not row or not row['acquired']):
+                raise ValueError('本会话回答仍在执行，请稍后继续。')
+            try:
+                yield
+            finally:
+                connection.execute('SELECT pg_advisory_unlock(%s)', (key,))
+
     def values(self, thread_id: str) -> dict[str, Any]:
         """读取最新 State 值供恢复验证，未创建线程时返回空。"""
         with self.saver() as saver:

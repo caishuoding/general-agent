@@ -173,6 +173,20 @@ def test_runtime_context_is_immutable() -> None:
         setattr(context, 'answer', '隐藏结果')
 
 
+def test_new_turn_drops_previous_tool_trace_but_keeps_dialog_and_summary() -> None:
+    """新回答保留用户、最终回答和摘要，移除上一轮原始工具协议消息。"""
+    kept = ConversationGraph.turn_messages([
+        {'role': 'user', 'content': '旧问题'},
+        {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'call-1'}]},
+        {'role': 'tool', 'tool_call_id': 'call-1', 'content': '旧工具结果'},
+        {'role': 'assistant', 'content': '旧答案', '_message_id': 'answer-1'},
+        {'role': 'user', 'content': '摘要', '_context_summary': True},
+        {'role': 'user', 'content': '本轮问题', '_current_request': True},
+    ])
+
+    assert [message['content'] for message in kept] == ['旧问题', '旧答案', '摘要', '本轮问题']
+
+
 def test_model_failure_uses_shared_turn_finalizer() -> None:
     """模型失败从同一收尾回调保存部分正文和失败状态。"""
     graph, database, execution = graph_dependencies()

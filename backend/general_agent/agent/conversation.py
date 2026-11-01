@@ -207,12 +207,13 @@ class ConversationGraph:
     def prepare_context(self, state: ConversationState, context: ConversationContext) -> dict[str, Any]:
         """初始化本轮材料；checkpoint 的 State 恢复由 LangGraph 完成。"""
         try:
+            working_messages = self.turn_messages(state['messages'])
             preparation = self.execution.prepare_response(
                 context.conversation_id,
                 context.account_id,
                 context.user_message_id,
                 context.operation,
-                state['messages'],
+                working_messages,
             )
             LOGGER.info('event=node prepare_context message_id=%s messages=%s prepared=%s',
                         context.assistant_message_id, len(state['messages']), len(preparation.messages))
@@ -228,6 +229,15 @@ class ConversationGraph:
                              context.conversation_id, context.assistant_message_id)
             return {'failure': self.unexpected_failure(context.delivery),
                     'answer': self.unexpected_failure(context.delivery) if context.delivery == 'sync' else ''}
+
+    @staticmethod
+    def turn_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """开始新回答时保留用户、最终回答和摘要，清掉上一轮原始工具协议轨迹。"""
+        return [
+            message for message in messages
+            if message.get('_context_summary')
+            or (message.get('role') in ('user', 'assistant') and not message.get('tool_calls'))
+        ]
 
     def finalize(self, state: ConversationState, context: ConversationContext) -> dict[str, Any]:
         """在业务提交前核验引用并幂等保存最终消息，成功后才确认可结束。"""

@@ -328,9 +328,11 @@ class AgentRuntime:
         try:
             if self.checkpoints:
                 self.checkpoints.register(thread_id, row['conversation_id'], answer_id)
+            execution_lock = (self.checkpoints.execution(row['conversation_id'], wait=True)
+                              if self.checkpoints and main_graph else nullcontext())
             saver_context = (self.checkpoints.saver(row['conversation_id'], answer_id, thread_id)
                              if self.checkpoints else nullcontext(None))
-            with saver_context as saver:
+            with execution_lock, saver_context as saver:
                 output = graph.run(
                     messages=messages, settings=settings,
                     calls=self.tools.memory.calls.bind(checkpoint.operation),

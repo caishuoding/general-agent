@@ -126,7 +126,8 @@ class AgentToolGraph:
             fragments = [fragment.strip() for fragment in (context_fragments or []) if fragment.strip()]
             if instruction_context is not None:
                 fragments.extend(instruction_context())
-            prompt = '\n\n'.join([*system_parts, *fragments]) if system_parts or fragments else base_system_prompt()
+            prompt_parts = [base_system_prompt(), *system_parts, *fragments]
+            prompt = '\n\n'.join(dict.fromkeys(part for part in prompt_parts if part.strip()))
             messages = [{'role': 'system', 'content': prompt}, *(message for message in current if message.get('role') != 'system')]
             return protocol_messages(messages) if clean else messages
 
@@ -134,6 +135,12 @@ class AgentToolGraph:
             """返回当前回答仍可调用的工具，供模型、压缩和执行预算共同使用。"""
             return available_tool_definitions(
                 tools, state['tool_failures'], state['document_calls'], self.maximum_tool_retries)
+
+        def failure_update(error: Exception, partial: str = '') -> dict[str, Any]:
+            """把节点终止错误映射为统一失败更新，并复用调用方传输策略。"""
+            if model_failure is not None:
+                return model_failure(error, partial)
+            return {'failure': str(error), 'answer': partial or str(error)}
 
         def prepare_model_attempt(state: AgentState) -> dict[str, Any]:
             """自动收信并在模型请求前压缩旧交互，持久化完成后再调用模型。"""
@@ -157,9 +164,7 @@ class AgentToolGraph:
             try:
                 return prepare_model_attempt(state)
             except (ValueError, LookupError, ModelFailure, WebRequestFailure) as error:
-                if model_failure is not None:
-                    return model_failure(error, '')
-                return {'failure': str(error), 'answer': str(error)}
+                return failure_update(error)
 
         last_visible_chunks: list[str] = []
 
@@ -277,15 +282,10 @@ class AgentToolGraph:
             try:
                 return call_model_attempt(state)
             except (ValueError, ModelFailure, WebRequestFailure) as error:
-                partial = visible_stream_content(last_visible_chunks)
-                if model_failure is not None:
-                    return model_failure(error, partial)
-                return {'failure': str(error), 'answer': partial or str(error)}
-            except Exception as error:
-                partial = visible_stream_content(last_visible_chunks)
-                if model_failure is not None:
-                    return model_failure(error, partial)
-                return {'failure': '回答执行中断，请重试。', 'answer': partial}
+                return failure_update(error, visible_stream_content(last_visible_chunks))
+            except Exception:
+                LOGGER.exception('智能体模型调用发生未分类异常')
+                return failure_update(RuntimeError('回答执行中断，请重试。'), visible_stream_content(last_visible_chunks))
 
         def route_model(state: AgentState) -> Literal['execute_tools', 'finalize']:
             """失败直接收尾，有工具调用进入工具节点，否则进入统一最终处理。"""
@@ -440,13 +440,10 @@ class AgentToolGraph:
             try:
                 return execute_tools_attempt(state)
             except (ValueError, LookupError, ModelFailure, WebRequestFailure) as error:
-                if model_failure is not None:
-                    return model_failure(error, '')
-                return {'failure': str(error), 'answer': str(error)}
+                return failure_update(error)
             except Exception:
-                if model_failure is not None:
-                    return model_failure(RuntimeError('工具执行中断。'), '')
-                return {'failure': '工具执行中断。', 'answer': ''}
+                LOGGER.exception('智能体工具执行发生未分类异常')
+                return failure_update(RuntimeError('工具执行中断。'))
 
         def finalize(state: AgentState) -> dict[str, Any]:
             """结束前收取后台结果，确认可交付后调用本轮统一业务收尾。"""

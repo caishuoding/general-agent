@@ -179,7 +179,7 @@ def test_search_is_a_model_tool_without_confirmation_and_keeps_sources(database_
         assert searches == []
         response = client.post(f"/api/conversations/{conversation}/messages", json={"content": "杭州天气怎么样"})
 
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         message = response.json()["messages"][-1]
         assert message["status"] == "complete"
         assert message["search_action"]["status"] == "complete"
@@ -255,7 +255,7 @@ def test_unconfigured_search_returns_tool_error_without_leaking_provider_details
         conversation = configure(client)
         response = client.post(f"/api/conversations/{conversation}/messages", json={"content": "联网查杭州天气"})
 
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         message = response.json()["messages"][-1]
         assert "配置" in message["content"]
         assert message["search_action"] is None
@@ -345,7 +345,7 @@ def test_failed_search_preserves_actual_usage_and_truthful_terminal_state(databa
         conversation = configure(client)
         response = client.post(f"/api/conversations/{conversation}/messages", json={"content": "联网查杭州天气"})
 
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         message = response.json()["messages"][-1]
         assert message["search_action"]["status"] == "failed"
         assert message["web_sources"] == []

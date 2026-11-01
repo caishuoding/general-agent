@@ -14,3 +14,5 @@ Status: ready-for-human
 ## Comments
 
 这是实现后的强制 review 项；代码通过测试不代表这些架构问题已经确认。
+
+2026-11-01：自动 Standards/Spec 两轴审查已执行，并修正文档过期、主回答串行化和系统提示持久化问题；维护者仍需按上方 TODO 亲自复核图拓扑与 State 字段。自动审查不替代本 TODO。
