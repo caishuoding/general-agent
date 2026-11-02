@@ -77,8 +77,8 @@ Word 附件经统一排版后得到的固定页面版本，是该附件在会话
 **会话已用技能（Conversation Skills）**：
 某个会话中通过显式选择或 `load_skill` 使用过的 Skill 名称集合。后续 Run 可继续读取这些 Skill 根目录内的文件，但不会自动重建旧 Skill 工作流。
 
-**Skill Run 工作区（Skill Run Workspace）**：
-一次 Agent Run 按需创建的 `generated/<account_id>/<conversation_id>/<run_id>/workspace`。Skill 加载本身不创建目录。
+**会话工作区（Conversation Workspace）**：
+当前会话用于制作、编辑和处理文件的工作目录。同一会话的不同 Run 可以继续处理已有项目，不同账号和会话的工作区相互隔离。
 
 **生成文件（Generated File）**：
 某个 Agent Run 实际产出并经发布工具保存的不可变文件副本，直接绑定账号、会话、回答和 Run。

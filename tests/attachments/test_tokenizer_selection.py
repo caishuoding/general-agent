@@ -13,7 +13,6 @@ from general_agent.attachments.knowledge import configured_chunk_policy
 from general_agent.infrastructure.settings import EmbeddingSettingsStore, SettingsStore, StoredEmbeddingSettings, StoredSettings
 from tests.auth.support import authenticated_client, login_admin, login_user
 from tests.attachments.test_documents import pdf_bytes, image_pdf_bytes
-from tests.attachments.test_document_images import image_files_response
 from tests.knowledge.test_knowledge_base import wait_document
 
 
@@ -47,8 +46,6 @@ def test_live_llm_switch_applies_to_new_uploads_and_preserves_old_chunks(
     """通过真实设置、上传和列表接口确认换 LLM 不会重切已有文字或含图文档。"""
     def provider(request: httpx.Request) -> httpx.Response:
         """在外部模型边界模拟 Files 和纯文字图片描述，所有业务处理使用真实实现。"""
-        if request.url.path == '/files':
-            return image_files_response()
         return httpx.Response(200, json={'choices': [{'message': {'content': '橙色图表内容。'}}],
                                         'usage': {'prompt_tokens': 20, 'completion_tokens': 5, 'total_tokens': 25}})
 

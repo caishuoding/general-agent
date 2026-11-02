@@ -7,7 +7,6 @@ from typing import Any
 import httpx
 from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
 from tests.auth.support import authenticated_client, set_global_settings
 
 
@@ -16,12 +15,14 @@ def configure(client: TestClient) -> str:
     return str(client.post('/api/conversations', json={}).json()['id'])
 
 
-def configure_settings(database_url: str, tmp_path: Path) -> None:
+def configure_settings(database_url: str, tmp_path: Path,
+                       context_window_tokens: int = 262144) -> None:
     """通过管理员入口配置资料测试使用的全局模型。"""
     set_global_settings(
         database_url,
         tmp_path,
-        {"base_url": "https://model.example/v1", "model": "controlled", "api_key": "test-key"},
+        {"base_url": "https://model.example/v1", "model": "controlled", "api_key": "test-key",
+         "context_window_tokens": context_window_tokens},
     )
 
 
@@ -77,6 +78,8 @@ def test_uploaded_text_is_read_on_demand_and_survives_restart(database_url: str,
         """核对当前清单不含正文，允许历史工具记录包含先前实际读取结果。"""
         payload = json.loads(request.content)
         requests.append(payload)
+        if str(payload['messages'][0].get('content', '')).startswith('你正在执行会话上下文压缩'):
+            return httpx.Response(200, json={'choices': [{'message': {'content': '保留当前附件和已读结果。'}}]})
         documents = attachment_documents(payload)
         assert len(documents) == 1
         assert {'search_documents', 'read_document'} <= {tool['function']['name'] for tool in payload['tools']}
@@ -213,6 +216,8 @@ def test_long_document_tail_is_retrieved_on_demand(database_url: str, tmp_path: 
     def provider(request: httpx.Request) -> httpx.Response:
         """首轮自主检索文末事实，后续只根据实际返回切片回答。"""
         payload = json.loads(request.content)
+        if str(payload['messages'][0].get('content', '')).startswith('你正在执行会话上下文压缩'):
+            return httpx.Response(200, json={'choices': [{'message': {'content': '保留相关资料读取进度。'}}]})
         tool_reply = document_tool_reply(payload, 'search_documents', query='玄武口令')
         if tool_reply is not None:
             assert sentinel not in str(payload['messages'])

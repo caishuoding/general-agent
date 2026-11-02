@@ -132,7 +132,7 @@ class OperationService:
     def record(self, call_id: UUID, usage: TokenUsage, status: str | None = None, credits: Decimal | None = None) -> None:
         """记录服务商返回的 token 或 credits 以及调用终态。"""
         with self.database.connect() as connection:
-            connection.execute("UPDATE model_calls SET prompt_tokens=coalesce(%s,prompt_tokens),completion_tokens=coalesce(%s,completion_tokens),total_tokens=coalesce(%s,total_tokens),credits=coalesce(%s,credits),status=CASE WHEN status='stopped' THEN status ELSE coalesce(%s,status) END,finished_at=CASE WHEN %s::text IS NULL THEN finished_at ELSE CURRENT_TIMESTAMP END WHERE id=%s", (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens, credits, status, status, call_id))
+            connection.execute("UPDATE model_calls SET prompt_tokens=coalesce(%s,prompt_tokens),completion_tokens=coalesce(%s,completion_tokens),total_tokens=coalesce(%s,total_tokens),cached_tokens=coalesce(%s,cached_tokens),credits=coalesce(%s,credits),status=CASE WHEN status='stopped' THEN status ELSE coalesce(%s,status) END,finished_at=CASE WHEN %s::text IS NULL THEN finished_at ELSE CURRENT_TIMESTAMP END WHERE id=%s", (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens, usage.cached_tokens, credits, status, status, call_id))
 
     def cancel_reservation(self, call_id: UUID) -> None:
         """仅终结未外发的预留，保留已开始或已完成调用的真实状态及用量。"""

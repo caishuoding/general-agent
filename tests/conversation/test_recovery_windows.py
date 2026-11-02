@@ -41,22 +41,23 @@ def put(self, config, checkpoint, metadata, new_versions):
     values = checkpoint.get('channel_values', {})
     start = values.get('__start__', {})
     before = mode == 'before_input' and isinstance(start, dict) and any(item.get('content') == '第二轮' for item in start.get('messages', []))
-    after = mode == 'after_finalize' and values.get('settled') and values.get('answer')
+    after = mode == 'after_finalize' and values.get('finished') and any(
+        item.get('role') == 'assistant' and item.get('content') for item in values.get('messages', []))
     if (before or after) and not marker.exists():
         marker.write_text('reached')
         Event().wait(30)
     return original(self, config, checkpoint, metadata, new_versions)
 PostgresSaver.put = put
 if mode == 'before_finalize':
-    from general_agent.agent.conversation import ConversationGraph
-    original_finalize = ConversationGraph.finalize
-    def finalize(self, state, context):
+    from general_agent.agent.nodes import AgentNodes
+    original_finalize = AgentNodes.finalize
+    def finalize(self, state, runtime):
         """在 Agent 已完成、业务 finalize 尚未提交时暂停一次。"""
         if not marker.exists():
             marker.write_text('reached')
             Event().wait(30)
-        return original_finalize(self, state, context)
-    ConversationGraph.finalize = finalize
+        return original_finalize(self, state, runtime)
+    AgentNodes.finalize = finalize
 '''
     (tmp_path / 'recovery_hook.py').write_text(hook)
 

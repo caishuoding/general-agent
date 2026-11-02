@@ -12,16 +12,11 @@ import pytest
 from general_agent.attachments.service import AttachmentService
 from general_agent.attachments.tools import DocumentTools, ReadDocumentInput, ReadCursor
 from general_agent.infrastructure.database import Database
-from general_agent.infrastructure.settings import StoredSettings
 from general_agent.infrastructure.tokens import TokenCounter
-from general_agent.agent.graph import AgentToolGraph
-from general_agent.memory.automatic import MemoryCheckpoint
-from general_agent.infrastructure.provider import StreamChunk, ToolCallDelta
-from tests.app.test_agent_graph import checkpoint, tool_chunks
 from tests.auth.support import authenticated_client
 from tests.attachments.test_attachments import configure, configure_settings, document_tool_reply, document_tool_result
 from tests.attachments.test_documents import pdf_bytes, docx_bytes
-from tests.attachments.test_images import image_bytes, upload_response
+from tests.attachments.test_images import image_bytes
 
 
 def service(database_url: str, directory: Path) -> AttachmentService:
@@ -69,42 +64,6 @@ def test_read_reports_insufficient_context_without_a_stalled_cursor() -> None:
         [{'ordinal': 1, 'page': None, 'paragraph': 1, 'content': '中文原文'}], TokenCounter('unknown'), 10)
     assert result['code'] == 'context_budget_exhausted'
     assert 'next_cursor' not in result
-
-
-def test_each_document_tool_has_five_calls_including_failures_and_batches() -> None:
-    """两个工具分别最多五次；同批第六次被拦截，失败也占次数，新回答重置。"""
-    calls = MagicMock()
-    calls.stream.side_effect = [tool_chunks(['search_documents'] * 7 + ['read_document'] * 6, 'batch'),
-                               [StreamChunk(content='已有内容。')]]
-    execute = MagicMock(return_value={'error': '可恢复错误'})
-    tools = [{'type': 'function', 'function': {'name': name}} for name in ('search_documents', 'read_document')]
-    arguments: dict[str, Any] = dict(messages=[{'role': 'user', 'content': '读取'}],
-        settings=StoredSettings(base_url='https://example.com', model='test', api_key='test'), calls=calls,
-        checkpoint=cast(MemoryCheckpoint, checkpoint()), tools=tools, execute_tool=execute)
-    graph = AgentToolGraph()
-    result = graph.run(**arguments)
-    assert execute.call_count == 10
-    assert result['document_calls'] == {'search_documents': 5, 'read_document': 5}
-    assert calls.stream.call_args.kwargs['tools'] is None
-    calls.stream.side_effect = [tool_chunks(['read_document'], 'new'), [StreamChunk(content='新回答。')]]
-    arguments['checkpoint'] = cast(MemoryCheckpoint, checkpoint())
-    assert graph.run(**arguments)['document_calls'] == {'read_document': 1}
-    assert execute.call_count == 11
-
-
-def test_invalid_document_json_consumes_call_limit() -> None:
-    """畸形 JSON 也计入文档调用次数，第六次不得进入业务执行器。"""
-    calls = MagicMock()
-    calls.stream.side_effect = [[StreamChunk(tool_call=ToolCallDelta(index=index, id=str(index),
-        name='read_document', arguments='invalid json')) for index in range(6)], [StreamChunk(content='参数无效。')]]
-    execute = MagicMock()
-    result = AgentToolGraph().run(messages=[{'role': 'user', 'content': '读取'}],
-        settings=StoredSettings(base_url='https://example.com', model='test', api_key='test'), calls=calls,
-        checkpoint=cast(MemoryCheckpoint, checkpoint()),
-        tools=[{'type': 'function', 'function': {'name': 'read_document'}}], execute_tool=execute)
-    assert result['document_calls'] == {'read_document': 5}
-    execute.assert_not_called()
-    assert calls.stream.call_args.kwargs['tools'] is None
 
 
 def test_document_search_is_complete_and_scoped(database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -251,7 +210,7 @@ def test_real_prompt_usage_constrains_reading_budget(database_url: str, tmp_path
         assert 'PRIVATE_ORIGINAL' not in str(result)
         return httpx.Response(200, json={'choices': [{'message': {'content': '当前上下文空间不足。'}}]})
 
-    configure_settings(database_url, tmp_path)
+    configure_settings(database_url, tmp_path, context_window_tokens=32768)
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation = configure(client)
         client.post(f'/api/conversations/{conversation}/attachments', files={'files': ('secret.txt', b'PRIVATE_ORIGINAL')})
@@ -259,17 +218,12 @@ def test_real_prompt_usage_constrains_reading_budget(database_url: str, tmp_path
         assert response.json()['messages'][-1]['content'] == '当前上下文空间不足。'
 
 
-def test_image_app_ttl_cleans_remote_file_and_preserves_chat(database_url: str, tmp_path: Path) -> None:
-    """应用层到期禁止图片引用并清理远端及本地文件，已经完成的聊天正文保留。"""
-    deleted: list[str] = []
+def test_image_app_ttl_cleans_local_file_and_preserves_chat(database_url: str, tmp_path: Path) -> None:
+    """应用层到期禁止图片进入模型并清理本地文件，已经完成的聊天正文保留。"""
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """提供真实 Files 协议替身并记录到期清理调用，不使用私人图片。"""
-        if request.method == 'DELETE':
-            deleted.append(request.url.path)
-            return httpx.Response(200, json={'id': 'file-api-expiring', 'object': 'file', 'deleted': True})
-        if request.url.path == '/files':
-            return upload_response(request, 'file-api-expiring')
+        """只接受聊天请求，图片清理不应调用任何供应商文件接口。"""
+        assert request.url.path.endswith('/chat/completions')
         return httpx.Response(200, json={'choices': [{'message': {'content': '已保存的回答。'}}]})
 
     configure_settings(database_url, tmp_path)
@@ -282,9 +236,11 @@ def test_image_app_ttl_cleans_remote_file_and_preserves_chat(database_url: str, 
         attachments = AttachmentService(Database(database_url), tmp_path, transport)
         with attachments.database.connect() as connection:
             connection.execute("UPDATE attachments SET expires_at=CURRENT_TIMESTAMP-INTERVAL '1 second' WHERE id=%s", (UUID(uploaded['id']),))
-        with pytest.raises(ValueError):
-            attachments.image_file(UUID(uploaded['id']))
+        account = attachments.database
+        with account.connect() as connection:
+            owner = connection.execute('SELECT user_id FROM conversations WHERE id=%s', (UUID(conversation),)).fetchone()
+        assert owner is not None
+        assert not attachments.prepare(UUID(conversation), owner['user_id']).messages
         attachments.expire()
-        assert deleted == ['/files/file-api-expiring']
         assert not (tmp_path / 'attachments' / uploaded['id']).exists()
         assert client.get(f'/api/conversations/{conversation}').json()['messages'][-1]['content'] == '已保存的回答。'

@@ -15,7 +15,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-writer fonts-noto-cjk docker.io \
+RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-writer fonts-noto-cjk docker-cli \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-server.txt ./

@@ -10,7 +10,6 @@ from uuid import uuid4
 import httpx
 from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
 from tests.auth.support import admin_client, authenticated_client
 from tests.conversation.test_streaming import wait_message
 from tests.model_protocol import current_tool_messages
@@ -163,7 +162,8 @@ def configure_memory_settings(database_url: str, tmp_path: Path) -> None:
     with admin_client(database_url, tmp_path) as admin:
         assert admin.put(
             '/api/settings',
-            json={"base_url": "https://chat.example/v1", "model": "chat", "api_key": "test-key"},
+            json={"base_url": "https://chat.example/v1", "model": "chat", "api_key": "test-key",
+                  "context_window_tokens": 262144},
         ).status_code == 200
         assert admin.put(
             '/api/settings/embedding',

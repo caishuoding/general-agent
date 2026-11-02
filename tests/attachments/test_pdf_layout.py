@@ -190,7 +190,6 @@ def test_sample_upgrade_refreshes_descriptions_when_caption_changes(
     """真实样本旧图片缓存没有图注时，重建必须重新携带图注描述，不能复用旧输入结果。"""
     from general_agent.infrastructure.settings import EmbeddingSettingsStore, StoredEmbeddingSettings
     from tests.attachments.test_attachments import configure_settings
-    from tests.attachments.test_document_images import image_files_response
     from tests.auth.support import authenticated_client
     from tests.knowledge.test_knowledge_base import wait_document
 
@@ -200,8 +199,6 @@ def test_sample_upgrade_refreshes_descriptions_when_caption_changes(
         """提供受控文件与嵌入协议，只记录本次视觉模型实际收到的原图和图注输入。"""
         if request.method == 'DELETE':
             return httpx.Response(200)
-        if request.url.path == '/files':
-            return image_files_response()
         payload = json.loads(request.content)
         if 'input' in payload:
             return httpx.Response(200, json={'model': 'test-embedding', 'data': [

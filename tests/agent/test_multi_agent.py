@@ -3,43 +3,11 @@
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
-from uuid import uuid4
 
 import httpx
 
-from general_agent.agent.runner import AgentRuntime
 from tests.auth.support import authenticated_client
 from tests.attachments.test_attachments import configure_settings
-
-
-def test_run_answer_returns_messages_without_synthetic_tool_messages() -> None:
-    """主图返回真实模型和工具消息，不在执行边界伪造工具调用。"""
-    runtime = AgentRuntime.__new__(AgentRuntime)
-    runtime.repository = MagicMock()
-    root_id, answer_id = uuid4(), uuid4()
-    runtime.repository.start.return_value = {'id': root_id}
-    runtime.repository.info.return_value = {'status': 'completed'}
-    messages = [{'role': 'assistant', 'content': '回答[K7]'}]
-
-    def prepare(_state: Any) -> dict[str, Any]:
-        """该边界测试不改变初始工作状态。"""
-        return {}
-
-    def finalize(state: Any) -> dict[str, Any]:
-        """直接返回共享图状态，供断言消息未被改写。"""
-        return {**state}
-
-    with patch.object(AgentRuntime, 'execute', return_value={
-        'answer': '回答[K7]', 'used_tools': True, 'messages': messages, 'settled': True,
-    }):
-        outcome = runtime.run_answer(
-            uuid4(), uuid4(), uuid4(), answer_id, MagicMock(), MagicMock(), [], None, None, None,
-            prepare, finalize, None, {},
-        )
-
-    assert outcome['messages'] == messages
-    runtime.repository.close.assert_called_once_with(answer_id)
 
 
 def agent_deliveries(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -199,13 +167,12 @@ def test_child_web_sources_are_verified_in_main_answer(database_url: str, tmp_pa
         """子智能体真实执行搜索，主模型仅从交付结果取得来源。"""
         payload = json.loads(request.content)
         if request.url.host == 'search.example':
-            return httpx.Response(200, json={'results': [{'url': 'https://example.org/evidence', 'title': '成本证据', 'summary': '每月 10 元'}]})
+            return httpx.Response(200, json={'search_result': [{'link': 'https://example.org/evidence', 'title': '成本证据', 'content': '每月 10 元'}]})
         tools = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
         if 'spawn_agent' not in {tool['function']['name'] for tool in payload.get('tools', [])}:
             if not tools:
                 return response(name='search_web', arguments={
-                    'query': '方案成本',
-                    'ori_question': '请核对成本',
+                    'query': '方案成本'
                 })
             return response('每月10元[' + tools[-1]['results'][0]['key'] + ']')
         if not tools:
@@ -276,14 +243,14 @@ def test_oversized_child_delivery_fails_without_silent_truncation(database_url: 
         assert oversized not in answer['content']
 
 
-def test_streamed_revision_replaces_the_previous_candidate(database_url: str, tmp_path: Path) -> None:
-    """新子结果触发重生成时，流式快照先替换旧候选，最终只保留新答案。"""
+def test_streamed_revision_keeps_previous_candidate_until_completion(database_url: str, tmp_path: Path) -> None:
+    """新子结果触发重生成时保留可见候选，最终成功后只保留新答案。"""
     from threading import Event
     from tests.conversation.test_streaming import wait_message
     candidate, revising, release = Event(), Event(), Event()
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """在修订模型请求处暂停，以公开会话快照观察旧草稿已被清除。"""
+        """在修订模型请求处暂停，以公开会话快照验证旧草稿仍然可见。"""
         payload = json.loads(request.content)
         if 'spawn_agent' not in {tool['function']['name'] for tool in payload.get('tools', [])}:
             assert candidate.wait(8)
@@ -305,7 +272,7 @@ def test_streamed_revision_replaces_the_previous_candidate(database_url: str, tm
             assert revising.wait(8)
             pending = client.get(f'/api/conversations/{conversation}').json()['messages'][-1]
             assert pending['status'] == 'generating'
-            assert pending['content'] == ''
+            assert pending['content'] == '旧候选答案'
         finally:
             release.set()
         answer = wait_message(client, conversation, 'complete')
@@ -324,7 +291,7 @@ def test_two_children_really_run_concurrently(database_url: str, tmp_path: Path)
         if 'spawn_agent' not in {tool['function']['name'] for tool in payload.get('tools', [])}:
             barrier.wait(timeout=8)
             return response('并行研究完成')
-        assert payload['parallel_tool_calls'] is True
+        assert payload['tool_stream'] is True
         tools = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
         if not tools:
             calls = [{'id': 'spawn-' + title, 'type': 'function', 'function': {'name': 'spawn_agent',

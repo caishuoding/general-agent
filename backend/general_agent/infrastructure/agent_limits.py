@@ -34,7 +34,7 @@ class AgentLimits:
     stream_attempts: int = 3
     search_calls: int = 5
     fetch_calls: int = 10
-    answer_seconds: int = 600
+    answer_seconds: int = 900
     run_seconds: int = 180
 
 

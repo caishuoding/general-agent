@@ -23,7 +23,7 @@ def test_main_prompt_is_one_coherent_instruction_without_tool_manual() -> None:
 def test_tool_description_catalog_covers_shared_and_orchestration_tools() -> None:
     """工具描述统一收录公共能力和编排能力，避免系统提示重复解释工具用法。"""
     assert {"add_memory", "search_memories", "update_memory", "delete_memory", "search_web", "fetch_web", "get_current_time", "spawn_agent", "wait_agents", "send_agent_message", "cancel_agent", "search_documents", "read_document", "search_knowledge"} == set(TOOL_DESCRIPTIONS)
-    assert "ori_question" in TOOL_DESCRIPTIONS["search_web"]
+    assert "70 字" in TOOL_DESCRIPTIONS["search_web"]
     assert "同一轮" in TOOL_DESCRIPTIONS["spawn_agent"]
     assert "[K编号]" in base_system_prompt()
     assert "[[MEDIA:K编号]]" in base_system_prompt()

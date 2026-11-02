@@ -26,7 +26,7 @@
 ### 联网搜索
 
 - `search_web`、`fetch_web` 与记忆、文档、知识库工具注册在同一模型工具循环中，由模型自主决定调用。
-- 查询直接发送给 DeepSeek Search / Fetch，不经过正则意图路由、查询编辑或用户批准。
+- 查询直接发送给 智谱 Web Search / Reader，不经过正则意图路由、查询编辑或用户批准。
 - 工具结果按不可信数据处理；搜索记录、实际用量和网页来源核验继续保留。
 
 ### State 与持久化
@@ -120,7 +120,7 @@ bash scripts/start.sh
 
 - `model.json`：聊天模型配置
 - `embedding.json`：嵌入配置，供 Mem0 一次性配置容器读取
-- `search.json`：DeepSeek Search / Fetch 配置
+- `search.json`：智谱 Web Search / Reader 配置
 - `attachments/`：当前会话附件原文件
 - `logs/agent.log`：智能体节点流转日志
 

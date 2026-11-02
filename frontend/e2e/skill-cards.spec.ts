@@ -1,55 +1,45 @@
 import { test, expect } from '@playwright/test';
 import { configureChatModel, loginUser } from './auth';
 
-/** 使用已登录的真实技能目录验证前端完整正文拼接、名称元数据和历史展示。 */
-test('技能卡片选择由前端发送完整 SKILL.md 和名称', async function skillCards({ page }) {
+/** 验证 ppt-master 仅隐藏聊天选择入口，后端技能仍安装且普通发送不附带技能。 */
+test('隐藏 ppt-master 选择入口并保留普通消息发送', async function skillCards({ page }) {
   await loginUser(page);
   await configureChatModel(page, `http://127.0.0.1:${process.env.TEST_MODEL_PORT || '18081'}/v1`, 'controlled-model');
   await page.goto('/');
   await page.getByRole('button', { name: '开始新对话' }).click();
   const input = page.getByRole('textbox', { name: '消息', exact: true });
   const card = page.getByRole('button', { name: '选择技能 ppt-master', exact: true });
-  await expect(card).toBeVisible();
-  await expect(card.locator('.skill-choice-name')).toHaveText('ppt-master');
-  await expect(card).not.toContainText('AI-driven presentation workflow');
-  await expect(card).toHaveAttribute('aria-pressed', 'false');
-  await card.click();
-  await expect(card).toHaveAttribute('aria-pressed', 'true');
+  const catalog = await page.request.get('/api/skills');
+  expect(await catalog.json()).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'ppt-master' })]));
+  await expect(card).toHaveCount(0);
+  await expect(page.locator('.skill-picker')).toHaveCount(0);
   await expect(input).toHaveValue('');
   await expect(page.getByRole('button', { name: '发送消息' })).toBeDisabled();
   await input.fill('给我一份汇报建议');
-  await card.click();
-  await expect(card).toHaveAttribute('aria-pressed', 'false');
-  await card.click();
   await expect(input).toHaveValue('给我一份汇报建议');
-  await expect(input).toBeFocused();
-  await page.screenshot({ path: '/private/tmp/skill-cards-desktop.png', fullPage: true });
-  /** 捕获真实流式发送请求，核验完整入口由前端拼接且输入框仍只保留真实需求。 */
+  /** 捕获真实流式发送请求，核验隐藏的技能不会注入普通用户消息。 */
   const request = page.waitForRequest(function isSend(value) { return value.method() === 'POST' && value.url().endsWith('/runs'); });
   await page.getByRole('button', { name: '发送消息' }).click();
   const sent = await request;
   const payload = sent.postDataJSON();
-  expect(payload.skills).toEqual(['ppt-master']);
-  expect(payload.content).toContain('【Skill：ppt-master】');
-  expect(payload.content).toContain('AI-driven presentation workflow');
-  expect(payload.content).toContain('【用户需求】\n给我一份汇报建议');
+  expect(payload.skills).toEqual([]);
+  expect(payload.content).toBe('给我一份汇报建议');
   await expect(page.locator('.message.user').last()).toContainText('给我一份汇报建议');
-  await expect(page.getByLabel('本条消息选择的技能')).toContainText('ppt-master');
-  await expect(card).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByLabel('本条消息选择的技能')).toHaveCount(0);
   await page.reload();
-  await expect(page.getByLabel('本条消息选择的技能')).toContainText('ppt-master');
-  await expect(page.locator('.message.user').last()).toContainText('AI-driven presentation workflow');
+  await expect(card).toHaveCount(0);
+  await expect(page.locator('.message.user').last()).toContainText('给我一份汇报建议');
 });
 
-/** 手机卡片可见且点按选择保持输入焦点，不产生横向溢出。 */
-test('手机技能卡片和输入法交互保持可用', async function mobileCards({ page }) {
+/** 手机上也隐藏 ppt-master，同时保持中文输入法交互和页面宽度正常。 */
+test('手机隐藏 ppt-master 后输入法交互保持可用', async function mobileCards({ page }) {
   await page.setViewportSize({ width: 390, height: 844 });
   await loginUser(page);
   await page.goto('/');
   const input = page.getByRole('textbox', { name: '消息', exact: true });
   const card = page.getByRole('button', { name: '选择技能 ppt-master', exact: true });
   await expect(input).toBeEnabled();
-  await expect(card).toBeVisible();
+  await expect(card).toHaveCount(0);
   const messagesBefore = await page.locator('.message.user').count();
   await input.fill('准备中文汇报');
   await input.dispatchEvent('compositionstart');
@@ -57,22 +47,18 @@ test('手机技能卡片和输入法交互保持可用', async function mobileCa
   await expect(input).toHaveValue(/准备中文汇报/);
   await expect(page.locator('.message.user')).toHaveCount(messagesBefore);
   await input.dispatchEvent('compositionend');
-  await card.click();
-  await expect(input).toBeFocused();
-  await expect(card).toHaveAttribute('aria-pressed', 'true');
-  /** 读取实际文档尺寸，确认卡片不会让手机页面横向滚动。 */
+  /** 读取实际文档尺寸，确认隐藏入口后手机页面没有横向滚动。 */
   expect(await page.evaluate(function widthFits() { return document.documentElement.scrollWidth <= window.innerWidth; })).toBe(true);
-  await page.screenshot({ path: '/private/tmp/skill-cards-mobile.png', fullPage: true });
 });
 
-/** 服务端拒绝或发送失败时，卡片选择与真实输入一起恢复且不覆盖等待期间的新草稿。 */
-test('发送失败恢复技能选择但不覆盖新草稿', async function restoreSelection({ page }) {
+/** 隐藏技能入口后，发送失败仍恢复真实输入且不覆盖等待期间的新草稿。 */
+test('隐藏技能入口后发送失败不覆盖新草稿', async function restoreSelection({ page }) {
   await loginUser(page);
   await page.goto('/');
   await page.getByRole('button', { name: '开始新对话' }).click();
   const input = page.getByRole('textbox', { name: '消息', exact: true });
   const card = page.getByRole('button', { name: '选择技能 ppt-master', exact: true });
-  await card.click();
+  await expect(card).toHaveCount(0);
   await input.fill('旧需求');
   /** 只拦截本次发送请求，模拟后端保存前失败。 */
   await page.route('**/runs', async function failRun(route) {
@@ -80,7 +66,6 @@ test('发送失败恢复技能选择但不覆盖新草稿', async function resto
   });
   await page.getByRole('button', { name: '发送消息' }).click();
   await expect(input).toHaveValue('旧需求');
-  await expect(card).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('alert')).toContainText('受控发送失败');
   await page.unroute('**/runs');
   await input.fill('新需求');
@@ -104,6 +89,6 @@ test('发送失败恢复技能选择但不覆盖新草稿', async function resto
   releaseFailure();
   await expect(page.getByRole('alert')).toContainText('迟到失败');
   await expect(input).toHaveValue('等待期间的新草稿');
-  await expect(card).toHaveAttribute('aria-pressed', 'false');
+  await expect(card).toHaveCount(0);
   await page.unroute('**/runs');
 });

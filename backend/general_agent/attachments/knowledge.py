@@ -480,7 +480,6 @@ def store_document_images(
             item['paragraph'], Jsonb(item.get('section', [])), item['location'],
             item['storage_name'], item['sha256'], item['mime'], item['width'], item['height'],
             item.get('caption') or '', item.get('description', ''),
-            Jsonb(item['provider_file']) if item.get('provider_file') else None,
             item['vision_status'], item.get('vision_model'), item.get('vision_revision'), item.get('vision_error'),
         )
         for item in images
@@ -489,9 +488,9 @@ def store_document_images(
         cursor.executemany(
             'INSERT INTO document_images('
             'id,attachment_id,ordinal,page,end_page,paragraph,section,location,storage_name,sha256,mime,'
-            'width,height,caption,description,provider_file,vision_status,'
+            'width,height,caption,description,vision_status,'
             'vision_model,vision_revision,vision_error'
-            ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+            ') VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
             rows,
         )
 

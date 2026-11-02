@@ -5,11 +5,9 @@ from io import BytesIO
 from pathlib import Path
 
 import httpx
-from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-from general_agent.app import create_app
 from tests.auth.support import authenticated_client
 from tests.attachments.test_attachments import attachment_documents, configure, configure_settings, document_tool_reply, document_tool_result
 from tests.conversation.test_streaming import wait_message

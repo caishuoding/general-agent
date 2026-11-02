@@ -2815,6 +2815,12 @@ select option {
 .admin-toolbar input[aria-label="搜索用户名"] { min-width: 240px; }
 .admin-toolbar button, .admin-conversation-search button { min-height: 42px; border-radius: 10px; padding: 8px 15px; }
 .admin-toolbar form button, .admin-conversation-search button { background: var(--teal-soft); color: var(--teal); font-weight: 650; }
+.admin-usage-summary { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; margin-bottom: 20px; padding: 18px 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.admin-usage-summary strong { color: var(--teal); font-size: 28px; line-height: 1.2; }
+.admin-usage-summary small { color: var(--muted); }
+.admin-usage-breakdown { display: flex; flex-wrap: wrap; gap: 24px 48px; width: 100%; margin-top: 14px; padding-top: 16px; border-top: 1px solid var(--line); }
+.admin-usage-breakdown > div { display: flex; flex-direction: column; gap: 5px; min-width: 125px; }
+.admin-usage-breakdown strong { font-size: 20px; }
 .admin-account-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
 .admin-account-card { display: grid; gap: 14px; min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: 0 8px 28px rgba(18, 56, 59, .04); }
 .admin-account-card > div:first-child { display: flex; align-items: center; gap: 10px; }

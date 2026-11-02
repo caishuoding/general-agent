@@ -14,6 +14,30 @@ from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.infrastructure.settings import StoredSettings
 
 
+# GLM-5.3-Flash 官方 processor_config 的默认上限为每图 8000 个视觉 Token；另留协议余量。
+IMAGE_INPUT_RESERVE = 8192
+
+
+def text_budget_messages(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """提取消息文字并统计原图，避免将 Base64 传输字节误作文字 Token 或摘要正文。"""
+    result: list[dict[str, Any]] = []
+    images = 0
+    for message in messages:
+        item = dict(message)
+        content = item.get('content')
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get('type') == 'image_url':
+                    images += 1
+                    parts.append({'type': 'text', 'text': '[原图：需要时重新读取对应资料；图片内容不转为文字。]'})
+                else:
+                    parts.append(part)
+            item['content'] = parts
+        result.append(item)
+    return result, images
+
+
 class _Registration(BaseModel):
     """声明一个精确连接与模型对应的本地官方分词数据。"""
 
@@ -125,8 +149,9 @@ class TokenCounter:
         return max(0, settings.context_window_tokens - settings.output_reserve_tokens - LIMITS.context_protocol_reserve_tokens)
 
     def request_tokens(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
-        """计算调用方提供的协议字段；Agent 私有字段须在进入这里前移除。"""
-        return self.count(json.dumps({'messages': messages, 'tools': tools}, ensure_ascii=False))
+        """计数文字协议并按每图上限预留视觉预算；图片实际占用仍以模型 usage 为准。"""
+        text, images = text_budget_messages(messages)
+        return self.count(json.dumps({'messages': text, 'tools': tools}, ensure_ascii=False)) + images * IMAGE_INPUT_RESERVE
 
     def available(self, settings: StoredSettings, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
         """按实际外发请求核算剩余输入计数；整轮精确用量仍以模型 usage 为准。"""

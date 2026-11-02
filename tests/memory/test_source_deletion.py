@@ -4,9 +4,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
 from tests.auth.support import admin_client, authenticated_client
 from tests.fake_mem0 import CallableTransport
 from tests.memory.test_memory import configure_memory, memory_provider, configure_memory_settings
@@ -59,15 +57,14 @@ def test_attachment_delete_clears_search_links_and_original_file(database_url: s
         """模型先调用搜索工具，再根据真实结果回答。"""
         payload = json.loads(request.content)
         if request.url.host == 'search.example':
-            return httpx.Response(200, json={'results': [{'url': 'https://service.example', 'title': '附近服务', 'summary': '公开结果'}]})
+            return httpx.Response(200, json={'search_result': [{'link': 'https://service.example', 'title': '附近服务', 'content': '公开结果'}]})
         messages = tool_messages(payload)
         if messages:
             source = json.loads(messages[-1]['content'])['results'][0]
             return reply(payload, f'附近服务。[{source["key"]}]')
         if payload.get('tools'):
             return tool_call('search_web', {
-                'query': '删除测试私密住址附近服务',
-                'ori_question': '联网搜索：根据资料查询服务',
+                'query': '删除测试私密住址附近服务'
             })
         return reply(payload, '普通回答。')
 

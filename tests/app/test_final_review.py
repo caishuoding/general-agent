@@ -5,9 +5,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
 from tests.auth.support import authenticated_client
 from tests.memory.test_memory import configure_memory, configure_memory_settings
 from tests.memory.test_memory_recall import recall_provider
@@ -27,8 +25,8 @@ def test_public_memory_topics_do_not_read_private_long_term_memory(database_url:
             embeddings.append(payload)
             return recall_provider(request)
         if request.url.host == 'search.example':
-            queries.append(payload['query'])
-            return httpx.Response(200, json={'results': []})
+            queries.append(payload['search_query'])
+            return httpx.Response(200, json={'search_result': []})
         messages = tool_messages(payload)
         if messages:
             return reply(payload, '公开主题回答。')
@@ -39,7 +37,6 @@ def test_public_memory_topics_do_not_read_private_long_term_memory(database_url:
             if content.startswith('联网搜索：'):
                 return tool_call('search_web', {
                     'query': content.removeprefix('联网搜索：'),
-                    'ori_question': content,
                 })
             return reply(payload, '公开主题回答。')
         return reply(payload, '公开主题回答。')

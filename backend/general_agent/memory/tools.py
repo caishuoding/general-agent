@@ -8,7 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from general_agent.memory.service import MemoryService
 from general_agent.memory.correction import MemoryCorrection
 from general_agent.memory.deletion import MemoryDeletion
-from general_agent.memory.automatic import AutomaticMemory, MemoryCheckpoint
+from general_agent.memory.automatic import AutomaticMemory
+from general_agent.agent.repository import RunCheckpoint
 from general_agent.infrastructure.settings import StoredSettings
 from general_agent.prompts import TOOL_DESCRIPTIONS
 from general_agent.search.service import FetchWebInput, SearchService, SearchWebInput, search_web_tool
@@ -61,7 +62,7 @@ def shared_tools(knowledge: bool = False, documents: bool = False) -> list[dict[
 
 
 def agent_tools(knowledge: bool = False, documents: bool = False) -> list[dict[str, Any]]:
-    """按会话资料可用性返回业务工具定义；包含记忆工具，编排工具由外层另行附加。"""
+    """按会话资料可用性返回业务工具定义；包含记忆工具，编排与 Skill 工具由统一注册表附加。"""
     return [*memory_tools(), *shared_tools(knowledge, documents)]
 
 
@@ -75,12 +76,12 @@ class MemoryTools:
 
     def __init__(self, memory: MemoryService, automatic: AutomaticMemory, search: SearchService | None = None,
                  attachments: AttachmentService | None = None, knowledge: KnowledgeTools | None = None) -> None:
-        """绑定各自独立的记忆、搜索、附件与知识库边界，兼容既有独立工具测试。"""
+        """绑定记忆、搜索、附件与知识库依赖；未提供的资料工具不能执行。"""
         self.memory, self.automatic, self.web_search = memory, automatic, search
         self.attachments = attachments
         self.knowledge = knowledge
 
-    def add(self, checkpoint: MemoryCheckpoint, arguments: dict[str, Any]) -> dict[str, Any]:
+    def add(self, checkpoint: RunCheckpoint, arguments: dict[str, Any]) -> dict[str, Any]:
         """从已持久化的少量会话构造 Mem0 输入；工具参数不能伪造记忆正文，返回实际处理状态。"""
         AddMemoryInput.model_validate(arguments)
         checkpoint.guard()
@@ -98,7 +99,7 @@ class MemoryTools:
             raise ValueError(detail)
         return {'status': 'complete', 'action': 'memory_added', 'detail': detail}
 
-    def search(self, checkpoint: MemoryCheckpoint, query: str) -> dict[str, Any]:
+    def search(self, checkpoint: RunCheckpoint, query: str) -> dict[str, Any]:
         """通过 Mem0 混合召回或本地列表取得有效记忆，再核对业务版本并登记观察。"""
         checkpoint.guard()
         account_id = self.memory.account_id_for_conversation(checkpoint.conversation_id)
@@ -125,14 +126,14 @@ class MemoryTools:
 
     def execute(
         self,
-        checkpoint: MemoryCheckpoint,
+        checkpoint: RunCheckpoint,
         name: str,
         arguments: dict[str, Any],
         settings: StoredSettings,
         document_budget: int = 0,
         token_counter: TokenCounter | None = None,
     ) -> dict[str, Any]:
-        """执行授权工具；文档阅读使用当前回答 LLM 计数，记忆变更核对观察版本。"""
+        """在当前 Agent Run 授权范围内执行工具；文档阅读核对预算，记忆变更核对观察版本。"""
         checkpoint.guard()
         if name == 'search_knowledge':
             if self.knowledge is None:
@@ -166,7 +167,6 @@ class MemoryTools:
                 query,
                 checkpoint.operation,
                 kind="search" if name == "search_web" else "fetch",
-                ori_question=search_input.ori_question if search_input is not None else None,
             )
         if name not in ('update_memory', 'delete_memory'):
             raise ValueError('未知的工具。')

@@ -12,8 +12,7 @@ import httpx
 import psycopg
 from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
-from general_agent.conversation.progress import connection_retry_progress, tool_progress
+from general_agent.chat.progress import connection_retry_progress, tool_progress
 from tests.auth.support import authenticated_client, set_global_settings
 
 
@@ -74,7 +73,7 @@ def test_stream_is_visible_before_completion_and_survives_restart(database_url: 
         payload = json.loads(request.content)
         assert payload["stream"] is True
         assert payload["stream_options"] == {"include_usage": True}
-        assert payload["parallel_tool_calls"] is True
+        assert payload["tool_stream"] is True
         assert len([item for item in payload["messages"] if item["role"] == "system"]) == 1
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ControlledStream(release))
 
@@ -202,7 +201,7 @@ def test_interrupted_answer_automatically_resumes_from_visible_prefix(database_u
     with authenticated_client(database_url, tmp_path, httpx.MockTransport(provider)) as client:
         conversation_id = configure(client)
         client.post(f"/api/conversations/{conversation_id}/runs", json={"content": "hello"})
-        complete = wait_message(client, conversation_id, "complete", "first [[STREAM_RESUMED]]second")
+        wait_message(client, conversation_id, "complete", "first [[STREAM_RESUMED]]second")
         detail = client.get(f"/api/conversations/{conversation_id}").json()
         assert [(item["role"], item["status"]) for item in detail["messages"]] == [("user", "complete"), ("assistant", "complete")]
         calls = [item for item in client.get("/api/usage").json() if item["total_tokens"] is not None]
@@ -266,8 +265,8 @@ def test_stream_error_keeps_usage_without_exposing_provider_details(database_url
         assert (call["status"], call["total_tokens"]) == ("failed", 4)
 
 
-def test_restart_cancels_only_legacy_generations_without_checkpoints(database_url: str, tmp_path: Path) -> None:
-    """重启终结旧版生成并取消其操作，同时保留新版本可继续回答的外发许可。"""
+def test_restart_pauses_main_and_child_runs_without_revoking_outbound_authority(database_url: str, tmp_path: Path) -> None:
+    """重启暂停主从执行与多个回答，保留原操作、搜索授权和执行剩余期限。"""
     configure_global_model(database_url, tmp_path)
 
     def failing_provider(request: httpx.Request) -> httpx.Response:
@@ -276,23 +275,23 @@ def test_restart_cancels_only_legacy_generations_without_checkpoints(database_ur
 
     transport = httpx.MockTransport(failing_provider)
     with authenticated_client(database_url, tmp_path, transport) as client:
-        legacy = configure(client)
+        recovering = configure(client)
         resumable = configure(client)
 
-    legacy_operation, resumable_operation, child_operation = uuid4(), uuid4(), uuid4()
-    legacy_message, resumable_message = uuid4(), uuid4()
+    recovering_operation, resumable_operation, child_operation = uuid4(), uuid4(), uuid4()
+    recovering_message, resumable_message = uuid4(), uuid4()
     root_agent, root_run, child_agent, child_run = uuid4(), uuid4(), uuid4(), uuid4()
     resumable_agent, resumable_run = uuid4(), uuid4()
     with psycopg.connect(database_url) as connection:
         user_id = connection.execute(
             "SELECT user_id FROM conversations WHERE id=%s",
-            (legacy,),
+            (recovering,),
         ).fetchone()
         assert user_id is not None
         for operation_id, conversation_id, purpose in (
-            (legacy_operation, legacy, "legacy answer"),
+            (recovering_operation, recovering, "recovering answer"),
             (resumable_operation, resumable, "resumable answer"),
-            (child_operation, legacy, "legacy child"),
+            (child_operation, recovering, "recovering child"),
         ):
             connection.execute(
                 "INSERT INTO cloud_operations(id,scope_hash,purpose,conversation_id,user_id) "
@@ -300,9 +299,9 @@ def test_restart_cancels_only_legacy_generations_without_checkpoints(database_ur
                 (operation_id, str(operation_id), purpose, conversation_id, user_id[0]),
             )
         connection.execute(
-            "INSERT INTO messages(id,conversation_id,role,content,status,operation_id) "
-            "VALUES(%s,%s,'assistant','', 'generating',%s)",
-            (legacy_message, legacy, legacy_operation),
+            "INSERT INTO messages(id,conversation_id,role,content,status,operation_id,resume_model_revision) "
+            "VALUES(%s,%s,'assistant','', 'generating',%s,'test-revision')",
+            (recovering_message, recovering, recovering_operation),
         )
         connection.execute(
             "INSERT INTO messages(id,conversation_id,role,content,status,operation_id,resume_model_revision) "
@@ -312,21 +311,21 @@ def test_restart_cancels_only_legacy_generations_without_checkpoints(database_ur
         connection.execute(
             "INSERT INTO agents(id,answer_attempt_id,account_id,conversation_id,title,deadline) "
             "VALUES(%s,%s,%s,%s,'主智能体',CURRENT_TIMESTAMP + INTERVAL '10 minutes')",
-            (root_agent, legacy_message, user_id[0], legacy),
+            (root_agent, recovering_message, user_id[0], recovering),
         )
         connection.execute(
             "INSERT INTO agent_runs(id,agent_id,sequence,operation_id,request_key,task,status,deadline) "
             "VALUES(%s,%s,1,%s,'main','主回答','running',CURRENT_TIMESTAMP + INTERVAL '10 minutes')",
-            (root_run, root_agent, legacy_operation),
+            (root_run, root_agent, recovering_operation),
         )
         connection.execute(
             "INSERT INTO agents(id,answer_attempt_id,account_id,conversation_id,parent_agent_id,title,deadline) "
             "VALUES(%s,%s,%s,%s,%s,'子智能体',CURRENT_TIMESTAMP + INTERVAL '10 minutes')",
-            (child_agent, legacy_message, user_id[0], legacy, root_agent),
+            (child_agent, recovering_message, user_id[0], recovering, root_agent),
         )
         connection.execute(
             "INSERT INTO agent_runs(id,agent_id,sequence,operation_id,request_key,task,status,deadline) "
-            "VALUES(%s,%s,1,%s,'legacy-child','查询','running',CURRENT_TIMESTAMP + INTERVAL '10 minutes')",
+            "VALUES(%s,%s,1,%s,'recovering-child','查询','running',CURRENT_TIMESTAMP + INTERVAL '10 minutes')",
             (child_run, child_agent, child_operation),
         )
         connection.execute(
@@ -342,19 +341,19 @@ def test_restart_cancels_only_legacy_generations_without_checkpoints(database_ur
         connection.execute(
             "INSERT INTO search_requests(id,operation_id,conversation_id,user_id,message_id,query,search_revision,status) "
             "VALUES(%s,%s,%s,%s,%s,'未完成查询','test','approved')",
-            (uuid4(), child_operation, legacy, user_id[0], legacy_message),
+            (uuid4(), child_operation, recovering, user_id[0], recovering_message),
         )
 
     with authenticated_client(database_url, tmp_path, transport) as restarted:
-        legacy_messages = restarted.get(f"/api/conversations/{legacy}").json()["messages"]
+        recovering_messages = restarted.get(f"/api/conversations/{recovering}").json()["messages"]
         resumable_messages = restarted.get(f"/api/conversations/{resumable}").json()["messages"]
-        assert legacy_messages[-1]["status"] == "failed"
+        assert recovering_messages[-1]["status"] == "interrupted"
         assert resumable_messages[-1]["status"] == "interrupted"
 
     with psycopg.connect(database_url) as connection:
         cancelled = connection.execute(
             "SELECT id,cancelled FROM cloud_operations WHERE id=ANY(%s)",
-            ([legacy_operation, resumable_operation, child_operation],),
+            ([recovering_operation, resumable_operation, child_operation],),
         ).fetchall()
         runs = connection.execute(
             "SELECT id,status,paused_at FROM agent_runs WHERE id=ANY(%s)",
@@ -364,9 +363,9 @@ def test_restart_cancels_only_legacy_generations_without_checkpoints(database_ur
             "SELECT status FROM search_requests WHERE operation_id=%s",
             (child_operation,),
         ).fetchone()
-    assert dict(cancelled) == {legacy_operation: True, resumable_operation: False, child_operation: True}
+    assert dict(cancelled) == {recovering_operation: False, resumable_operation: False, child_operation: False}
     run_statuses = {row[0]: row[1] for row in runs}
     paused = {row[0]: row[2] for row in runs}
-    assert run_statuses == {root_run: 'cancelled', child_run: 'cancelled', resumable_run: 'running'}
-    assert paused[root_run] is None and paused[child_run] is None and paused[resumable_run] is not None
-    assert search_status == ('cancelled',)
+    assert run_statuses == {root_run: 'running', child_run: 'running', resumable_run: 'running'}
+    assert paused[root_run] is not None and paused[child_run] is not None and paused[resumable_run] is not None
+    assert search_status == ('approved',)

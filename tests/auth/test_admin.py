@@ -10,9 +10,7 @@ from psycopg.rows import dict_row
 
 from general_agent.app import create_app
 from tests.auth.support import (
-    TEST_ADMIN_PASSWORD,
     admin_client,
-    login_admin,
     login_and_change_password,
 )
 

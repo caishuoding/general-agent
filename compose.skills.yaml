@@ -22,7 +22,7 @@ services:
       dockerfile: deploy/skills/egress.Dockerfile
     restart: unless-stopped
     environment:
-      SKILL_EGRESS_DOH: ${SKILL_EGRESS_DOH:-}
+      SKILL_EGRESS_DOH: ${SKILL_EGRESS_DOH-https://dns.google/resolve}
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

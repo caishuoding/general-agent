@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Thread
-from time import sleep, time
+from time import sleep
 from uuid import uuid4
 
 import psycopg
@@ -27,17 +27,14 @@ class ControlledModel(BaseHTTPRequestHandler):
     attempts: dict[str, int] = {}
 
     def do_POST(self) -> None:
-        """支持 Files、资料读取、零参数等待和被动交付，保留慢速与断流验收。"""
+        """支持带基础路径的智谱搜索、主从交付及断流后仅续写未完成正文。"""
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        if self.path == '/files':
-            self.send_json({'id': 'file-api-document-browser', 'created_at': int(time()), 'expires_at': int(time()) + 2592000})
-            return
         payload = json.loads(raw)
-        if self.path == '/v1/tools/search':
-            self.send_json({'results': [
-                {'url': 'https://docs.bigmodel.cn/cn/guide/start/pricing', 'title': 'API 定价 - 智谱AI开放文档', 'summary': '官方定价'},
-                {'url': 'https://docs.bigmodel.cn/cn/guide/start/pricing.md', 'title': '', 'summary': '同一页面的 Markdown 版本'},
-                {'url': 'https://bigmodel.cn/pricing', 'title': '模型 API 价格', 'summary': '模型价格'},
+        if self.path.rstrip('/').endswith('/web_search'):
+            self.send_json({'search_result': [
+                {'link': 'https://docs.bigmodel.cn/cn/guide/start/pricing', 'title': 'API 定价 - 智谱AI开放文档', 'content': '官方定价'},
+                {'link': 'https://docs.bigmodel.cn/cn/guide/start/pricing.md', 'title': '', 'content': '同一页面的 Markdown 版本'},
+                {'link': 'https://bigmodel.cn/pricing', 'title': '模型 API 价格', 'content': '模型价格'},
             ]})
             return
         if not payload.get('stream') and any(isinstance(item.get('content'), list) for item in payload['messages']):
@@ -45,7 +42,12 @@ class ControlledModel(BaseHTTPRequestHandler):
             return
         prompt = next((message['content'] for message in reversed(payload['messages'])
                        if message['role'] == 'user' and isinstance(message.get('content'), str)
-                       and not message['content'].startswith('{"type": "subagent_results"')), '')
+                       and not message['content'].startswith('{"type": "subagent_results"')
+                       and '不要重复已经输出的内容' not in message['content']), '')
+        continuing = any(message.get('role') == 'user'
+                         and isinstance(message.get('content'), str)
+                         and '不要重复已经输出的内容' in message['content']
+                         for message in payload['messages'])
         if prompt == '__multi_agent_browser__':
             results = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
             visible = []
@@ -78,7 +80,7 @@ class ControlledModel(BaseHTTPRequestHandler):
             tool_messages = [json.loads(item['content']) for item in payload['messages'] if item['role'] == 'tool']
             if not tool_messages:
                 self.send_agent_reply({'tool_calls': [{'id': 'browser-search', 'type': 'function', 'function': {
-                    'name': 'search_web', 'arguments': json.dumps({'query': '智谱 API 定价', 'ori_question': '查询官方定价'})}}]})
+                    'name': 'search_web', 'arguments': json.dumps({'query': '智谱 API 定价'})}}]})
             else:
                 sources = tool_messages[-1].get('results', [])
                 self.send_agent_reply({'content': '## 子智能体结论\n\n- 已完成官方来源核验\n\n**子智能体公开交付结果。**[' + sources[0]['key'] + ']'})
@@ -130,6 +132,8 @@ class ControlledModel(BaseHTTPRequestHandler):
         slow = "分段" in prompt or "停止" in prompt or "断流" in prompt
         first = "第一段" if slow else "这是受控"
         second = "，第二段。" if slow else "模型的测试回答。"
+        if continuing:
+            first = ''
         if document_reply is not None:
             first, second = document_reply, ""
         self.write_event({"choices": [{"delta": {"content": first}}]})

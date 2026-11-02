@@ -11,7 +11,6 @@ import httpx
 import psycopg
 from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
 from tests.auth.support import authenticated_client
 from tests.memory.test_memory import configure_memory, explicit_memory_request, memory_final_answer, memory_provider, configure_memory_settings
 from tests.conversation.test_streaming import wait_message
@@ -24,7 +23,7 @@ def json_reply(value: Any, *, stream: bool = False) -> httpx.Response:
         return httpx.Response(200, text='data: ' + json.dumps(event, ensure_ascii=False) + '\n\ndata: [DONE]\n\n')
     return httpx.Response(200, json={'choices': [{'message': {'role': 'assistant', 'content': content}}], 'usage': {'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}})
 def tool_reply(name: str, arguments: dict[str, Any], *, stream: bool = False) -> httpx.Response:
-    """模拟标准函数调用并携带 DeepSeek 推理续传字段。"""
+    """模拟标准函数调用并携带 标准推理字段。"""
     if stream:
         events = [
             {'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'call_' + name, 'type': 'function', 'function': {'name': name, 'arguments': ''}}]}}]},

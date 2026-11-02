@@ -35,9 +35,9 @@ from general_agent.skills.api import skill_router
 from general_agent.skills.selection import selected_skill_names
 from general_agent.infrastructure.operations import OperationContext, OperationService
 from general_agent.infrastructure.calls import CallGateway
-from general_agent.conversation.chat import ChatService
-from general_agent.conversation.execution import ChatExecution
-from general_agent.agent.conversation import ConversationGraph
+from general_agent.agent.runner import AgentRunner
+from general_agent.chat.service import ChatService
+from general_agent.chat.services import ChatServices
 from general_agent.memory.service import MemoryService
 from general_agent.memory.automatic_api import native_memory_router
 from general_agent.memory.correction import MemoryCorrection
@@ -49,7 +49,7 @@ from general_agent.infrastructure.logging import configure_agent_logging
 from general_agent.infrastructure.tracing import configure_tracing
 from general_agent.memory.embedding import EmbeddingConfiguration
 from general_agent.infrastructure.provider import ModelClient, ModelFailure
-from general_agent.conversation.streaming import StreamingChat
+from general_agent.chat.streaming import StreamingChat
 from general_agent.search.service import SearchService, SearchSettingsInput
 from general_agent.infrastructure.settings import (PublicSettings, SettingsInput, SettingsStore, EmbeddingSettingsInput, EmbeddingSettingsStore, PublicEmbeddingSettings)
 
@@ -140,22 +140,21 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     model = CallGateway(operations, ModelClient(model_transport))
     memory = MemoryService(database, embedding_configuration, model, settings.directory, mem0_transport)
     attachments = AttachmentService(database, settings.directory, model_transport)
-    knowledge = KnowledgeService(database, settings.directory, attachments, model, model_transport)
+    knowledge = KnowledgeService(database, settings.directory, model, model_transport)
     search_settings = SettingsStore(settings.directory, 'search.json')
     search = SearchService(database, model, search_settings, memory, attachments, model_transport)
-    execution = ChatExecution(model, memory, search, KnowledgeTools(knowledge))
+    services = ChatServices(memory, search, KnowledgeTools(knowledge))
     checkpoints = Checkpoints(database)
-    execution.agent_runtime.checkpoints = checkpoints
-    conversation_graph = ConversationGraph(database, execution, checkpoints)
-    skill_runtime = execution.agent_runtime.skills
+    runner = AgentRunner(services, checkpoints)
+    skill_runtime = runner.skill_runtime
     source_deletion = SourceDeletion(
-        execution.deletion,
+        services.deletion,
         memory,
         attachments.delete_file,
-        skill_runtime.delete_conversation if skill_runtime is not None else None,
+        skill_runtime.delete_conversation,
     )
-    chat = ChatService(database, execution, attachments, conversation_graph)
-    streaming = StreamingChat(database, execution, attachments, conversation_graph)
+    chat = ChatService(database, runner, attachments)
+    streaming = StreamingChat(database, runner, attachments)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -163,9 +162,8 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         database.migrate()
         checkpoints.setup()
         streaming.recover()
-        execution.agent_runtime.orchestrator.recover()
-        if execution.agent_runtime.skills is not None:
-            execution.agent_runtime.skills.recover()
+        runner.orchestrator.recover()
+        runner.skill_runtime.recover()
         attachments.recover()
         knowledge.recover()
         source_deletion.recover()
@@ -180,8 +178,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
                     try:
                         await asyncio.to_thread(attachments.expire)
                         await asyncio.to_thread(checkpoints.prune)
-                        if execution.agent_runtime.skills is not None:
-                            await asyncio.to_thread(execution.agent_runtime.skills.maintain)
+                        await asyncio.to_thread(runner.skill_runtime.maintain)
                     except Exception:
                         # 暂时不可用的数据库留待下一轮，不终止后续清理。
                         logging.getLogger(__name__).exception('附件到期清理暂未完成')
@@ -193,7 +190,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
                     await asyncio.wait_for(stopped.wait(), timeout=1)
                 except TimeoutError:
                     try:
-                        await asyncio.to_thread(execution.agent_runtime.heartbeat)
+                        await asyncio.to_thread(runner.heartbeat)
                     except Exception:
                         logging.getLogger(__name__).exception('执行心跳暂未保存')
 
@@ -206,9 +203,8 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
             await expiration
             await heartbeat
             await asyncio.to_thread(streaming.close)
-            await asyncio.to_thread(execution.agent_runtime.orchestrator.close)
-            if execution.agent_runtime.skills is not None:
-                await asyncio.to_thread(execution.agent_runtime.skills.close)
+            await asyncio.to_thread(runner.orchestrator.close)
+            await asyncio.to_thread(runner.skill_runtime.close)
             await asyncio.to_thread(knowledge.close)
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
@@ -217,12 +213,11 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     app.include_router(admin_router(auth, database, attachments, memory, knowledge))
     app.include_router(attachment_router(attachments))
     app.include_router(knowledge_router(knowledge))
-    if execution.agent_runtime.skills is not None:
-        app.include_router(skill_router(execution.agent_runtime.skills))
+    app.include_router(skill_router(runner.skill_runtime))
     app.include_router(source_deletion_router(source_deletion))
     app.include_router(correction_router(MemoryCorrection(memory)))
-    app.include_router(native_memory_router(execution.automatic,settings))
-    app.include_router(deletion_router(execution.deletion))
+    app.include_router(native_memory_router(services.automatic,settings))
+    app.include_router(deletion_router(services.deletion))
     app.state.calls = model
     app.state.operations = operations
     app.state.auth = auth
@@ -296,14 +291,14 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.get('/api/settings/search', response_model=PublicSettings)
     def get_search_settings(request: Request) -> PublicSettings:
-        """展示独立 DeepSeek 搜索与抓取配置状态，旧供应商凭据不会被误当作可用。"""
+        """展示独立智谱搜索与网页读取配置状态，旧供应商凭据不会被误当作可用。"""
         require_admin(request)
         saved = search_settings.read()
-        return saved.public() if saved and saved.model == 'deepseek-search' else PublicSettings(base_url='https://api.deepseek.com',model='deepseek-search')
+        return saved.public() if saved and saved.model == 'zhipu-web' else PublicSettings(base_url='https://open.bigmodel.cn/api/paas/v4',model='zhipu-web')
 
     @app.put('/api/settings/search', response_model=PublicSettings)
     def save_search_settings(body: SearchSettingsInput, request: Request) -> PublicSettings:
-        """保存 DeepSeek 连接，仅同供应商同地址允许留空保留密钥，保存不联网。"""
+        """保存智谱联网工具连接，仅同供应商同地址允许留空保留密钥，保存不联网。"""
         require_admin(request)
         try:
             previous = search_settings.read()
@@ -392,11 +387,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     def message_skill_names(body: MessageInput) -> list[str]:
         """同步与流式入口共用名称校验，完整 Skill 正文由前端放入用户输入。"""
-        runtime = execution.agent_runtime.skills
-        if runtime is None:
-            if body.skills:
-                raise HTTPException(422, '技能目录不可用，请刷新后重试。')
-            return []
+        runtime = runner.skill_runtime
         try:
             return selected_skill_names(runtime.service.catalog, body.skills, body.content)
         except ValueError as error:
@@ -415,7 +406,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         def send(operation: OperationContext) -> None:
             """把包含完整 Skill 正文的用户消息交给同步回答流程。"""
             chat.send(conversation_id, account_id, body.content, saved, operation, skills)
-        scope = [*execution.scope(body.content,saved), skills] if skills else execution.scope(body.content,saved)
+        scope = [*services.scope(body.content,saved), skills] if skills else services.scope(body.content,saved)
         return perform_run("chat", scope, operation_id, conversation_id, account_id, send, 200)
 
     @app.post("/api/conversations/{conversation_id}/runs", status_code=202)
@@ -431,7 +422,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         def start(operation: OperationContext) -> None:
             """后台保存包含完整 Skill 正文的用户消息及技能名称。"""
             streaming.start(conversation_id, account_id, body.content, saved, operation, skills)
-        scope = [*execution.scope(body.content,saved), skills] if skills else execution.scope(body.content,saved)
+        scope = [*services.scope(body.content,saved), skills] if skills else services.scope(body.content,saved)
         return perform_run("chat_stream", scope, operation_id, conversation_id, account_id, start)
 
     @app.post("/api/conversations/{conversation_id}/messages/{message_id}/retry", status_code=202)
@@ -451,7 +442,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
             raise HTTPException(404,str(error)) from None
         with database.connect() as connection:
             original = connection.execute('SELECT content,skill_names FROM messages WHERE id=%s',(source['reply_to'],)).fetchone()
-        scope = [str(message_id), execution.scope(str(original['content']) if original else '',saved),
+        scope = [str(message_id), services.scope(str(original['content']) if original else '',saved),
                  original['skill_names'] if original else []]
         return perform_run("chat_retry", scope, operation_id, conversation_id, account_id, retry)
 
@@ -509,7 +500,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         """按账号与回答授权返回子智能体完整只读会话，不暴露内部模型消息。"""
         account_id = current_user(request).id
         streaming.message(conversation_id, account_id, message_id)
-        execution.agent_runtime.repository.validate_detail(message_id)
+        runner.repository.validate_detail(message_id)
         with database.connect() as connection:
             rows = connection.execute('SELECT a.id AS agent_id,a.title,r.id AS run_id,r.sequence,r.task,r.status,r.result,r.error,r.created_at,r.started_at,r.finished_at,EXISTS (SELECT 1 FROM agent_inbox_events e WHERE e.sender_run_id=r.id AND e.delivery_id IS NOT NULL) AS delivered FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE a.id=%s AND a.answer_attempt_id=%s AND a.account_id=%s AND a.conversation_id=%s AND a.parent_agent_id IS NOT NULL ORDER BY r.sequence', (agent_id, message_id, account_id, conversation_id)).fetchall()
             if not rows:
@@ -533,7 +524,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         """按账号及回答授权读取最新子任务结果，不暴露模型消息或推理。"""
         account_id = current_user(request).id
         streaming.message(conversation_id, account_id, message_id)
-        execution.agent_runtime.repository.validate_detail(message_id)
+        runner.repository.validate_detail(message_id)
         with database.connect() as connection:
             row = connection.execute('SELECT a.id AS agent_id,a.title,r.id AS run_id,r.task,r.status,r.result,r.error FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE a.id=%s AND a.answer_attempt_id=%s AND a.account_id=%s AND a.conversation_id=%s AND a.parent_agent_id IS NOT NULL ORDER BY r.sequence DESC LIMIT 1', (agent_id,message_id,account_id,conversation_id)).fetchone()
         if row is None:

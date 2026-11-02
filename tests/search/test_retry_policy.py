@@ -31,7 +31,7 @@ def test_permanent_failure_blocks_repeated_url_but_allows_another(
                     'message': 'private-provider-detail (request_id: request-404)',
                     'type': 'not_found_error', 'code': 'invalid_request_error',
                 }})
-            return httpx.Response(200, json={'title': '可读页面', 'content': '已核验正文'})
+            return httpx.Response(200, json={'reader_result': {'title': '可读页面', 'content': '已核验正文'}})
         messages = tool_messages(payload)
         if not messages:
             return tool_call('fetch_web', {'url': 'https://blocked.example/page'}, 'first')
@@ -80,7 +80,7 @@ def test_credentials_or_balance_failure_disables_both_web_tools(
         result = json.loads(messages[-1]['content'])
         assert result['tool_disabled'] is True and result['retryable'] is False
         if len(messages) == 1:
-            return tool_call('search_web', {'query': '换个工具', 'ori_question': '查询网页'}, 'forged')
+            return tool_call('search_web', {'query': '换个工具'}, 'forged')
         assert result['cached_failure'] is True
         return structured_text('联网配置需要处理。')
 
@@ -108,7 +108,7 @@ def test_transient_failure_is_retried_before_model_receives_result(
             attempts += 1
             if attempts == 1:
                 return httpx.Response(status_code, headers={'Retry-After': '0'}, json={'error': {'code': 'temporary'}})
-            return httpx.Response(200, json={'title': '新闻', 'content': '可读取正文'})
+            return httpx.Response(200, json={'reader_result': {'title': '新闻', 'content': '可读取正文'}})
         model_turns += 1
         messages = tool_messages(payload)
         if not messages:
@@ -232,7 +232,7 @@ def test_new_answer_does_not_reuse_previous_non_retryable_failure(database_url: 
             attempts += 1
             if attempts == 1:
                 return httpx.Response(404, json={'error': {'code': 'not_found'}})
-            return httpx.Response(200, json={'title': '恢复后的页面', 'content': '现在可读取'})
+            return httpx.Response(200, json={'reader_result': {'title': '恢复后的页面', 'content': '现在可读取'}})
         last_user = max(index for index, item in enumerate(payload['messages']) if item['role'] == 'user')
         current = [item for item in payload['messages'][last_user + 1:] if item['role'] == 'tool']
         if not current:
@@ -263,10 +263,10 @@ def test_backend_retry_checks_agent_budget_and_finishes_reservation(
     exhausted_tool = exhausted_kind + '_web'
     other_tool = 'search_web' if exhausted_kind == 'fetch' else 'fetch_web'
     exhausted_arguments = ({'url': 'https://news.example'} if exhausted_kind == 'fetch'
-                           else {'query': '核查资料', 'ori_question': '核查资料'})
+                           else {'query': '核查资料'})
     repeated_arguments = ({'url': 'https://news.example/another'} if exhausted_kind == 'fetch'
-                          else {'query': '换个查询', 'ori_question': '核查资料'})
-    other_arguments = ({'query': '可用来源', 'ori_question': '查询可用来源'} if other_tool == 'search_web'
+                          else {'query': '换个查询'})
+    other_arguments = ({'query': '可用来源'} if other_tool == 'search_web'
                        else {'url': 'https://news.example/available'})
     label = '抓取' if exhausted_kind == 'fetch' else '搜索'
 
@@ -281,9 +281,9 @@ def test_backend_retry_checks_agent_budget_and_finishes_reservation(
                 return httpx.Response(503, json={'error': {'code': 'temporary'}})
             other_attempts += 1
             if kind == 'fetch':
-                return httpx.Response(200, json={'title': '可用来源', 'content': '已核验'})
-            return httpx.Response(200, json={'results': [{'url': 'https://news.example/available',
-                                                          'title': '可用来源', 'summary': '已核验'}]})
+                return httpx.Response(200, json={'reader_result': {'title': '可用来源', 'content': '已核验'}})
+            return httpx.Response(200, json={'search_result': [{'link': 'https://news.example/available',
+                                                          'title': '可用来源', 'content': '已核验'}]})
         messages = tool_messages(payload)
         if not messages:
             return tool_call(exhausted_tool, exhausted_arguments, 'first')
@@ -331,7 +331,7 @@ def test_parallel_subagents_receive_errors_and_independently_block_repeated_fetc
                 urls.append(payload['url'])
             if payload['url'] == 'https://blocked.example':
                 return httpx.Response(404, json={'error': {'code': 'not_found'}})
-            return httpx.Response(200, json={'title': '可用证据', 'content': '经核验的事实'})
+            return httpx.Response(200, json={'reader_result': {'title': '可用证据', 'content': '经核验的事实'}})
         main = any(tool['function']['name'] == 'spawn_agent' for tool in payload.get('tools', []))
         messages = tool_messages(payload)
         if main:
@@ -385,11 +385,11 @@ def test_five_different_404s_do_not_disable_fetch_for_a_valid_url(database_url: 
         if request.url.host == 'search.example':
             if 'url' not in payload:
                 search_attempts += 1
-                return httpx.Response(200, json={'results': []})
+                return httpx.Response(200, json={'search_result': []})
             outbound.append(payload['url'])
             if '/missing/' in payload['url']:
                 return httpx.Response(404, json={'error': {'code': 'not_found'}})
-            return httpx.Response(200, json={'title': '可用页面', 'content': '真实正文'})
+            return httpx.Response(200, json={'reader_result': {'title': '可用页面', 'content': '真实正文'}})
         messages = tool_messages(payload)
         if len(messages) < 6:
             names = {tool['function']['name'] for tool in payload['tools']}
@@ -402,7 +402,7 @@ def test_five_different_404s_do_not_disable_fetch_for_a_valid_url(database_url: 
         result = json.loads(messages[-1]['content'])
         if len(messages) == 6:
             assert {'search_web', 'fetch_web'}.issubset({tool['function']['name'] for tool in payload['tools']})
-            return tool_call('search_web', {'query': '补充搜索', 'ori_question': '验证独立额度'}, 'search')
+            return tool_call('search_web', {'query': '补充搜索'}, 'search')
         assert result['results'] == []
         assert {'search_web', 'fetch_web'}.issubset({tool['function']['name'] for tool in payload['tools']})
         source = json.loads(messages[-2]['content'])['results'][0]['key']

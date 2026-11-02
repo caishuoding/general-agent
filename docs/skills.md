@@ -30,7 +30,9 @@ Skill 是无状态说明包。加载 Skill 不创建账户任务、会话任务�
 
 ## Agent State 与多 Skill
 
-Agent State 的 `used_skills` 保存当前 Run 可访问的 Skill 名称列表。`conversation_skills` 保存会话使用过的全部名称，初始化后续 Run 的 `used_skills`。系统不会限制只能读取一个 Skill。
+Agent State 的顶层 `loaded_skills` 保存当前可访问 Skill 的名称、版本、根目录和入口路径。会话已用 Skill 名称索引用于初始化后续 Run 的清单，支持同时加载多个 Skill。
+
+所有 Skill 工具从开始就与普通工具一起注册，无需加载后注册。`read_skill_file` 要求对应 Skill 已加载；工作区工具直接校验账号、会话、Run 与允许访问的路径。不存在 SkillSession。详见 [Agent State](agent-state.md)。
 
 Skill 完整正文只保存在现有 user/tool messages 中；不设置 `runtime_state`、`instruction_files` 或 `set_skill_context`。
 
@@ -91,5 +93,7 @@ docker compose -f compose.yaml -f compose.skills.yaml up -d --build app skill-eg
 ```
 
 `SKILL_HOST_DATA_DIR` 必须指向 Docker 宿主机上的应用数据目录。任务容器不挂载 Docker socket；只有受信任应用后端持有 Docker 管理权限。
+
+出口代理默认通过 `https://dns.google/resolve` 获取目标公网地址，避免本机代理软件的 Fake-IP DNS 结果被公网地址校验拒绝。可用 `SKILL_EGRESS_DOH` 改为已支持的 `https://cloudflare-dns.com/dns-query`；服务器使用正常公网 DNS 且不能访问上述服务时，可显式设置 `SKILL_EGRESS_DOH=''` 使用系统 DNS。修改后需重建 `skill-egress` 容器；目标仍须通过公网 IP 和标准 HTTP/HTTPS 端口校验。
 
 当前 schema 转换见 `068_simplify_skill_runtime.sql`。测试环境不保留旧的 `skill_tasks`、`skill_commands.task_id`、`skill_previews.task_id` 或 `messages.skill_selections` 数据。

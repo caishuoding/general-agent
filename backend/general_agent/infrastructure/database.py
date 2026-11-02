@@ -103,6 +103,24 @@ class Database:
             row['memory_recall'] = connection.execute('SELECT status,match_count AS count,detail FROM memory_recalls WHERE operation_id=%s',(row.get('operation_id'),)).fetchone()
         return row
 
+    def total_token_usage(self) -> dict[str, Any]:
+        """汇总所有账号已返回的 Token，并统计缺少总量的实际调用。"""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(SUM(total_tokens), 0) AS total_tokens, "
+                "SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, "
+                "COUNT(*) FILTER (WHERE prompt_tokens IS NULL) AS unknown_prompt_calls, "
+                "COUNT(*) FILTER (WHERE completion_tokens IS NULL AND unit = 'chat_tokens') AS unknown_completion_calls, "
+                "SUM(cached_tokens) FILTER (WHERE unit = 'chat_tokens' AND cached_tokens <= prompt_tokens) AS cached_tokens, "
+                "SUM(prompt_tokens) FILTER (WHERE unit = 'chat_tokens' AND cached_tokens <= prompt_tokens) AS cache_prompt_tokens, "
+                "COUNT(*) FILTER (WHERE unit = 'chat_tokens' AND (cached_tokens IS NULL OR prompt_tokens IS NULL OR cached_tokens > prompt_tokens)) AS unknown_cache_calls, "
+                "COUNT(*) FILTER (WHERE total_tokens IS NULL) AS unknown_calls "
+                "FROM model_calls WHERE unit <> 'credits' "
+                "AND status NOT IN ('reserved', 'cancelled')"
+            ).fetchone()
+            assert row is not None
+            return row
+
     def list_usage(self, user_id: UUID) -> list[dict[str, Any]]:
         """返回指定账号最近的调用记录，未取得的用量保留为空值。"""
         with self.connect() as connection:

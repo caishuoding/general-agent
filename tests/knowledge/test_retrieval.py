@@ -15,7 +15,7 @@ from general_agent.knowledge.tools import KnowledgeTools
 from tests.auth.support import authenticated_client
 from tests.attachments.test_attachments import configure_settings
 from tests.attachments.test_documents import image_pdf_bytes
-from tests.attachments.test_document_images import image_files_response, word_with_chart
+from tests.attachments.test_document_images import word_with_chart
 from tests.knowledge.test_knowledge_base import wait_document
 
 
@@ -212,8 +212,6 @@ def test_image_progress_is_observable_and_original_reaches_next_model_request(da
 
     def provider(request: httpx.Request) -> httpx.Response:
         """阻塞纯文字视觉响应以观察进度，再核验描述原文和正确的原图身份。"""
-        if request.url.path == '/files':
-            return image_files_response()
         if request.method == 'DELETE':
             return httpx.Response(200)
         payload = json.loads(request.content)
@@ -231,7 +229,7 @@ def test_image_progress_is_observable_and_original_reaches_next_model_request(da
         assert result['results'][0]['content'] == 'ORANGE_CHART：橙色图表，季度增长柱状图。'
         parts = [part for item in payload['messages'] if isinstance(item.get('content'), list) for part in item['content']]
         observed_messages.append(payload['messages'])
-        saw_original.append({'type': 'file', 'file_id': 'file-api-word-chart'} in parts)
+        saw_original.append(any(part.get('type') == 'image_url' and part.get('image_url', {}).get('url', '').startswith('data:image/png;base64,') for part in parts))
         key = result['results'][0]['key']
         return httpx.Response(200, json={'choices': [{'message': {
             'content': f'图表说明季度增长。\n\n[[MEDIA:{key}]]',
@@ -274,9 +272,7 @@ def test_knowledge_image_caption_is_sent_with_image_and_excluded_from_text_chunk
     prompts: list[str] = []
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """响应 Files、视觉描述和知识库向量索引，记录视觉模型收到的完整输入。"""
-        if request.url.path == '/files':
-            return image_files_response()
+        """响应视觉描述和知识库向量索引，记录视觉模型收到的完整输入。"""
         if request.method == 'DELETE':
             return httpx.Response(200)
         payload = json.loads(request.content)
@@ -285,7 +281,7 @@ def test_knowledge_image_caption_is_sent_with_image_and_excluded_from_text_chunk
                 {'index': index, 'embedding': [1.0, 0.0]} for index, _ in enumerate(payload['input'])]})
         parts = payload['messages'][0]['content']
         prompts.append(parts[0]['text'])
-        assert any(part.get('type') == 'file' for part in parts)
+        assert any(part.get('type') == 'image_url' for part in parts)
         return httpx.Response(200, json={'choices': [{'message': {'content': '订单状态及风险冻结旁路图。'}}]})
 
     configure_settings(database_url, tmp_path)
@@ -355,8 +351,6 @@ def test_deleting_during_image_description_does_not_restore_document(database_ur
 
     def provider(request: httpx.Request) -> httpx.Response:
         """阻塞纯文字描述直到删除发生，再记录迟到结果的远端回收请求。"""
-        if request.url.path == '/files':
-            return image_files_response()
         if request.method == 'DELETE':
             deleted.append(request.url.path)
             return httpx.Response(200)
@@ -379,7 +373,6 @@ def test_deleting_during_image_description_does_not_restore_document(database_ur
                 break
             time.sleep(0.02)
         assert client.get(f'/api/knowledge-bases/{base}/documents').json() == []
-        assert deleted == ['/files/file-api-word-chart']
 
 
 def test_embedding_configuration_change_rebuilds_on_restart(database_url: str, tmp_path: Path) -> None:

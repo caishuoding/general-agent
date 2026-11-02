@@ -57,8 +57,18 @@ def test_denied_outbound_cancels_only_the_unused_reservation() -> None:
     operations.reserve.return_value = call_id
     operations.begin.side_effect = CallBudgetExceeded('共享调用预算已耗尽。')
     gateway = CallGateway(operations, MagicMock(spec=ModelClient))
-    settings = StoredSettings(base_url='https://search.example', model='deepseek-search', api_key='test-key')
+    settings = StoredSettings(base_url='https://search.example', model='zhipu-web', api_key='test-key')
     with pytest.raises(CallBudgetExceeded), gateway.bind(OperationContext(uuid4(), 'test')).call(settings, 'credits'):
         pytest.fail('被拒绝的调用不应进入外发代码。')
     operations.cancel_reservation.assert_called_once_with(call_id)
     operations.record.assert_not_called()
+
+
+@pytest.mark.parametrize('code', [1113, '1113', '1220', '1309'])
+def test_zhipu_account_failures_are_not_retried(code: int | str) -> None:
+    """智谱欠费、权限或套餐错误即使外层是 429，也不能当成短期限流重试。"""
+    failure = http_failure(httpx.Response(429, json={'error': {'code': code}, 'request_id': 123}))
+    assert failure.scope == 'provider'
+    assert failure.retryable is False
+    assert failure.error_code == str(code)
+    assert failure.request_id is None

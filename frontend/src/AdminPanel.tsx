@@ -13,10 +13,15 @@ type AdminUser = {
 };
 type AdminConversation = Conversation & { matched_message_id: string | null };
 type AdminMemory = { id: string; fact?: string; status: string };
-type AdminSearch = { id: string; query: string; status: string; created_at: string };
-type AdminUsage = { id: string; model: string; purpose: string; total_tokens: number | null; credits: string | null; created_at: string };
 type AuditRow = { id: string; admin_user_id: string; target_user_id: string | null; resource_type: string; resource_id: string | null; action: string; ip_address: string | null; created_at: string };
-type DetailTab = "conversations" | "memories" | "search" | "usage";
+type DetailTab = "conversations" | "memories";
+type UsageSummary = { total_tokens: number; unknown_calls: number; prompt_tokens: number | null; completion_tokens: number | null; unknown_prompt_calls: number; unknown_completion_calls: number; cached_tokens: number | null; cache_prompt_tokens: number | null; unknown_cache_calls: number };
+
+/** 将 Token 总量按万或亿显示，保留最多四位小数。 */
+function formatTokenTotal(total: number) {
+  const divisor = total >= 100000000 ? 100000000 : 10000;
+  return `${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 4 }).format(total / divisor)} ${divisor === 100000000 ? "亿" : "万"}`;
+}
 
 /** 把服务端时间转换为简短本地时间，输入时间字符串并输出用于列表的文本。 */
 function displayTime(value: string | null) {
@@ -40,8 +45,7 @@ export function AdminPanel() {
   const [conversations, setConversations] = useState<AdminConversation[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
   const [memories, setMemories] = useState<AdminMemory[]>([]);
-  const [searches, setSearches] = useState<AdminSearch[]>([]);
-  const [usage, setUsage] = useState<AdminUsage[]>([]);
+  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [accountQuery, setAccountQuery] = useState("");
   const [accountStatus, setAccountStatus] = useState("");
@@ -72,8 +76,14 @@ export function AdminPanel() {
   const auditEpoch = useRef(0);
   const accountListEpoch = useRef(0);
 
-  /** 首次挂载时读取普通用户列表，避免预先读取他人的内容。 */
-  useEffect(function loadInitialAccounts() { void loadUsers(); }, []);
+  /** 首次挂载时读取账号列表和全局 Token 汇总。 */
+  useEffect(function loadInitialAccounts() { void loadUsers(); void loadUsageSummary(); }, []);
+
+  /** 读取所有账号的已知 Token 用量，失败时显示错误。 */
+  async function loadUsageSummary() {
+    try { setUsageSummary(await api<UsageSummary>("/admin/usage-summary")); }
+    catch (failure) { setError(errorMessage(failure)); }
+  }
 
   /** 按当前用户名和状态过滤普通用户账号，失败时展示可见错误。 */
   async function loadUsers() {
@@ -158,8 +168,6 @@ export function AdminPanel() {
     setConversation(null);
     setConversations([]);
     setMemories([]);
-    setSearches([]);
-    setUsage([]);
     setDetailTab("conversations");
     setError("");
     setNotice("");
@@ -183,22 +191,12 @@ export function AdminPanel() {
     setDetailTab(tab);
     setConversation(null);
     if (tab === "memories") setMemories([]);
-    if (tab === "search") setSearches([]);
-    if (tab === "usage") setUsage([]);
     setError("");
     try {
       if (tab === "conversations") await loadConversations(selected);
       if (tab === "memories") {
         const rows = await api<AdminMemory[]>(`/admin/users/${selected.id}/memories`);
         if (view === viewEpoch.current) setMemories(rows);
-      }
-      if (tab === "search") {
-        const rows = await api<AdminSearch[]>(`/admin/users/${selected.id}/search`);
-        if (view === viewEpoch.current) setSearches(rows);
-      }
-      if (tab === "usage") {
-        const rows = await api<AdminUsage[]>(`/admin/users/${selected.id}/usage`);
-        if (view === viewEpoch.current) setUsage(rows);
       }
     } catch (failure) { if (view === viewEpoch.current) setError(errorMessage(failure)); }
   }
@@ -410,10 +408,6 @@ export function AdminPanel() {
   }
   /** 根据记忆记录生成只读列表行，输出正文和状态。 */
   function renderMemory(row: AdminMemory) { return <div className="admin-row" key={row.id}><span>{row.fact || "（无正文）"}</span><small>{row.status}</small></div>; }
-  /** 根据搜索记录生成只读列表行，输出查询词、时间和状态。 */
-  function renderSearch(row: AdminSearch) { return <div className="admin-row" key={row.id}><span>{row.query}</span><small>{displayTime(row.created_at)} · {row.status}</small></div>; }
-  /** 根据用量记录生成只读列表行，输出用途、模型、用量和时间。 */
-  function renderUsage(row: AdminUsage) { return <div className="admin-row" key={row.id}><span>{row.purpose} · {row.model}</span><small>{row.total_tokens ?? row.credits ?? "—"} · {displayTime(row.created_at)}</small></div>; }
   /** 根据用户资料生成审计目标选项，输出账号标识与名称。 */
   function renderAuditTarget(user: AdminUser) { return <option key={user.id} value={user.id}>{user.username}</option>; }
   /** 根据审计记录生成只读列表行，输出目标、资源、操作和时间。 */
@@ -433,6 +427,17 @@ export function AdminPanel() {
     {notice && <div className="admin-notice" role="status">{notice}</div>}
 
     {section === "users" && !selected && <>
+      <section className="admin-usage-summary" aria-label="Token 总用量">
+        <span>Token 总用量</span>
+        <strong>{usageSummary ? formatTokenTotal(usageSummary.total_tokens) : "—"}</strong>
+        <small>已返回的用量合计{usageSummary && usageSummary.unknown_calls > 0 ? ` · ${usageSummary.unknown_calls} 次调用用量未知` : ""}</small>
+        <div className="admin-usage-breakdown">
+          <div><span>输入 Token</span><strong>{usageSummary?.prompt_tokens != null ? formatTokenTotal(usageSummary.prompt_tokens) : "—"}</strong><small>{usageSummary?.unknown_prompt_calls ? `${usageSummary.unknown_prompt_calls} 次调用未知` : "已返回的用量"}</small></div>
+          <div><span>输出 Token</span><strong>{usageSummary?.completion_tokens != null ? formatTokenTotal(usageSummary.completion_tokens) : "—"}</strong><small>{usageSummary?.unknown_completion_calls ? `${usageSummary.unknown_completion_calls} 次聊天调用未知` : "已返回的用量"}</small></div>
+          <div><span>缓存命中 Token</span><strong>{usageSummary?.cached_tokens != null ? formatTokenTotal(usageSummary.cached_tokens) : "—"}</strong><small>{usageSummary?.unknown_cache_calls ? `${usageSummary.unknown_cache_calls} 次聊天调用未知` : "已返回的用量"}</small></div>
+          <div><span>缓存命中率</span><strong>{usageSummary?.cache_prompt_tokens ? `${(100 * (usageSummary.cached_tokens ?? 0) / usageSummary.cache_prompt_tokens).toFixed(2)}%` : "—"}</strong><small>仅计算缓存与输入用量均已知的聊天调用</small></div>
+        </div>
+      </section>
       <div className="admin-toolbar"><form onSubmit={findUsers}>
         <input aria-label="搜索用户名" placeholder="搜索用户名" value={accountQuery} onChange={changeAccountQuery} />
         <select aria-label="账号状态" value={accountStatus} onChange={changeAccountStatus}><option value="">全部状态</option><option value="active">有效</option><option value="disabled">已停用</option></select>
@@ -450,7 +455,7 @@ export function AdminPanel() {
     </>}
 
     {section === "users" && selected && <>
-      <nav className="admin-detail-tabs" aria-label="用户数据类型">{([["conversations", "对话"], ["memories", "长期记忆"], ["search", "搜索记录"], ["usage", "调用用量"]] as const).map(renderDetailTab)}</nav>
+      <nav className="admin-detail-tabs" aria-label="用户数据类型">{([["conversations", "对话"], ["memories", "长期记忆"]] as const).map(renderDetailTab)}</nav>
       {detailTab === "conversations" && <>
         <form className="admin-conversation-search" onSubmit={findConversations}><input aria-label="搜索会话和消息" placeholder="搜索会话和消息" value={conversationQuery} onChange={changeConversationQuery} /><label>从<input type="date" value={conversationStart} onChange={changeConversationStart} /></label><label>到<input type="date" value={conversationEnd} onChange={changeConversationEnd} /></label><button type="submit">查找</button></form>
         <div className={`admin-reader ${conversation ? "admin-reader-open" : ""}`}>
@@ -462,8 +467,6 @@ export function AdminPanel() {
         </div>
       </>}
       {detailTab === "memories" && <div className="admin-activity-list">{memories.map(renderMemory)}{!memories.length && <p className="admin-empty">暂无长期记忆。</p>}</div>}
-      {detailTab === "search" && <div className="admin-activity-list">{searches.map(renderSearch)}{!searches.length && <p className="admin-empty">暂无搜索记录。</p>}</div>}
-      {detailTab === "usage" && <div className="admin-activity-list">{usage.map(renderUsage)}{!usage.length && <p className="admin-empty">暂无调用记录。</p>}</div>}
     </>}
 
     {section === "audit" && <><form className="admin-toolbar admin-audit-filters" onSubmit={findAudit}><select aria-label="目标账号" value={auditTarget} onChange={changeAuditTarget}><option value="">全部账号</option>{auditUsers.map(renderAuditTarget)}</select><select aria-label="操作" value={auditAction} onChange={changeAuditAction}><option value="">全部操作</option><option value="view">查看</option><option value="download">下载</option><option value="preview">预览</option><option value="recover_password">恢复密码</option></select><label>从<input type="date" value={auditStart} onChange={changeAuditStart} /></label><label>到<input type="date" value={auditEnd} onChange={changeAuditEnd} /></label><button type="submit">查找</button></form>

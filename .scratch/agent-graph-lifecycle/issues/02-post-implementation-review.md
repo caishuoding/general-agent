@@ -1,18 +1,15 @@
 Status: ready-for-human
 
-# 图重构代码与 State 字段复核
+# 唯一 Agent 图与 State 复核
 
-## TODO
-
-- [ ] 还未 review 图重构代码。
-- [ ] 还没有仔细看 State 字段有什么用、具体怎么做的。
-- [ ] 逐个核对 State 字段的写入节点、恢复必要性、重置时机和跨轮保留策略。
-- [ ] 复核 `settled`、`watching_inbox`、`inbox_deliveries`、`tool_failures`、`document_calls` 是否仍必要。
-- [ ] 复核子智能体工具、自动收信和结束前检查是否仍符合既有权限、预算、幂等与恢复语义。
-- [ ] 确认旧检查点升级、重试基线和会话稳定 thread 的切换策略。
+- [x] 核对主从共用五节点图、AgentState 与 AgentContext。
+- [x] 逐字段核对写入位置、恢复必要性、计数重置及跨轮保留策略；说明见 docs/agent-state.md。
+- [x] 删除独立回答、工具使用标志、旧图 State、SkillSession、兼容入口和无调用包装。
+- [x] 核对 Skill 工具静态注册、工作区直接使用、已加载 Skill 文件访问与路径越界拒绝。
+- [x] 检查重试、自动信箱、后台命令、调用预算、幂等、来源撤销和继续执行语义。
+- [x] 验证旧检查点一次性清理与业务历史保留，不在正常启动中维护旧结构分支。
+- [ ] 维护者最终阅读五节点职责与 State 字段说明。
 
 ## Comments
 
-这是实现后的强制 review 项；代码通过测试不代表这些架构问题已经确认。
-
-2026-11-01：自动 Standards/Spec 两轴审查已执行，并修正文档过期、主回答串行化和系统提示持久化问题；维护者仍需按上方 TODO 亲自复核图拓扑与 State 字段。自动审查不替代本 TODO。
+2026-11-02：按用户确认的“从一张图开始设计”完成全面重构与自动检查；最终验证记录见 docs/verification-single-agent-state.md。此处保留维护者审阅项，不以自动测试代替人工架构判断。

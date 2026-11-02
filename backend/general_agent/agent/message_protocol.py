@@ -4,7 +4,7 @@ from typing import Any
 
 
 def protocol_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """移除仅供恢复、压缩和路由使用的下划线字段及空工具调用。"""
+    """移除内部消息 ID、恢复与压缩标记及空工具调用，保持模型协议干净。"""
     return [{key: value for key, value in message.items()
-             if not key.startswith('_') and not (key == 'tool_calls' and not value)}
+             if key != 'id' and not key.startswith('_') and not (key == 'tool_calls' and not value)}
             for message in messages]

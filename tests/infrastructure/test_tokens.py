@@ -77,3 +77,20 @@ def test_explicit_corrupt_tokenizer_is_not_silently_estimated(tmp_path: Path) ->
     settings = StoredSettings(base_url='https://provider.example', model='configured', api_key='test')
     with pytest.raises(ValueError, match='校验失败'):
         TokenCounter.for_settings(settings, tmp_path)
+
+
+def test_image_transport_bytes_are_not_counted_as_text_or_summarized() -> None:
+    """同一原图的编码长度不改变视觉预留，也不把 Base64 交给文字摘要。"""
+    from general_agent.infrastructure.tokens import IMAGE_INPUT_RESERVE, text_budget_messages
+
+    counter = TokenCounter('glm-5.3-flash')
+    small = [{'role': 'user', 'content': [{'type': 'text', 'text': '查看图片'},
+             {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AAAA'}}]}]
+    large = [{'role': 'user', 'content': [{'type': 'text', 'text': '查看图片'},
+             {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + 'A' * 2_000_000}}]}]
+    assert counter.request_tokens(small, []) == counter.request_tokens(large, [])
+    assert IMAGE_INPUT_RESERVE < counter.request_tokens(large, []) < IMAGE_INPUT_RESERVE + 1000
+    text, count = text_budget_messages(large)
+    assert count == 1 and '查看图片' in str(text)
+    assert 'base64' not in str(text)
+    assert 'A' * 2_000_000 in str(large)

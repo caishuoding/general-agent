@@ -6,9 +6,7 @@ from pathlib import Path
 
 import httpx
 import psycopg
-from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
 from tests.auth.support import authenticated_client
 from tests.fake_mem0 import FakeMem0
 from tests.memory.test_memory import configure_memory, configure_memory_settings, memory_agent_response

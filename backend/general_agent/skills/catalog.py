@@ -41,6 +41,13 @@ class SkillCatalog:
         """返回完整目录副本，description 不摘要、不裁剪。"""
         return [dict(entry) for entry in self._skills.values()]
 
+    def describe(self, name: str) -> dict[str, Any]:
+        """返回指定 Skill 的安装元数据，不读取或注入完整正文。"""
+        try:
+            return dict(self._skills[name])
+        except KeyError:
+            raise ValueError('Skill 不存在或未启用。') from None
+
     def prompt(self) -> str:
         """提供自主选择规则及完整目录，不将用户资料提升为 Skill 指令。"""
         return (

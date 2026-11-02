@@ -2,9 +2,7 @@
 
 from pathlib import Path
 
-from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
 from tests.auth.support import authenticated_client
 
 

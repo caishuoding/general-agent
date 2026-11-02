@@ -3,9 +3,7 @@
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
 from tests.auth.support import admin_client
 
 

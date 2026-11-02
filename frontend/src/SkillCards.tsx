@@ -3,7 +3,12 @@ import { api, errorMessage, type SkillDescription } from './api';
 
 type Props = { selected: string[]; disabled: boolean; onChange: (names: string[]) => void };
 
-/** 展示真实已安装技能卡片；选择仅改变本条草稿的名称集合，不创建任务。 */
+/** 仅在聊天选择器中隐藏 ppt-master，后端目录及历史记录保持可用。 */
+function isVisibleSkill(skill: SkillDescription) {
+  return skill.name !== 'ppt-master';
+}
+
+/** 展示允许手动选择的已安装技能；选择仅改变本条草稿，不创建任务。 */
 export function SkillCards({ selected, disabled, onChange }: Props) {
   const [skills, setSkills] = useState<SkillDescription[]>([]);
   const [loading, setLoading] = useState(true);
@@ -11,14 +16,14 @@ export function SkillCards({ selected, disabled, onChange }: Props) {
   const epoch = useRef(0);
   const refreshedAt = useRef(0);
 
-  /** 读取完整目录，丢弃过期请求；失败时保留选择，交由用户重试或取消。 */
+  /** 读取并过滤聊天技能目录，丢弃过期请求；失败时保留选择供用户处理。 */
   async function refresh() {
     const request = ++epoch.current;
     setLoading(true); setError('');
     try {
       const rows = await api<SkillDescription[]>('/skills');
       if (request !== epoch.current) return;
-      setSkills(rows); refreshedAt.current = Date.now();
+      setSkills(rows.filter(isVisibleSkill)); refreshedAt.current = Date.now();
     } catch (failure) { if (request === epoch.current) setError(errorMessage(failure)); }
     finally { if (request === epoch.current) setLoading(false); }
   }
@@ -64,6 +69,8 @@ export function SkillCards({ selected, disabled, onChange }: Props) {
 
   /** 用户可显式清空失效选择，目录暂不可读时也不会被选择状态困住。 */
   function clear() { onChange([]); }
+
+  if (!loading && !error && !skills.length && !selected.length) return null;
 
   return <section className="skill-picker" aria-label="选择技能">
     <div className="skill-picker-heading"><span>技能</span>

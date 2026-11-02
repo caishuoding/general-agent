@@ -25,4 +25,7 @@
 
 本项真实验证覆盖 Files 上传、30 天 TTL 与删除。实际模型基于 file_id 的视觉回答质量未在本轮调用真实模型验收，协议和页面链路由受控测试验证。
 
-官方协议及字段依据见 [Files API 研究笔记](research-deepseek-files.md)，决策见 [ADR 0009](adr/0009-conversation-attachment-full-context.md)。
+官方协议及字段依据见 [Files API 研究笔记](adr/0024-zhipu-model-and-web.md)，决策见 [ADR 0009](adr/0009-conversation-attachment-full-context.md)。
+
+
+2026-11-02：以上供应商文件协议为历史实现，当前图片链路由 [智谱迁移决策](adr/0024-zhipu-model-and-web.md) 替代。

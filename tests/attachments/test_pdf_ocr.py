@@ -125,7 +125,7 @@ def test_uploaded_scan_keeps_body_table_and_image_as_separate_chunks(
     from general_agent.infrastructure.database import Database
     from general_agent.infrastructure.tokens import TokenCounter
     from tests.attachments.test_attachments import configure, configure_settings
-    from tests.attachments.test_document_images import image_files_response, wait_ready
+    from tests.attachments.test_document_images import wait_ready
     from tests.attachments.test_knowledge import owner
     from tests.auth.support import authenticated_client
 
@@ -137,8 +137,6 @@ def test_uploaded_scan_keeps_body_table_and_image_as_separate_chunks(
         """OCR 只还原结构，视觉模型仅收到裁出的插图与图注。"""
         if request.url.path == '/parse':
             return httpx.Response(200, json=structured_page())
-        if request.url.path == '/files':
-            return image_files_response()
         import json
         payload = json.loads(request.content)
         prompt = payload['messages'][0]['content'][0]['text']
@@ -237,7 +235,6 @@ def test_knowledge_scan_citations_keep_text_table_and_image_types(
     """知识库公开上传与对话检索保留三类来源，OCR 正文引用不能被误当作整页图片。"""
     import json
     from tests.attachments.test_attachments import configure_settings
-    from tests.attachments.test_document_images import image_files_response
     from tests.auth.support import authenticated_client
     from tests.knowledge.test_knowledge_base import wait_document
     from tests.knowledge.test_retrieval import tool_response
@@ -249,8 +246,6 @@ def test_knowledge_scan_citations_keep_text_table_and_image_types(
         """在独立 OCR、视觉描述与回答模型三个外部边界提供固定结果。"""
         if request.url.path == '/parse':
             return httpx.Response(200, json=structured_page())
-        if request.url.path == '/files':
-            return image_files_response()
         payload = json.loads(request.content)
         first = payload['messages'][0].get('content')
         if isinstance(first, list):
