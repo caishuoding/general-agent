@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Annotated
 from uuid import UUID
 
 import httpx
@@ -25,28 +25,31 @@ from general_agent.memory.source_deletion_api import source_deletion_router
 from general_agent.auth.api import ADMIN_COOKIE_NAME, COOKIE_NAME, auth_router
 from general_agent.auth.admin_api import admin_router
 from general_agent.auth.dependencies import current_user, require_admin
-from general_agent.auth.service import AuthService, AuthenticatedUser
+from general_agent.auth.service import AuthService
 from general_agent.attachments.api import attachment_router
 from general_agent.attachments.service import AttachmentService
 from general_agent.knowledge.service import KnowledgeService
 from general_agent.knowledge.api import knowledge_router
 from general_agent.knowledge.tools import KnowledgeTools
+from general_agent.skills.api import skill_router
+from general_agent.skills.selection import selected_skill_names
 from general_agent.infrastructure.operations import OperationContext, OperationService
 from general_agent.infrastructure.calls import CallGateway
-from general_agent.conversation.chat import ChatService
-from general_agent.conversation.execution import ChatExecution
-from general_agent.agent.conversation import ConversationGraph
+from general_agent.agent.runner import AgentRunner
+from general_agent.chat.service import ChatService
+from general_agent.chat.services import ChatServices
 from general_agent.memory.service import MemoryService
 from general_agent.memory.automatic_api import native_memory_router
 from general_agent.memory.correction import MemoryCorrection
 from general_agent.memory.correction_api import correction_router
 from general_agent.memory.deletion_api import deletion_router
 from general_agent.infrastructure.database import Database
+from general_agent.infrastructure.checkpoints import Checkpoints
 from general_agent.infrastructure.logging import configure_agent_logging
 from general_agent.infrastructure.tracing import configure_tracing
 from general_agent.memory.embedding import EmbeddingConfiguration
 from general_agent.infrastructure.provider import ModelClient, ModelFailure
-from general_agent.conversation.streaming import StreamingChat
+from general_agent.chat.streaming import StreamingChat
 from general_agent.search.service import SearchService, SearchSettingsInput
 from general_agent.infrastructure.settings import (PublicSettings, SettingsInput, SettingsStore, EmbeddingSettingsInput, EmbeddingSettingsStore, PublicEmbeddingSettings)
 
@@ -64,7 +67,8 @@ class Conversation(BaseModel):
 
 class MessageInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
-    content: str = Field(min_length=1, max_length=32000)
+    content: str = Field(min_length=1, max_length=2_000_000)
+    skills: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(default_factory=list, max_length=50)
 
 
 class MessageProgress(BaseModel):
@@ -76,6 +80,7 @@ class Message(BaseModel):
     id: UUID
     role: str
     content: str
+    skill_names: list[str] = Field(default_factory=list)
     status: str
     created_at: datetime
     attachments: list[dict[str, Any]] = Field(default_factory=list)
@@ -115,7 +120,7 @@ class UsageRecord(BaseModel):
 
 
 def create_app(database_url: str | None = None, data_dir: Path | None = None, model_transport: httpx.BaseTransport | None = None, mem0_transport: httpx.BaseTransport | None = None, secure_cookies: bool | None = None) -> FastAPI:
-    """加载配置并组装会话附件与独立知识库，测试可注入隔离存储和模型 HTTP 传输。"""
+    """组装会话、知识库与完整 Skill 运行接口，测试可注入隔离存储及 HTTP 传输。"""
     database = Database(database_url or os.environ.get(
         "DATABASE_URL", "postgresql://general_agent:local-development-only@127.0.0.1:15432/general_agent"
     ))
@@ -135,46 +140,71 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     model = CallGateway(operations, ModelClient(model_transport))
     memory = MemoryService(database, embedding_configuration, model, settings.directory, mem0_transport)
     attachments = AttachmentService(database, settings.directory, model_transport)
-    knowledge = KnowledgeService(database, settings.directory, attachments, model, model_transport)
+    knowledge = KnowledgeService(database, settings.directory, model, model_transport)
     search_settings = SettingsStore(settings.directory, 'search.json')
     search = SearchService(database, model, search_settings, memory, attachments, model_transport)
-    execution = ChatExecution(model, memory, search, KnowledgeTools(knowledge))
-    conversation_graph = ConversationGraph(database, execution)
-    source_deletion = SourceDeletion(execution.deletion, memory, attachments.delete_file)
-    chat = ChatService(database, model, execution, attachments, conversation_graph)
-    streaming = StreamingChat(database, model, execution, attachments, conversation_graph)
+    services = ChatServices(memory, search, KnowledgeTools(knowledge))
+    checkpoints = Checkpoints(database)
+    runner = AgentRunner(services, checkpoints)
+    skill_runtime = runner.skill_runtime
+    source_deletion = SourceDeletion(
+        services.deletion,
+        memory,
+        attachments.delete_file,
+        skill_runtime.delete_conversation,
+    )
+    chat = ChatService(database, runner, attachments)
+    streaming = StreamingChat(database, runner, attachments)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """恢复业务及子任务终态，停机取消智能体并有界等待后台线程。"""
+        """初始化检查点并暂停遗留执行，停机先冻结回答再停止后台运行环境。"""
         database.migrate()
-        execution.agent_runtime.orchestrator.recover()
+        checkpoints.setup()
         streaming.recover()
+        runner.orchestrator.recover()
+        runner.skill_runtime.recover()
         attachments.recover()
         knowledge.recover()
         source_deletion.recover()
         stopped = asyncio.Event()
 
         async def expire_attachments() -> None:
-            """每分钟清理到期附件；访问路径独立检查 TTL，清理延迟不延长可用期。"""
+            """每分钟清理到期附件、孤立检查点和失效制作环境。"""
             while not stopped.is_set():
                 try:
                     await asyncio.wait_for(stopped.wait(), timeout=60)
                 except TimeoutError:
                     try:
                         await asyncio.to_thread(attachments.expire)
+                        await asyncio.to_thread(checkpoints.prune)
+                        await asyncio.to_thread(runner.skill_runtime.maintain)
                     except Exception:
                         # 暂时不可用的数据库留待下一轮，不终止后续清理。
                         logging.getLogger(__name__).exception('附件到期清理暂未完成')
 
+        async def execution_heartbeat() -> None:
+            """每秒保存执行心跳，重启按最后活跃时间冻结截止期限。"""
+            while not stopped.is_set():
+                try:
+                    await asyncio.wait_for(stopped.wait(), timeout=1)
+                except TimeoutError:
+                    try:
+                        await asyncio.to_thread(runner.heartbeat)
+                    except Exception:
+                        logging.getLogger(__name__).exception('执行心跳暂未保存')
+
+        heartbeat = asyncio.create_task(execution_heartbeat())
         expiration = asyncio.create_task(expire_attachments())
         try:
             yield
         finally:
             stopped.set()
             await expiration
-            await asyncio.to_thread(execution.agent_runtime.orchestrator.close)
+            await heartbeat
             await asyncio.to_thread(streaming.close)
+            await asyncio.to_thread(runner.orchestrator.close)
+            await asyncio.to_thread(runner.skill_runtime.close)
             await asyncio.to_thread(knowledge.close)
 
     app = FastAPI(title="个人对话智能体", lifespan=lifespan)
@@ -183,10 +213,11 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
     app.include_router(admin_router(auth, database, attachments, memory, knowledge))
     app.include_router(attachment_router(attachments))
     app.include_router(knowledge_router(knowledge))
+    app.include_router(skill_router(runner.skill_runtime))
     app.include_router(source_deletion_router(source_deletion))
     app.include_router(correction_router(MemoryCorrection(memory)))
-    app.include_router(native_memory_router(execution.automatic,settings))
-    app.include_router(deletion_router(execution.deletion))
+    app.include_router(native_memory_router(services.automatic,settings))
+    app.include_router(deletion_router(services.deletion))
     app.state.calls = model
     app.state.operations = operations
     app.state.auth = auth
@@ -260,14 +291,14 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
 
     @app.get('/api/settings/search', response_model=PublicSettings)
     def get_search_settings(request: Request) -> PublicSettings:
-        """展示独立 DeepSeek 搜索与抓取配置状态，旧供应商凭据不会被误当作可用。"""
+        """展示独立智谱搜索与网页读取配置状态，旧供应商凭据不会被误当作可用。"""
         require_admin(request)
         saved = search_settings.read()
-        return saved.public() if saved and saved.model == 'deepseek-search' else PublicSettings(base_url='https://api.deepseek.com',model='deepseek-search')
+        return saved.public() if saved and saved.model == 'zhipu-web' else PublicSettings(base_url='https://open.bigmodel.cn/api/paas/v4',model='zhipu-web')
 
     @app.put('/api/settings/search', response_model=PublicSettings)
     def save_search_settings(body: SearchSettingsInput, request: Request) -> PublicSettings:
-        """保存 DeepSeek 连接，仅同供应商同地址允许留空保留密钥，保存不联网。"""
+        """保存智谱联网工具连接，仅同供应商同地址允许留空保留密钥，保存不联网。"""
         require_admin(request)
         try:
             previous = search_settings.read()
@@ -354,35 +385,49 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         """读取当前账号的指定会话。"""
         return read_conversation(conversation_id, current_user(request).id)
 
+    def message_skill_names(body: MessageInput) -> list[str]:
+        """同步与流式入口共用名称校验，完整 Skill 正文由前端放入用户输入。"""
+        runtime = runner.skill_runtime
+        try:
+            return selected_skill_names(runtime.service.catalog, body.skills, body.content)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
+
     @app.post("/api/conversations/{conversation_id}/messages")
     def send_message(conversation_id: UUID, body: MessageInput, request: Request, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
-        """同步入口执行当前授权和完整会话附件回答；重复提交只读取原尝试。"""
+        """同步入口校验显式 Skill 名称，消息保存前端拼好的完整 Skill 正文。"""
         account_id = current_user(request).id
         saved = settings.read()
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
 
+        skills = message_skill_names(body)
+
         def send(operation: OperationContext) -> None:
-            """把当前输入交给共同动作及完整附件执行流程。"""
-            chat.send(conversation_id, account_id, body.content, saved, operation)
-        return perform_run("chat", execution.scope(body.content,saved), operation_id, conversation_id, account_id, send, 200)
+            """把包含完整 Skill 正文的用户消息交给同步回答流程。"""
+            chat.send(conversation_id, account_id, body.content, saved, operation, skills)
+        scope = [*services.scope(body.content,saved), skills] if skills else services.scope(body.content,saved)
+        return perform_run("chat", scope, operation_id, conversation_id, account_id, send, 200)
 
     @app.post("/api/conversations/{conversation_id}/runs", status_code=202)
     def start_stream(conversation_id: UUID, body: MessageInput, request: Request, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
-        """登记本次操作并启动后台回答，失败、停止和恢复仍沿用同一执行身份。"""
+        """校验显式 Skill 名称后登记流式操作，完整正文随用户消息持久化。"""
         account_id = current_user(request).id
         saved = settings.read()
         if saved is None:
             raise HTTPException(409, "请先在设置中配置模型。")
 
+        skills = message_skill_names(body)
+
         def start(operation: OperationContext) -> None:
-            """把操作交给后台流程，使停止、恢复和用量仍属于同一执行。"""
-            streaming.start(conversation_id, account_id, body.content, saved, operation)
-        return perform_run("chat_stream", execution.scope(body.content,saved), operation_id, conversation_id, account_id, start)
+            """后台保存包含完整 Skill 正文的用户消息及技能名称。"""
+            streaming.start(conversation_id, account_id, body.content, saved, operation, skills)
+        scope = [*services.scope(body.content,saved), skills] if skills else services.scope(body.content,saved)
+        return perform_run("chat_stream", scope, operation_id, conversation_id, account_id, start)
 
     @app.post("/api/conversations/{conversation_id}/messages/{message_id}/retry", status_code=202)
     def retry_stream(conversation_id: UUID, message_id: UUID, request: Request, operation_id: UUID | None = Header(default=None, alias="X-Operation-ID")) -> JSONResponse:
-        """重试构成新的可计量操作，每次实际云端请求单独记录用量。"""
+        """重试沿用原用户消息及其 Skill 名称，每次云端请求独立记录用量。"""
         account_id = current_user(request).id
         saved = settings.read()
         if saved is None:
@@ -396,9 +441,25 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         except LookupError as error:
             raise HTTPException(404,str(error)) from None
         with database.connect() as connection:
-            original = connection.execute('SELECT content FROM messages WHERE id=%s',(source['reply_to'],)).fetchone()
-        scope = [str(message_id), execution.scope(str(original['content']) if original else '',saved)]
+            original = connection.execute('SELECT content,skill_names FROM messages WHERE id=%s',(source['reply_to'],)).fetchone()
+        scope = [str(message_id), services.scope(str(original['content']) if original else '',saved),
+                 original['skill_names'] if original else []]
         return perform_run("chat_retry", scope, operation_id, conversation_id, account_id, retry)
+
+    @app.post('/api/conversations/{conversation_id}/messages/{message_id}/resume', status_code=202, response_model=ConversationDetail)
+    def resume_stream(conversation_id: UUID, message_id: UUID, request: Request) -> ConversationDetail:
+        """继续原回答的检查点，重复请求不会创建新的执行或用户消息。"""
+        account_id = current_user(request).id
+        saved = settings.read()
+        if saved is None:
+            raise HTTPException(409, '请先配置模型。')
+        try:
+            streaming.resume(conversation_id, account_id, message_id, saved)
+        except LookupError as error:
+            raise HTTPException(404, str(error)) from None
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
+        return read_conversation(conversation_id, account_id)
 
     @app.post("/api/conversations/{conversation_id}/messages/{message_id}/stop", response_model=ConversationDetail)
     def stop_stream(conversation_id: UUID, message_id: UUID, request: Request) -> ConversationDetail:
@@ -439,7 +500,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         """按账号与回答授权返回子智能体完整只读会话，不暴露内部模型消息。"""
         account_id = current_user(request).id
         streaming.message(conversation_id, account_id, message_id)
-        execution.agent_runtime.repository.validate_detail(message_id)
+        runner.repository.validate_detail(message_id)
         with database.connect() as connection:
             rows = connection.execute('SELECT a.id AS agent_id,a.title,r.id AS run_id,r.sequence,r.task,r.status,r.result,r.error,r.created_at,r.started_at,r.finished_at,EXISTS (SELECT 1 FROM agent_inbox_events e WHERE e.sender_run_id=r.id AND e.delivery_id IS NOT NULL) AS delivered FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE a.id=%s AND a.answer_attempt_id=%s AND a.account_id=%s AND a.conversation_id=%s AND a.parent_agent_id IS NOT NULL ORDER BY r.sequence', (agent_id, message_id, account_id, conversation_id)).fetchall()
             if not rows:
@@ -463,7 +524,7 @@ def create_app(database_url: str | None = None, data_dir: Path | None = None, mo
         """按账号及回答授权读取最新子任务结果，不暴露模型消息或推理。"""
         account_id = current_user(request).id
         streaming.message(conversation_id, account_id, message_id)
-        execution.agent_runtime.repository.validate_detail(message_id)
+        runner.repository.validate_detail(message_id)
         with database.connect() as connection:
             row = connection.execute('SELECT a.id AS agent_id,a.title,r.id AS run_id,r.task,r.status,r.result,r.error FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE a.id=%s AND a.answer_attempt_id=%s AND a.account_id=%s AND a.conversation_id=%s AND a.parent_agent_id IS NOT NULL ORDER BY r.sequence DESC LIMIT 1', (agent_id,message_id,account_id,conversation_id)).fetchone()
         if row is None:

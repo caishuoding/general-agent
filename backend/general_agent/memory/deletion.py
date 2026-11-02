@@ -5,6 +5,8 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
+from general_agent.infrastructure.agent_cleanup import forget_checkpoint_material
+
 from general_agent.memory.service import MemoryService
 
 
@@ -61,10 +63,22 @@ class MemoryDeletion:
 
     def clear_dependents(self, connection: Any, action_id: UUID, active_operation: UUID | None = None) -> None:
         """清正文、旧许可及原生缓存，原来源标记为已忘记；当前删除回合仅保留执行身份。"""
-        action=connection.execute('SELECT message_id,operation_id FROM memory_actions WHERE id=%s',(action_id,)).fetchone()
+        action=connection.execute('SELECT message_id,operation_id,conversation_id FROM memory_actions WHERE id=%s',(action_id,)).fetchone()
         updates=connection.execute('SELECT * FROM memory_updates WHERE action_id=%s',(action_id,)).fetchall()
         sources=({action['message_id']} if action['message_id'] else set()) | {row['source_message_id'] for row in updates if row['source_message_id']}
+        conversations={action['conversation_id']} | {row['source_conversation_id'] for row in updates if row['source_conversation_id']}
         operations={action['operation_id']} | {row['operation_id'] for row in updates}
+        preserved_threads: list[str] = []
+        if active_operation is not None:
+            current = connection.execute(
+                "SELECT m.conversation_id,r.id AS run_id FROM messages m "
+                "JOIN agent_runs r ON r.operation_id=%s "
+                "WHERE m.operation_id=%s AND m.role='assistant'",
+                (active_operation, active_operation),
+            ).fetchone()
+            if current is not None:
+                preserved_threads = [str(current['conversation_id']), 'run:' + str(current['run_id'])]
+        forget_checkpoint_material(connection, sorted(conversations), exclude_thread_ids=preserved_threads)
         for table,column,identifiers in [('memory_update_operations','update_id',[row['id'] for row in updates])]:
             operations.update(row['operation_id'] for row in connection.execute(f'SELECT operation_id FROM {table} WHERE {column}=ANY(%s)',(identifiers,)).fetchall())
         operations.update(row['operation_id'] for row in connection.execute('SELECT operation_id FROM messages WHERE reply_to=ANY(%s) AND operation_id IS NOT NULL',(list(sources),)).fetchall())
@@ -74,16 +88,14 @@ class MemoryDeletion:
         operations.update(row['operation_id'] for row in searches)
         observed = connection.execute('SELECT message_id FROM memory_tool_observations WHERE action_id=%s',(action_id,)).fetchall()
         observed_sources = sources | {row['message_id'] for row in observed}
-        operations.update(row['operation_id'] for row in connection.execute('SELECT operation_id FROM memory_tool_runs WHERE message_id=ANY(%s)',(list(observed_sources),)).fetchall())
         operations.update(row['operation_id'] for row in connection.execute('SELECT operation_id FROM memory_native_runs WHERE message_id=ANY(%s)',(list(observed_sources),)).fetchall())
         connection.execute('DELETE FROM memory_native_steps WHERE message_id=ANY(%s)',(list(observed_sources),))
         connection.execute("UPDATE memory_native_runs SET status='skipped',detail='该来源已停止后续处理。' WHERE message_id=ANY(%s)",(list(sources),))
-        connection.execute("UPDATE memory_tool_runs SET result='{}' WHERE message_id=ANY(%s)",(list(observed_sources),))
         operations.discard(active_operation)
         connection.execute("UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,result=NULL,response_status=NULL WHERE id=ANY(%s)",(list(operations),))
         connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE operation_id=ANY(%s) AND status='reserved'",(list(operations),))
         connection.execute("UPDATE messages SET status='stopped',error='相关长期记忆已删除，本次操作已失效。' WHERE operation_id=ANY(%s) AND status='generating'",(list(operations),))
-        connection.execute("UPDATE search_requests SET status='expired',query='',results='[]',sources='[]',error='相关记忆已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
+        connection.execute("UPDATE search_requests SET status='cancelled',query='',results='[]',sources='[]',error='相关记忆已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
         connection.execute("UPDATE messages SET web_sources='[]' WHERE operation_id=ANY(%s)",(list(operations),))
         for row in recalls:
             matches=[item for item in row['matches'] if item['action_id']!=str(action_id)]

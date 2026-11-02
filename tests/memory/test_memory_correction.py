@@ -4,9 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import httpx
-from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
 from tests.auth.support import authenticated_client
 from tests.memory.test_memory import configure_memory, configure_memory_settings
 from tests.memory.test_memory_recall import recall_provider

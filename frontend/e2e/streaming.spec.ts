@@ -45,14 +45,16 @@ test("停止保留部分内容和刷新后的状态", async ({ page }) => {
   await expect(page.getByText("回答可能不准确，重要信息请核实。", { exact: false })).toBeVisible();
 });
 
-// 模型断流后明确展示失败，重试创建新回答尝试且不重复用户消息。
-test("断流后可重试且不重复用户消息", async ({ page }) => {
+// 模型断流后在同一回答中自动续写，恢复提示与正文刷新后仍保留且不重复用户消息。
+test("断流后自动续写且不重复用户消息", async ({ page }) => {
   await start(page, "验证断流重试");
   await expect(page.getByText("第一段", { exact: true })).toBeVisible();
-  await expect(page.getByText("模型回答流中断", { exact: false })).toBeVisible();
+  await expect(page.getByText("已自动恢复并继续", { exact: true })).toBeVisible();
+  await expect(page.getByText("，第二段。", { exact: true })).toBeVisible();
   await page.reload();
-  await page.getByRole("button", { name: "再试一次", exact: true }).click();
-  await expect(page.getByText("第一段，第二段。", { exact: true })).toBeVisible();
+  await expect(page.getByText("第一段", { exact: true })).toBeVisible();
+  await expect(page.getByText("，第二段。", { exact: true })).toBeVisible();
+  await expect(page.getByText("已自动恢复并继续", { exact: true })).toBeVisible();
   await expect(page.locator(".message.user .message-content").filter({ hasText: "验证断流重试" })).toHaveCount(1);
-  await expect(page.locator(".message.assistant.failed")).toHaveCount(1);
+  await expect(page.locator(".message.assistant.failed")).toHaveCount(0);
 });

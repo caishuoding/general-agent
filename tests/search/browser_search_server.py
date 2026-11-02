@@ -21,6 +21,7 @@ from psycopg.conninfo import make_conninfo
 
 from tests.conversation.browser_server import ControlledModel
 from general_agent.app import create_app
+from tests.attachments.test_attachments import attachment_documents
 
 
 class SearchModel(ControlledModel):
@@ -29,27 +30,14 @@ class SearchModel(ControlledModel):
     def do_POST(self) -> None:
         """先按当前文档工具读取附件，再自主搜索并返回真实来源形状。"""
         payload=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
-        if self.path != '/v1/tools/search' and '上海市青松路 88 号' not in str(payload['messages']):
-            documents: list[dict[str, Any]] = []
-            for message in payload['messages']:
-                content = message.get('content')
-                if message['role'] == 'user' and isinstance(content, str) and content.startswith('['):
-                    documents = json.loads(content)
-            assert documents and documents[0]['document_id']
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/event-stream')
-            self.end_headers()
-            self.write_event({'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'read-location', 'type': 'function',
-                'function': {'name': 'read_document', 'arguments': json.dumps({'document_id': documents[0]['document_id']})}}]}, 'finish_reason': 'tool_calls'}]})
-            self.wfile.write(b'data: [DONE]\n\n')
-            self.wfile.flush()
-            return
+        assert self.path in ('/web_search', '/v1/chat/completions')
         body: dict[str, Any]
-        if self.path=='/v1/tools/search':
-            assert payload['query']=='上海市青松路 88 号附近咖啡店'
-            assert payload['ori_question']=='联网搜索：根据附件里的住址查附近咖啡店'
-            assert payload['count']==15 and payload['need_content'] is False
-            body={'results':[{'url':'https://cafe.example/nearby','title':'咖啡店信息','summary':'营业时间 9–18。'}]}
+        if self.path=='/web_search':
+            assert payload['search_query']=='上海市青松路 88 号附近咖啡店'
+            assert payload['search_engine']=='search_pro'
+            assert payload['search_intent'] is False
+            assert payload['count']==15 and payload['content_size']=='high'
+            body={'search_result':[{'link':'https://cafe.example/nearby','title':'咖啡店信息','content':'营业时间 9–18。'}]}
         elif any(message.get('role')=='tool' and '"key":' in message['content'] for message in payload['messages']):
             source=json.loads(payload['messages'][-1]['content'])['results'][0]
             answer=f'咖啡店营业时间 9–18。[{source["key"]}]'
@@ -65,6 +53,11 @@ class SearchModel(ControlledModel):
                 self.wfile.flush()
                 return
             body={'choices':[{'message':{'role':'assistant','content':answer}}],'usage':{'prompt_tokens':30,'completion_tokens':10,'total_tokens':40}}
+        elif not any(message.get('role') == 'tool' for message in payload['messages']):
+            document = attachment_documents(payload)[0]
+            self.send_agent_reply({'tool_calls': [{'id': 'read-address', 'type': 'function', 'function': {
+                'name': 'read_document', 'arguments': json.dumps({'document_id': document['document_id']})}}]})
+            return
         else:
             assert '上海市青松路 88 号' in str(payload['messages'])
             if payload.get('stream'):
@@ -73,16 +66,14 @@ class SearchModel(ControlledModel):
                 self.end_headers()
                 self.write_event({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'call-search','type':'function','function':{'name':'search_web','arguments':''}}]}}]})
                 self.write_event({'choices':[{'delta':{'tool_calls':[{'index':0,'function':{'arguments':json.dumps({
-                    'query':'上海市青松路 88 号附近咖啡店',
-                    'ori_question':'联网搜索：根据附件里的住址查附近咖啡店',
+                    'query':'上海市青松路 88 号附近咖啡店'
                 },ensure_ascii=False)}}]}}]})
                 self.write_event({'choices':[{'delta':{},'finish_reason':'tool_calls'}],'usage':{'prompt_tokens':20,'completion_tokens':10,'total_tokens':30}})
                 self.wfile.write(b'data: [DONE]\n\n')
                 self.wfile.flush()
                 return
             body={'choices':[{'message':{'role':'assistant','content':None,'tool_calls':[{'id':'call-search','type':'function','function':{'name':'search_web','arguments':json.dumps({
-                'query':'上海市青松路 88 号附近咖啡店',
-                'ori_question':'联网搜索：根据附件里的住址查附近咖啡店',
+                'query':'上海市青松路 88 号附近咖啡店'
             },ensure_ascii=False)}}]}}],'usage':{'prompt_tokens':20,'completion_tokens':10,'total_tokens':30}}
         encoded=json.dumps(body).encode()
         self.send_response(200)

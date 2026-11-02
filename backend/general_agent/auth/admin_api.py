@@ -51,6 +51,12 @@ def admin_router(
     """创建仅管理员可访问的账号管理和只读内容接口。"""
     router = APIRouter(prefix="/api/admin")
 
+    @router.get("/usage-summary")
+    def usage_summary(request: Request) -> dict[str, Any]:
+        """返回所有账号的已知 Token 用量汇总，仅供管理员查看。"""
+        require_admin(request)
+        return database.total_token_usage()
+
     @router.get("/users")
     def list_users(request: Request, query: str = "", status: Literal["active", "disabled"] | None = None) -> list[dict[str, Any]]:
         """按用户名和状态筛选普通用户账号公开资料。"""

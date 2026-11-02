@@ -6,9 +6,7 @@ from typing import Any
 
 import httpx
 import psycopg
-from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
 from tests.auth.support import authenticated_client
 from tests.attachments.test_attachments import configure, configure_settings
 from tests.search.test_search import reply

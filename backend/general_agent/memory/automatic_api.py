@@ -29,7 +29,7 @@ def native_memory_router(automatic: AutomaticMemory, settings_store: SettingsSto
             if source is None or memory.source_suppressed(message_id):
                 raise ValueError('自动记忆来源不存在或已被忘记。')
             with memory.calls.operations.operation('native_memory_retry', [str(message_id), settings.revision], operation_id, conversation_id, account_id) as (operation, _):
-                automatic.process(conversation_id, message_id, source['content'], settings, operation, explicit=explicit)
+                automatic.process(conversation_id, message_id, source['content'], operation, explicit=explicit)
                 with memory.database.connect() as connection:
                     state = connection.execute('SELECT status,detail FROM memory_native_runs WHERE message_id=%s', (message_id,)).fetchone()
                 return JSONResponse(state, status_code=200 if state and state['status'] == 'complete' else 409)

@@ -79,7 +79,7 @@ def process(service: 'KnowledgeService', row: dict[str, Any], calls: BoundCalls)
             raise ValueError('文档文字超过 2,000,000 字符，请拆分后上传。')
         units, parsed = text_units(text), []
         info = {'format': extension.lstrip('.'), 'total_units': len(units)}
-    vision = DocumentVision(service.settings_directory, service.files, service.transport, calls)
+    vision = DocumentVision(service.settings_directory, service.transport, calls)
     images = describe_images(service, row, parsed, vision)
     failures = sum(image['vision_status'] == 'failed' for image in images)
     if not any(unit.content.strip() for unit in units) and not any(image['vision_status'] == 'complete' for image in images):
@@ -128,45 +128,44 @@ def describe_images(service: 'KnowledgeService', row: dict[str, Any], parsed: li
     identifier, attempt = row['id'], row['attempt']
     folder = service.directory / str(identifier) / 'images'
     with service.database.connect() as connection:
-        existing = connection.execute('SELECT metadata,provider_file,vision_status FROM knowledge_document_images WHERE document_id=%s', (identifier,)).fetchall()
+        existing = connection.execute(
+            'SELECT metadata,vision_status FROM knowledge_document_images WHERE document_id=%s',
+            (identifier,),
+        ).fetchall()
     by_ordinal = {item['metadata']['ordinal']: item for item in existing}
     service.progress(identifier, attempt, 'images', 0, len(parsed))
 
-    def describe(image: ParsedImage) -> tuple[dict[str, Any], bool]:
-        """返回描述及本次是否新上传；表格截图直接完成本地兜底，不发送视觉模型。"""
+    def describe(image: ParsedImage) -> dict[str, Any]:
+        """描述一张真实图片；表格截图直接完成本地兜底，不发送视觉模型。"""
         item = image.model_dump(mode='json')
         if image.media_type == 'table_preview':
-            item.update(description='表格原区域预览', provider_file=None, vision_status='complete',
+            item.update(description='表格原区域预览', vision_status='complete',
                         vision_model='table-preview', vision_revision='table-preview-v1', vision_error=None)
-            return item, False
+            return item
         previous = by_ordinal.get(image.ordinal)
         if previous:
             old = previous['metadata']
             if (old['sha256'] == image.sha256 and old.get('caption') == image.caption
                     and previous['vision_status'] == 'complete' and old.get('vision_revision') == vision.revision):
-                (folder / image.storage_name).unlink(missing_ok=True)
-                return {**old, 'provider_file': previous['provider_file'], 'vision_status': 'complete'}, False
-            # 覆盖远端身份前先完成旧文件清理；失败时保留原记录供重试，不遗失删除凭据。
-            if previous['provider_file']:
-                vision.files.delete(previous['provider_file'])
+                if old['storage_name'] != image.storage_name:
+                    (folder / image.storage_name).unlink(missing_ok=True)
+                return {**old, 'vision_status': 'complete'}
             item['id'] = old['id']
             if old['storage_name'] != image.storage_name:
                 (folder / old['storage_name']).unlink(missing_ok=True)
         current = service.current(identifier)
         if not current or current['status'] != 'processing' or current['attempt'] != attempt or current['deleting']:
             raise LookupError('文档处理已撤销。')
-        remote: dict[str, Any] | None = None
         try:
-            description, remote = vision.describe(folder / image.storage_name, image)
-            item.update(description=description, provider_file=remote, vision_status='complete', vision_revision=vision.revision)
+            description = vision.describe(folder / image.storage_name, image)
+            item.update(description=description, vision_status='complete',
+                        vision_revision=vision.revision)
         except Exception:
             item.update(vision_status='failed', vision_error='图片描述未完成，请重试。', vision_revision=vision.revision)
         current = service.current(identifier)
         if not current or current['status'] != 'processing' or current['attempt'] != attempt or current['deleting']:
-            if remote:
-                vision.discard(remote)
             raise LookupError('文档处理已撤销。')
-        return item, remote is not None
+        return item
 
     results: list[dict[str, Any]] = []
     aborted = False
@@ -175,27 +174,25 @@ def describe_images(service: 'KnowledgeService', row: dict[str, Any], parsed: li
         pending = [executor.submit(describe, image) for image in parsed]
         for future in as_completed(pending):
             try:
-                item, created_remote = future.result()
+                item = future.result()
             except Exception as error:
                 aborted = True
                 first_error = first_error or error
                 continue
             if aborted:
-                if created_remote and item.get('provider_file'):
-                    vision.discard(item['provider_file'])
                 continue
             with service.database.connect() as connection:
-                live = connection.execute("SELECT id FROM knowledge_documents WHERE id=%s AND attempt=%s AND status='processing' FOR UPDATE", (identifier, attempt)).fetchone()
+                live = connection.execute(
+                    "SELECT id FROM knowledge_documents WHERE id=%s AND attempt=%s AND status='processing' FOR UPDATE",
+                    (identifier, attempt),
+                ).fetchone()
                 if not live:
-                    if created_remote and item.get('provider_file'):
-                        vision.discard(item['provider_file'])
                     aborted = True
                     continue
                 connection.execute(
-                    'INSERT INTO knowledge_document_images(id,document_id,ordinal,metadata,provider_file,vision_status) VALUES(%s,%s,%s,%s,%s,%s) '
-                    'ON CONFLICT(document_id,ordinal) DO UPDATE SET metadata=EXCLUDED.metadata,provider_file=EXCLUDED.provider_file,vision_status=EXCLUDED.vision_status',
-                    (UUID(item['id']), identifier, item['ordinal'], Jsonb({key: value for key, value in item.items() if key != 'provider_file'}),
-                     Jsonb(item['provider_file']) if item.get('provider_file') else None, item['vision_status']),
+                    'INSERT INTO knowledge_document_images(id,document_id,ordinal,metadata,vision_status) VALUES(%s,%s,%s,%s,%s) '
+                    'ON CONFLICT(document_id,ordinal) DO UPDATE SET metadata=EXCLUDED.metadata,vision_status=EXCLUDED.vision_status',
+                    (UUID(item['id']), identifier, item['ordinal'], Jsonb(item), item['vision_status']),
                 )
             results.append(item)
             try:

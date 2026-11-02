@@ -15,7 +15,7 @@ remaining = counter.available(settings, messages, tools)
 
 图片自动升级比较独立视觉规则版本；聊天模型或窗口配置变化不会重新描述已有图片。图片缓存仍保留实际模型修订，主动重试时可使用新模型重新生成描述。
 
-## 安装当前 DeepSeek 官方文件
+## 安装 GLM-5.3-Flash 官方文件
 
 在仓库根目录执行：
 
@@ -23,11 +23,11 @@ remaining = counter.available(settings, messages, tools)
 PYTHONPATH=backend .venv/bin/python -m general_agent.infrastructure.tokenizer_setup --directory .local
 ```
 
-安装器使用 [DeepSeek 官方 Token 用量文档](https://api-docs.deepseek.com/quick_start/token_usage/) 当前链接的 [V4 离线包](https://cdn.deepseek.com/api-docs/deepseek_v4_tokenizer.zip)，只读取其中 `tokenizer.json`，不执行下载代码；按固定 SHA-256 验证并原子注册 `https://api.deepseek.com` 的 `deepseek-flash`。重复执行会复用已校验文件，保留其他模型注册。通过代理使用同一模型时，可明确加 `--base-url` 注册实际连接地址。
+安装器读取 [智谱官方仓库](https://huggingface.co/zai-org/GLM-5.3-Flash/tree/46a050bec13002ad29ee795c16e61cf4fa3c4a9c) 的固定版本 `tokenizer.json`，仅加载数据，不执行下载内容。注册的精确连接为 `https://open.bigmodel.cn/api/paas/v4`／`glm-5.3-flash`。文件为 20,217,442 字节，SHA-256：`19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d`；离线样例 `你好，世界！` 为 4 Token。
 
-本次核验的 tokenizer.json：6,367,096 字节，SHA-256 `89085f12ef79460ac5f66d1119325ddfc694b4ab209d80bbd81d35f081dc9614`。离线样例 `你好，世界！` 为 4 Token。文件或官方包后续变化时校验失败，需要核实新来源并更新固定校验值。
+重复安装复用已校验文件，保留其他模型注册；自定义网关可通过 `--base-url` 指定精确地址。文件或官方版本改变时须重新核对来源与固定哈希，不允许套用其他 GLM 模型的分词器。本机官方 CDN 不可达时，从智谱 ModelScope 仓库取得同一内容，并核对上述官方哈希后安装。
 
-资产保存在应用数据目录的 `tokenizers/`，注册保存在 `tokenizers.json`；容器使用相同数据目录挂载。运行时不自动联网下载分词文件。
+资产保存在应用数据目录的 `tokenizers/glm-5.3-flash/`，注册保存在 `tokenizers.json`；容器挂载同一目录，运行时不自动联网下载。
 
 ## 切换模型服务商
 
@@ -53,3 +53,5 @@ PYTHONPATH=backend .venv/bin/python -m general_agent.infrastructure.tokenizer_se
 匹配到官方文件时 `method=official_tokenizer`；未配置对应模型时 `method=character_estimate`，按 UTF-8 字节数保守估算。已匹配配置损坏或校验不符会报错，避免悄悄换用其他模型。旧 `MODEL_TOKENIZERS` 显式映射仍优先兼容，但只有模型名、没有服务地址隔离，推荐改用注册文件。`DOCUMENT_CHUNK_TOKENIZER_MODEL` 仅作为显式覆盖保留；默认不设置，跟随回答 LLM。
 
 普通文本计数不自动添加 BOS、EOS、聊天模板、图片或协议包装。`available` 对文本序列化计数并预留协议空间，现有工具循环结合真实 `usage` 校正读取预算；整轮请求和计费用量仍以模型返回为准。
+
+智谱图片消息不把 Base64 传输内容当成文字计数。输入预算按每图 8,192 个计数单位预留（依据该模型官方 `processor_config.json` 的默认每图最多 8,000 视觉 Token，另留协议余量）；这属于预算上界估算，不是 API 返回的实际用量。文档阅读仍结合最近真实 `prompt_tokens` 进一步限制可用空间；缺少真实视觉用量时不假定还有文档预算。摘要只接收图片旁的文字与重新读取提示，不把 Base64 编码当作历史正文。

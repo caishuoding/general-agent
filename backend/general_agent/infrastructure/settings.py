@@ -2,12 +2,13 @@
 
 import os
 import tempfile
+from typing import Self
 from pathlib import Path
 from threading import RLock
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt, field_validator, model_validator
 
 
 class SettingsInput(BaseModel):
@@ -17,6 +18,8 @@ class SettingsInput(BaseModel):
     api_key: SecretStr = SecretStr("")
     context_window_tokens: StrictInt = Field(default=32768, ge=1024, le=10_000_000)
     output_reserve_tokens: StrictInt = Field(default=4096, ge=1, le=1_000_000)
+    compression_trigger_ratio: float = Field(default=0.75, gt=0, lt=1)
+    compression_target_ratio: float = Field(default=0.5, gt=0, lt=1)
 
     @field_validator("base_url")
     @classmethod
@@ -31,6 +34,13 @@ class SettingsInput(BaseModel):
             raise ValueError("端口无效。")
         return value.rstrip("/")
 
+    @model_validator(mode='after')
+    def validate_compression(self) -> 'Self':
+        """确保压缩目标低于触发阈值，避免无法结束的反复压缩。"""
+        if self.compression_target_ratio >= self.compression_trigger_ratio:
+            raise ValueError('压缩目标必须低于触发阈值。')
+        return self
+
 
 class PublicSettings(BaseModel):
     base_url: str = ""
@@ -38,6 +48,8 @@ class PublicSettings(BaseModel):
     api_key_configured: bool = False
     context_window_tokens: int = 32768
     output_reserve_tokens: int = 4096
+    compression_trigger_ratio: float = 0.75
+    compression_target_ratio: float = 0.5
 
 
 class StoredSettings(BaseModel):
@@ -47,11 +59,21 @@ class StoredSettings(BaseModel):
     revision: str = "legacy"
     context_window_tokens: int = Field(default=32768, ge=1024)
     output_reserve_tokens: int = Field(default=4096, ge=1)
+    compression_trigger_ratio: float = Field(default=0.75, gt=0, lt=1)
+    compression_target_ratio: float = Field(default=0.5, gt=0, lt=1)
 
     def public(self) -> PublicSettings:
         """返回连接、读取预算及凭据是否配置，不泄露凭据正文。"""
         return PublicSettings(base_url=self.base_url, model=self.model, api_key_configured=bool(self.api_key),
-                              context_window_tokens=self.context_window_tokens, output_reserve_tokens=self.output_reserve_tokens)
+                              context_window_tokens=self.context_window_tokens, output_reserve_tokens=self.output_reserve_tokens,
+                              compression_trigger_ratio=self.compression_trigger_ratio, compression_target_ratio=self.compression_target_ratio)
+
+    @model_validator(mode='after')
+    def validate_compression(self) -> 'Self':
+        """确保压缩目标低于触发阈值，避免无法结束的反复压缩。"""
+        if self.compression_target_ratio >= self.compression_trigger_ratio:
+            raise ValueError('压缩目标必须低于触发阈值。')
+        return self
 
 
 class SettingsStore:
@@ -82,7 +104,8 @@ class SettingsStore:
             if body.output_reserve_tokens >= body.context_window_tokens:
                 raise ValueError('回答预留必须小于模型上下文窗口。')
             settings = StoredSettings(base_url=body.base_url, model=body.model, api_key=key,
-                                      context_window_tokens=body.context_window_tokens, output_reserve_tokens=body.output_reserve_tokens)
+                                      context_window_tokens=body.context_window_tokens, output_reserve_tokens=body.output_reserve_tokens,
+                                      compression_trigger_ratio=body.compression_trigger_ratio, compression_target_ratio=body.compression_target_ratio)
             if previous and previous.model_dump(exclude={'revision'}) == settings.model_dump(exclude={'revision'}):
                 settings.revision = previous.revision
             else:

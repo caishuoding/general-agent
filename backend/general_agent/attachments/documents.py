@@ -135,30 +135,6 @@ class ParsedDocument(BaseModel):
     page_sizes: dict[int, tuple[float, float]] = Field(default_factory=dict)
 
 
-def attach_pdf_captions(units: list[DocumentUnit], images: list[ParsedImage]) -> list[ParsedImage]:
-    """把同页图注与 PDF 图片按原文顺序绑定；数量不一致时只绑定可确定的部分。"""
-    captions: dict[int, list[str]] = {}
-    for unit in units:
-        if unit.page is None:
-            continue
-        caption = figure_caption(unit.content.strip())
-        if caption is not None:
-            captions.setdefault(unit.page, []).append(caption)
-    by_page: dict[int, list[int]] = {}
-    for index, image in enumerate(images):
-        if image.page is not None:
-            by_page.setdefault(image.page, []).append(index)
-    result = list(images)
-    for page, indexes in by_page.items():
-        page_captions = captions.get(page, [])
-        if len(indexes) == 1 and page_captions:
-            result[indexes[0]] = result[indexes[0]].model_copy(update={'caption': page_captions[0]})
-        elif len(indexes) == len(page_captions):
-            for index, caption in zip(indexes, page_captions):
-                result[index] = result[index].model_copy(update={'caption': caption})
-    return result
-
-
 def exclude_caption_units(units: list[DocumentUnit], images: list[ParsedImage]) -> None:
     """从普通正文单位中移除已绑定图注，保留单位数量以维持分页位置映射。"""
     captions = {image.caption.strip() for image in images if image.caption and image.caption.strip()}

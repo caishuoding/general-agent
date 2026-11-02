@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from general_agent.infrastructure.agent_limits import LIMITS
+from general_agent.infrastructure.checkpoints import ExecutionPaused
 from general_agent.agent.repository import AgentRepository, RunCheckpoint
 from general_agent.agent.inbox import AgentInbox
 from general_agent.agent.tools import SpawnInput, WaitInput, SendInput, CancelInput
@@ -71,6 +72,8 @@ class AgentOrchestrator:
                 self.repository.guard(job[0])
                 if self.repository.transition(job[0], 'running'):
                     job[3]()
+            except ExecutionPaused:
+                pass
             except Exception:
                 LOGGER.exception('子智能体执行失败 run_id=%s', job[0])
                 self.repository.transition(job[0], 'failed', error='子任务执行失败，可新建任务重试。')
@@ -90,7 +93,7 @@ class AgentOrchestrator:
                 self.repository.expire()
                 with self.repository.database.connect() as connection:
                     connection.execute("UPDATE messages SET status='failed',error='回答执行超时。' WHERE status='generating' AND id IN (SELECT answer_attempt_id FROM agents WHERE parent_agent_id IS NULL AND deadline<CURRENT_TIMESTAMP)")
-                    roots = connection.execute("SELECT a.answer_attempt_id FROM agents a JOIN messages m ON m.id=a.answer_attempt_id WHERE a.parent_agent_id IS NULL AND NOT a.closed AND (m.status<>'generating' OR a.deadline<CURRENT_TIMESTAMP)").fetchall()
+                    roots = connection.execute("SELECT a.answer_attempt_id FROM agents a JOIN messages m ON m.id=a.answer_attempt_id WHERE a.parent_agent_id IS NULL AND NOT a.closed AND m.status<>'interrupted' AND (m.status<>'generating' OR a.deadline<CURRENT_TIMESTAMP)").fetchall()
                 for root in roots:
                     self.repository.close(root['answer_attempt_id'])
             except Exception:
@@ -120,7 +123,8 @@ class AgentOrchestrator:
                 self.condition.notify_all()
             return result
         elif name == 'wait_agents':
-            return self.wait(checkpoint, WaitInput.model_validate(arguments))
+            WaitInput.model_validate(arguments)
+            return self.wait(checkpoint)
         else:
             raise ValueError('未知编排工具。')
         run_id = UUID(result['run_id'])
@@ -132,22 +136,21 @@ class AgentOrchestrator:
         self.submit(run_id, run)
         return result
 
-    def wait(self, checkpoint: RunCheckpoint, request: WaitInput) -> dict[str, Any]:
+    def wait(self, checkpoint: RunCheckpoint) -> dict[str, Any]:
         """通过统一信箱等待任意结果，等待失败由执行层终止而非耗尽工具重试额度。"""
         return self.inbox.wait(checkpoint, 'wait:' + checkpoint.current_call)
 
     def recover(self) -> None:
-        """服务重启终结旧执行，不自动重发模型请求。"""
+        """检查点负责续接；启动只登记待恢复执行，不关闭原主从身份。"""
         with self.repository.database.connect() as connection:
-            answers = connection.execute("SELECT DISTINCT a.answer_attempt_id FROM agents a JOIN agent_runs r ON r.agent_id=a.id WHERE r.status IN ('queued','running')").fetchall()
-        for answer in answers:
-            with self.repository.database.connect() as connection:
-                connection.execute("UPDATE agent_runs SET status='failed',error='应用重启中断了任务。',finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running') AND agent_id IN (SELECT id FROM agents WHERE answer_attempt_id=%s)", (answer['answer_attempt_id'],))
-                connection.execute('UPDATE cloud_operations SET cancelled=TRUE WHERE id IN (SELECT r.operation_id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE a.answer_attempt_id=%s)', (answer['answer_attempt_id'],))
-            self.repository.close(answer['answer_attempt_id'])
+            connection.execute(
+                "UPDATE agent_runs r SET paused_at=coalesce(paused_at,CURRENT_TIMESTAMP) "
+                "FROM agents a JOIN messages m ON m.id=a.answer_attempt_id "
+                "WHERE r.agent_id=a.id AND m.status='interrupted' AND r.status IN ('queued','running')"
+            )
 
     def close(self) -> None:
-        """取消后台任务并有界等待工作线程，不无限等待阻塞网络。"""
+        """停止进程内队列并有界等待，数据库状态留给检查点续接。"""
         with self.condition:
             self.stopped = True
             self.jobs.clear()

@@ -10,7 +10,32 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from tokenizers import Tokenizer
 
+from general_agent.infrastructure.agent_limits import LIMITS
 from general_agent.infrastructure.settings import StoredSettings
+
+
+# GLM-5.3-Flash 官方 processor_config 的默认上限为每图 8000 个视觉 Token；另留协议余量。
+IMAGE_INPUT_RESERVE = 8192
+
+
+def text_budget_messages(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """提取消息文字并统计原图，避免将 Base64 传输字节误作文字 Token 或摘要正文。"""
+    result: list[dict[str, Any]] = []
+    images = 0
+    for message in messages:
+        item = dict(message)
+        content = item.get('content')
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get('type') == 'image_url':
+                    images += 1
+                    parts.append({'type': 'text', 'text': '[原图：需要时重新读取对应资料；图片内容不转为文字。]'})
+                else:
+                    parts.append(part)
+            item['content'] = parts
+        result.append(item)
+    return result, images
 
 
 class _Registration(BaseModel):
@@ -119,10 +144,18 @@ class TokenCounter:
         """使用本次固定的适配器计数，具体方法可从 method 读取。"""
         return self._adapter.count(text)
 
+    def input_limit(self, settings: StoredSettings) -> int:
+        """返回扣除回答与聊天协议预留后的最大输入计数。"""
+        return max(0, settings.context_window_tokens - settings.output_reserve_tokens - LIMITS.context_protocol_reserve_tokens)
+
+    def request_tokens(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
+        """计数文字协议并按每图上限预留视觉预算；图片实际占用仍以模型 usage 为准。"""
+        text, images = text_budget_messages(messages)
+        return self.count(json.dumps({'messages': text, 'tools': tools}, ensure_ascii=False)) + images * IMAGE_INPUT_RESERVE
+
     def available(self, settings: StoredSettings, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
-        """估算消息和工具的文本预算并预留协议空间；整轮精确用量以模型 usage 为准。"""
-        serialized = json.dumps({'messages': messages, 'tools': tools}, ensure_ascii=False)
-        return max(0, settings.context_window_tokens - settings.output_reserve_tokens - self.count(serialized) - 512)
+        """按实际外发请求核算剩余输入计数；整轮精确用量仍以模型 usage 为准。"""
+        return max(0, self.input_limit(settings) - self.request_tokens(messages, tools))
 
     def prefix(self, text: str, budget: int) -> str:
         """寻找预算内的连续字符前缀；只切字符边界，并核验返回文本的实际计数。"""

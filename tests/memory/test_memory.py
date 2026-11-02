@@ -10,9 +10,9 @@ from uuid import uuid4
 import httpx
 from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
 from tests.auth.support import admin_client, authenticated_client
 from tests.conversation.test_streaming import wait_message
+from tests.model_protocol import current_tool_messages
 
 
 def explicit_memory_request(content: str) -> bool:
@@ -30,11 +30,11 @@ def explicit_memory_request(content: str) -> bool:
 
 
 def memory_agent_response(payload: dict[str, Any]) -> httpx.Response:
-    """模拟统一流式工具协议中的函数调用和最终文字。"""
+    """只用当前请求的工具结果推进受控协议，历史交互仍可保留。"""
     messages = payload['messages']
     users = [str(item.get('content') or '') for item in messages if item.get('role') == 'user']
     current = users[-1] if users else ''
-    results = [json.loads(item['content']) for item in messages if item.get('role') == 'tool']
+    results = [json.loads(item['content']) for item in current_tool_messages(payload)]
 
     def call(name: str, arguments: dict[str, Any]) -> httpx.Response:
         """返回标准工具调用响应。"""
@@ -114,11 +114,11 @@ def memory_agent_response(payload: dict[str, Any]) -> httpx.Response:
 
 
 def memory_final_answer(payload: dict[str, Any]) -> str | None:
-    """根据真实工具结果或明确澄清请求，为最终回答节点生成受控文本。"""
+    """根据本次请求的真实工具结果或澄清请求生成受控回答。"""
     messages = payload['messages']
     users = [str(item.get('content') or '') for item in messages if item.get('role') == 'user']
     current = users[-1] if users else ''
-    results = [json.loads(item['content']) for item in messages if item.get('role') == 'tool']
+    results = [json.loads(item['content']) for item in current_tool_messages(payload)]
     if results:
         last = results[-1]
         if 'memories' in last:
@@ -162,7 +162,8 @@ def configure_memory_settings(database_url: str, tmp_path: Path) -> None:
     with admin_client(database_url, tmp_path) as admin:
         assert admin.put(
             '/api/settings',
-            json={"base_url": "https://chat.example/v1", "model": "chat", "api_key": "test-key"},
+            json={"base_url": "https://chat.example/v1", "model": "chat", "api_key": "test-key",
+                  "context_window_tokens": 262144},
         ).status_code == 200
         assert admin.put(
             '/api/settings/embedding',

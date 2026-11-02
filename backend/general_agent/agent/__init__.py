@@ -1,5 +1,1 @@
-"""LangGraph 对话智能体编排入口。"""
-
-from general_agent.agent.graph import AgentToolGraph
-
-__all__ = ["AgentToolGraph"]
+"""提供唯一 Agent 图、运行器和状态定义。"""

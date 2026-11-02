@@ -13,7 +13,7 @@ def test_migration_preserves_chunks_embeddings_positions_and_ttl(database_url: s
     """旧库直接迁移元数据且不重切片，删除重复正文及外键，重启仍可按第二页读取同片。"""
     database = Database(database_url)
     directory = Path(__file__).resolve().parents[2] / 'backend/general_agent/infrastructure/migrations'
-    identifier, conversation = uuid4(), uuid4()
+    identifier, conversation, account_id = uuid4(), uuid4(), uuid4()
     with database.connect() as connection:
         connection.execute('CREATE TABLE schema_migrations (version TEXT PRIMARY KEY)')
         for path in sorted(directory.glob('*.sql')):
@@ -21,11 +21,13 @@ def test_migration_preserves_chunks_embeddings_positions_and_ttl(database_url: s
                 break
             connection.execute(path.read_text())
             connection.execute('INSERT INTO schema_migrations(version) VALUES(%s)', (path.name,))
-        database.ensure_bootstrap_admin(connection)
-        account = connection.execute("SELECT id FROM users WHERE username='admin'").fetchone()
-        assert account is not None
+        # 该阶段尚未引入独立管理员表，直接构造旧版普通账号覆盖真实升级路径。
+        connection.execute(
+            "INSERT INTO users(id,username,password_hash,role,must_change_password) VALUES(%s,'legacy_user','legacy-hash','user',FALSE)",
+            (account_id,),
+        )
         connection.execute('INSERT INTO conversations(id,title,user_id) VALUES(%s,%s,%s)',
-                           (conversation, '迁移验证', account['id']))
+                           (conversation, '迁移验证', account_id))
         connection.execute(
             "INSERT INTO attachments(id,conversation_id,filename,size,status,knowledge_version,parse_info,content) "
             "VALUES(%s,%s,'old.pdf',100,'ready',2,'{\"format\":\"pdf\",\"total_units\":2}', 'duplicated full text')",
@@ -46,10 +48,10 @@ def test_migration_preserves_chunks_embeddings_positions_and_ttl(database_url: s
     database.migrate()
     database.migrate()
     documents = DocumentTools(database, ChunkPolicy())
-    result = documents.read(conversation, account['id'],
+    result = documents.read(conversation, account_id,
                             {'document_id': str(identifier), 'start_page': 2, 'end_page': 2}, TokenCounter('test'), 10000)
     assert result['content'] == [{'chunk_id': 1, 'content': 'HEADER FIRST.SECOND.'}]
-    searched = documents.search(conversation, account['id'], {'query': 'FIRST'})['results'][0]
+    searched = documents.search(conversation, account_id, {'query': 'FIRST'})['results'][0]
     assert searched['content'] == result['content'][0]['content']
     assert searched['end_structure']['section'] == ['Chapter']
     with database.connect() as connection:

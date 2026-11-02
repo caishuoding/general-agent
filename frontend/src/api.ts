@@ -4,6 +4,8 @@ export type Settings = {
   api_key_configured: boolean;
   context_window_tokens?: number;
   output_reserve_tokens?: number;
+  compression_trigger_ratio?: number;
+  compression_target_ratio?: number;
 };
 export type AuthUser = {
   id: string;
@@ -12,7 +14,9 @@ export type AuthUser = {
   must_change_password: boolean;
 };
 export type Conversation = { id: string; title: string; created_at: string };
-export type DocumentParseInfo = { format?: string; total_units?: number; readable_units?: number; coverage?: string; missing_units?: string[]; limitations?: string[] };
+export type SkillDescription = { name: string; description: string; version: string };
+export type SkillContent = { name: string; version: string; path: string; content: string; digest: string };
+export type DocumentParseInfo = { format?: string; skill_source?: boolean; total_units?: number; readable_units?: number; coverage?: string; missing_units?: string[]; limitations?: string[] };
 export type Attachment = { id: string; filename: string; size: number; status: "processing" | "ready" | "failed" | "deleting"; error: string | null; parse_info?: DocumentParseInfo; image_metadata: { format: string; mime: string; width: number; height: number } | null };
 export type MessageAttachment = Pick<Attachment, "id" | "filename" | "size" | "status" | "error">;
 export type AgentTask = { agent_id: string; run_id: string; title: string; status: string; result: string | null; delivered: boolean; error: string | null };
@@ -21,7 +25,8 @@ export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  status: "generating" | "complete" | "stopped" | "failed";
+  skill_names?: string[];
+  status: "generating" | "complete" | "stopped" | "failed" | "interrupted";
   attachments: MessageAttachment[];
   agent_tasks?: AgentTask[];
   progress?: MessageProgress | null;

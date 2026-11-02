@@ -280,33 +280,6 @@ button:hover:not(:disabled) {
   box-shadow: inset 0 -2px #277773;
 }
 
-.admin-header {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 20px;
-}
-
-.admin-header h2 {
-  font-size: 24px;
-  letter-spacing: -0.02em;
-}
-
-.section-eyebrow {
-  color: #277773;
-  font-size: 11px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.readonly-badge {
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: #e8f2ef;
-  color: #386b67;
-  font-size: 12px;
-}
-
 .admin-card {
   padding: 20px;
   border: 1px solid #d9e6e3;
@@ -356,34 +329,6 @@ button:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-.admin-user-list {
-  display: grid;
-  gap: 8px;
-}
-
-.admin-user {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 14px;
-  border: 1px solid #dce8e5;
-  border-radius: 11px;
-}
-
-.admin-user.selected {
-  border-color: #7fb3a9;
-  background: #f0f8f5;
-}
-
-.admin-user > div:first-child {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.admin-user small,
 .admin-row small {
   color: #788d8c;
   font-size: 11px;
@@ -405,32 +350,6 @@ button:hover:not(:disabled) {
   color: #b95845;
 }
 
-.admin-user-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.admin-user-actions button {
-  padding: 5px 9px;
-  border: 1px solid #d2e1de;
-  border-radius: 8px;
-  color: #5d7778;
-  font-size: 12px;
-}
-
-
-
-.admin-conversation {
-  display: block;
-  width: 100%;
-  margin-bottom: 6px;
-  padding: 7px 9px;
-  border-radius: 8px;
-  background: #f2f8f6;
-  text-align: left;
-}
-
 .admin-row {
   display: grid;
   gap: 2px;
@@ -442,25 +361,6 @@ button:hover:not(:disabled) {
 .admin-empty {
   color: #889b99;
   font-size: 12px;
-}
-
-
-
-.admin-message {
-  max-width: 760px;
-  margin-bottom: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: #f4f9f7;
-}
-
-.admin-message.user {
-  margin-left: auto;
-  background: #e8f1ee;
-}
-
-.admin-message p {
-  white-space: pre-wrap;
 }
 .sidebar {
   width: 250px;
@@ -685,6 +585,35 @@ button:hover:not(:disabled) {
   align-self: center;
   padding: 10px 36px 20px;
 }
+
+/* 技能名称延续聊天的纸面与深青配色，紧凑卡片和勾选共同表达状态。 */
+.skill-picker { grid-column: 1 / -1; min-width: 0; padding: 0 0 10px; margin-bottom: 8px; border-bottom: 1px solid var(--line); }
+.skill-picker-heading { display: flex; align-items: center; min-height: 18px; margin-bottom: 6px; font-size: 11px; color: var(--ink-soft); }
+.skill-picker-heading > span:first-child { font-weight: 650; }
+.skill-picker-clear { margin-left: auto; border: 0; background: transparent; padding: 0 0 0 8px; color: var(--teal); font-size: 11px; }
+.skill-choice-grid { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 7px; max-height: min(150px, 22dvh); overflow-y: auto; padding: 1px; }
+.skill-choice { position: relative; flex: 0 1 auto; min-width: 0; border: 1px solid #d3ded8; border-radius: 9px; background: #fcfdfb; overflow: hidden; transition: border-color .15s ease, background-color .15s ease; }
+.skill-choice:hover { border-color: #91aaa0; }
+.skill-choice.is-selected { background: #e7f0eb; border-color: var(--petrol); box-shadow: inset 0 0 0 1px var(--petrol); }
+.skill-choice-toggle { display: flex; align-items: center; min-height: 36px; padding: 7px 33px 7px 11px; text-align: left; border: 0; background: transparent; color: var(--ink); }
+.skill-choice-toggle:disabled { opacity: .65; cursor: default; }
+.skill-choice-name { font-size: 13px; font-weight: 650; letter-spacing: -.1px; white-space: nowrap; }
+.skill-choice-check { position: absolute; top: 50%; right: 10px; width: 15px; height: 15px; border: 1px solid #b9c9c0; border-radius: 50%; color: transparent; transform: translateY(-50%); }
+.skill-choice-check svg { width: 100%; height: 100%; }
+.is-selected .skill-choice-check { background: var(--petrol); border-color: var(--petrol); color: white; }
+.skill-picker-status { margin: 0; font-size: 12px; color: var(--muted); }
+.skill-picker-status button { border: 0; background: transparent; color: var(--teal); padding: 0 4px; }
+.message-skill-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.message-skill-tag { display: inline-flex; max-width: 100%; padding: 2px 9px; border: 1px solid #a9c6b7; border-radius: 6px; background: #edf5ef; color: #244e40; font-size: 11px; }
+.generated-files { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.generated-files ul { margin: 8px 0 0; padding-left: 18px; }
+@media (max-width: 800px) {
+  .skill-picker { padding-bottom: 8px; margin-bottom: 4px; }
+  .skill-choice-grid { max-height: min(120px, 18dvh); }
+  /* 软键盘打开时优先保留输入和历史阅读区，已选状态仍保留到键盘收起。 */
+  .chat-keyboard-open .skill-picker { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .skill-choice { transition: none; } }
 .composer {
   padding: 17px 18px 12px;
   background: #fbfdfc;
@@ -832,26 +761,6 @@ button:hover:not(:disabled) {
   font-size: 10px;
   color: #c06d56;
   margin-top: 9px;
-}
-.thinking {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  font-size: 12px;
-  color: #708c89;
-  padding: 4px 0 24px;
-}
-.thinking-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #f26b4e;
-  animation: breathe 1.4s ease-in-out infinite;
-}
-@keyframes breathe {
-  50% {
-    opacity: 0.3;
-  }
 }
 .global-error {
   font-size: 12px;
@@ -1213,16 +1122,12 @@ td {
   .admin-topbar { flex-wrap: wrap; gap: 12px; padding: max(16px, env(safe-area-inset-top)) 16px 12px; }
   .admin-session { flex-wrap: wrap; min-width: 0; }
   .admin-session span { overflow-wrap: anywhere; }
-  .admin-session button, .admin-tabs button, .admin-user-actions button, .admin-primary, .primary-button { min-height: 44px; }
+  .admin-session button, .admin-tabs button, .admin-primary, .primary-button { min-height: 44px; }
   .admin-tabs { padding: 12px 16px 0; flex-wrap: wrap; }
   .admin-page { padding: 20px 16px max(32px, env(safe-area-inset-bottom)); }
-  .admin-header { align-items: flex-start; flex-direction: column; gap: 8px; }
   .admin-card { padding: 16px; min-width: 0; overflow-wrap: anywhere; }
   .admin-create-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
-  .admin-user { flex-wrap: wrap; padding: 12px; gap: 8px; min-width: 0; }
-  .admin-user > div { min-width: 0; }
-  .admin-message { overflow-wrap: anywhere; }
   .settings-page { width: 100%; min-width: 0; }
   .chat-keyboard-open .composer-wrap { padding-bottom: 8px; }
   .chat-keyboard-open .composer-note,
@@ -1892,18 +1797,6 @@ a:focus-visible {
   color: var(--muted);
   font-size: 11px;
 }
-.thinking {
-  gap: 9px;
-  padding: 0 0 20px;
-  color: var(--muted);
-  font-size: 11px;
-}
-.thinking-dot {
-  width: 7px;
-  height: 7px;
-  background: var(--signal);
-  box-shadow: 0 0 0 5px rgba(242, 107, 78, 0.1);
-}
 .retry-button,
 .stop-button {
   padding: 7px 11px;
@@ -2131,22 +2024,6 @@ a:focus-visible {
   padding: 30px clamp(20px, 3vw, 42px) 64px;
   gap: 20px;
 }
-.admin-header h2 {
-  font-family: var(--serif);
-  font-size: 34px;
-  font-weight: 600;
-  letter-spacing: -0.035em;
-}
-.section-eyebrow {
-  color: var(--signal-deep);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: none;
-}
-.readonly-badge {
-  background: var(--teal-soft);
-  color: var(--teal);
-}
 .admin-card {
   padding: 22px;
   border-color: var(--line);
@@ -2181,14 +2058,6 @@ a:focus-visible {
 .admin-primary:hover:not(:disabled) {
   background: var(--signal-darkest);
 }
-.admin-user {
-  border-color: #dce8e5;
-  border-radius: 12px;
-}
-.admin-user.selected {
-  border-color: #8ab9af;
-  background: #edf7f4;
-}
 .account-state.active {
   background: #e2f1eb;
   color: #2f7066;
@@ -2197,24 +2066,6 @@ a:focus-visible {
   background: #fbeae6;
   color: #aa5d49;
 }
-.admin-user-actions button {
-  border-color: #cadcd8;
-  border-radius: 9px;
-  background: #fbfdfc;
-  color: var(--ink-soft);
-}
-.admin-conversation {
-  border-radius: 8px;
-  background: #eef6f3;
-}
-.admin-message {
-  border-radius: 11px;
-  background: #f2f8f6;
-}
-.admin-message.user {
-  background: #dfede9;
-}
-
 /* 移动端把左侧轨迹收进抽屉，同时保留 44px 触控面积。 */
 @media (max-width: 800px) {
   .auth-shell {
@@ -2336,9 +2187,6 @@ a:focus-visible {
   .admin-page {
     padding-top: 22px;
   }
-  .admin-header h2 {
-    font-size: 30px;
-  }
 }
 @media (max-width: 540px) {
   .topbar {
@@ -2440,7 +2288,6 @@ a:focus-visible {
 }
 .account-menu summary::-webkit-details-marker,
 .conversation-menu summary::-webkit-details-marker,
-.admin-user-menu summary::-webkit-details-marker,
 .knowledge-more summary::-webkit-details-marker,
 .knowledge-create-panel summary::-webkit-details-marker,
 .advanced-settings summary::-webkit-details-marker,
@@ -2602,82 +2449,10 @@ a:focus-visible {
   color: #2f7066;
   font-size: 12px;
 }
-.admin-section-heading,
-.admin-detail-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-}
-.admin-section-heading h3,
-.admin-detail-heading h3 {
-  margin-bottom: 3px;
-}
-.admin-section-heading p,
-.admin-detail-heading p {
-  color: var(--muted);
-  font-size: 12px;
-}
-.admin-create-toggle {
-  flex: none;
-  min-height: 38px;
-  padding: 7px 13px;
-  border: 1px solid #c7d9d5;
-  border-radius: 9px;
-  background: #f8fcfa;
-  color: var(--teal);
-  font-size: 12px;
-}
 .admin-create-form {
   margin-top: 20px;
   padding-top: 18px;
   border-top: 1px solid var(--line);
-}
-.admin-user-primary {
-  border-color: #a9cbc4 !important;
-  background: #eef7f4 !important;
-  color: var(--teal) !important;
-}
-.admin-user-menu {
-  position: relative;
-}
-.admin-user-menu summary {
-  display: inline-flex;
-  min-height: 31px;
-  padding: 5px 9px;
-  align-items: center;
-  border: 1px solid #cadcd8;
-  border-radius: 9px;
-  background: #fbfdfc;
-  color: var(--ink-soft);
-  font-size: 12px;
-  cursor: pointer;
-  list-style: none;
-}
-.admin-user-menu > div {
-  position: absolute;
-  top: calc(100% + 5px);
-  right: 0;
-  z-index: 8;
-  min-width: 150px;
-  padding: 5px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface-strong);
-  box-shadow: 0 12px 28px rgba(18, 56, 59, 0.13);
-}
-.admin-user-menu > div button {
-  width: 100%;
-  padding: 7px 9px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--ink-soft);
-  font-size: 12px;
-  text-align: left;
-}
-.admin-user-menu > div button:hover {
-  background: #f0f7f4;
 }
 .admin-detail-tabs {
   display: flex;
@@ -2699,54 +2474,8 @@ a:focus-visible {
   color: var(--teal);
   font-weight: 600;
 }
-.admin-conversation-layout {
-  display: grid;
-  grid-template-columns: minmax(210px, 0.8fr) minmax(0, 1.8fr);
-  gap: 22px;
-  margin-top: 22px;
-}
-.admin-conversation-list-column {
-  min-width: 0;
-  padding-right: 20px;
-  border-right: 1px solid var(--line);
-}
-.admin-conversation-list-column h4,
-.admin-conversation-view h4 {
-  margin: 0 0 10px;
-  color: var(--ink-soft);
-  font-size: 13px;
-}
-.admin-conversation-view {
-  min-width: 0;
-}
-.admin-conversation.active {
-  background: var(--teal-soft);
-  color: var(--ink);
-  font-weight: 600;
-}
-
 .admin-activity-list {
   margin-top: 8px;
-}
-.admin-empty-state {
-  display: grid;
-  place-items: center;
-  min-height: 150px;
-  padding: 24px;
-  border: 1px dashed #c8dbd6;
-  border-radius: 12px;
-  color: var(--muted);
-  text-align: center;
-}
-.admin-empty-state strong {
-  color: var(--ink-soft);
-  font-size: 13px;
-}
-.admin-empty-state p {
-  max-width: 34ch;
-  margin-top: 5px;
-  font-size: 11px;
-  line-height: 1.7;
 }
 .admin-dialog-backdrop {
   position: fixed;
@@ -2815,18 +2544,6 @@ a:focus-visible {
   }
   .topic-tags button {
     min-height: 36px;
-  }
-  .admin-conversation-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .admin-conversation-list-column {
-    padding: 0 0 15px;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-  }
-  .admin-section-heading,
-  .admin-detail-heading {
-    align-items: flex-start;
   }
   .admin-detail-tabs {
     margin-inline: -2px;
@@ -3067,35 +2784,6 @@ a:focus-visible {
   padding: 8px 11px;
   white-space: nowrap;
 }
-.role-segment {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px;
-  min-height: 42px;
-  padding: 4px;
-  border: 1px solid #c9dcd7;
-  border-radius: 10px;
-  background: #f3f8f6;
-}
-.role-segment button {
-  min-height: 32px;
-  padding: 5px 8px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 12px;
-}
-.role-segment button:hover:not(:disabled) {
-  background: #e8f2ef;
-  color: var(--ink-soft);
-}
-.role-segment button.active {
-  background: #ffffff;
-  color: var(--teal);
-  font-weight: 600;
-  box-shadow: 0 2px 8px rgba(18, 56, 59, 0.09);
-}
 select {
   color-scheme: light;
 }
@@ -3127,6 +2815,12 @@ select option {
 .admin-toolbar input[aria-label="搜索用户名"] { min-width: 240px; }
 .admin-toolbar button, .admin-conversation-search button { min-height: 42px; border-radius: 10px; padding: 8px 15px; }
 .admin-toolbar form button, .admin-conversation-search button { background: var(--teal-soft); color: var(--teal); font-weight: 650; }
+.admin-usage-summary { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; margin-bottom: 20px; padding: 18px 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.admin-usage-summary strong { color: var(--teal); font-size: 28px; line-height: 1.2; }
+.admin-usage-summary small { color: var(--muted); }
+.admin-usage-breakdown { display: flex; flex-wrap: wrap; gap: 24px 48px; width: 100%; margin-top: 14px; padding-top: 16px; border-top: 1px solid var(--line); }
+.admin-usage-breakdown > div { display: flex; flex-direction: column; gap: 5px; min-width: 125px; }
+.admin-usage-breakdown strong { font-size: 20px; }
 .admin-account-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
 .admin-account-card { display: grid; gap: 14px; min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: 0 8px 28px rgba(18, 56, 59, .04); }
 .admin-account-card > div:first-child { display: flex; align-items: center; gap: 10px; }

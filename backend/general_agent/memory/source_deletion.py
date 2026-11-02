@@ -14,13 +14,16 @@ from general_agent.memory.service import MemoryService
 class SourceDeletion:
     """来源删除先撤回使用许可，再复用正式记忆删除与本机物理清理。"""
 
-    def __init__(self, memory: MemoryDeletion, memories: MemoryService, delete_attachment_file: Callable[[UUID], None] | None = None) -> None:
-        """绑定记忆与附件清理接口，图片远端删除由附件模块负责。"""
+    def __init__(self, memory: MemoryDeletion, memories: MemoryService,
+                 delete_attachment_file: Callable[[UUID], None] | None = None,
+                 delete_generated: Callable[[Any, UUID, UUID], None] | None = None) -> None:
+        """绑定记忆、附件和 Skill 生成目录清理接口。"""
         self.memory=memory
         self.memories=memories
         self.database=memories.database
         self.directory=memories.directory/'attachments'
         self.delete_attachment_file = delete_attachment_file
+        self.delete_generated = delete_generated
 
     def impact(self, connection: Any, kind: str, conversation_id: UUID, source_id: UUID, account_id: UUID) -> dict[str,Any]:
         """按真实来源关系收集关联动作，经正式记忆接口核验可保留项，不按正文扩大影响。"""
@@ -84,7 +87,6 @@ class SourceDeletion:
         row=connection.execute('SELECT * FROM source_deletions WHERE id=%s',(identifier,)).fetchone()
         message_ids=row['message_ids']
         connection.execute('DELETE FROM memory_native_steps WHERE message_id=ANY(%s)',(message_ids,))
-        connection.execute("UPDATE memory_tool_runs SET result='{}' WHERE message_id=ANY(%s)",(message_ids,))
         operations={item['operation_id'] for item in connection.execute('SELECT operation_id FROM messages WHERE (id=ANY(%s) OR reply_to=ANY(%s)) AND operation_id IS NOT NULL',(message_ids,message_ids)).fetchall()}
         if row['kind'] == 'attachment':
             operations.update(item['operation_id'] for item in connection.execute("SELECT operation_id FROM messages WHERE conversation_id=%s AND status='generating' AND operation_id IS NOT NULL",(row['conversation_id'],)).fetchall())
@@ -104,7 +106,7 @@ class SourceDeletion:
         connection.execute('UPDATE cloud_operations SET cancelled=TRUE,invalidated=TRUE,result=NULL,response_status=NULL WHERE id=ANY(%s)',(list(operations),))
         connection.execute("UPDATE model_calls SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE operation_id=ANY(%s) AND status='reserved'",(list(operations),))
         connection.execute("UPDATE messages SET status='stopped',content='',error='来源已删除，本次生成已失效。' WHERE operation_id=ANY(%s) AND status='generating'",(list(operations),))
-        connection.execute("UPDATE search_requests SET status='expired',query='',completed_queries='{}',results='[]',sources='[]',error='来源已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
+        connection.execute("UPDATE search_requests SET status='cancelled',query='',completed_queries='{}',results='[]',sources='[]',error='来源已删除，旧搜索批准已失效。' WHERE operation_id=ANY(%s)",(list(operations),))
         connection.execute("UPDATE messages SET web_sources='[]' WHERE operation_id=ANY(%s)",(list(operations),))
         for message_id in message_ids:
             connection.execute('INSERT INTO memory_source_suppressions(message_id) VALUES(%s) ON CONFLICT DO NOTHING',(message_id,))
@@ -145,6 +147,8 @@ class SourceDeletion:
         connection.execute('DELETE FROM attachments WHERE id=ANY(%s)',(row['attachment_ids'],))
         if row['kind']!='conversation':
             return
+        if self.delete_generated is not None:
+            self.delete_generated(connection, row['user_id'], row['conversation_id'])
         messages=row['message_ids']
         connection.execute('DELETE FROM memory_recalls WHERE message_id=ANY(%s)',(messages,))
         connection.execute("UPDATE memory_updates SET source_deleted=TRUE,source_message_id=NULL,source_conversation_id=NULL,fact='',previous_fact='',error=NULL WHERE source_conversation_id=%s",(row['conversation_id'],))

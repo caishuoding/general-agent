@@ -1,8 +1,7 @@
-"""管理会话知识库、图片文件身份及附件三十天生命周期。"""
+"""管理会话文档、本地图片及附件三十天生命周期。"""
 
 import logging
 import shutil
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,7 +13,7 @@ import httpx
 from psycopg.types.json import Jsonb
 
 from general_agent.attachments.images import validate_image
-from general_agent.attachments.files import DeepSeekFiles, file_api_base
+from general_agent.attachments.zhipu_images import image_url_part
 from general_agent.infrastructure.database import Database
 from general_agent.attachments.documents import parse_document
 from general_agent.attachments.pdf_text import PDF_TEXT_SOURCE
@@ -31,9 +30,8 @@ from general_agent.attachments.knowledge import (
 from general_agent.attachments.pagination import paginate_word
 from general_agent.attachments.tools import DocumentTools
 from general_agent.attachments.retrieval import DocumentRetrieval
-from general_agent.infrastructure.provider import FilePart, ModelFailure, ModelMessage, TextPart
-from general_agent.infrastructure.settings import SettingsStore
-from general_agent.attachments.upload import UploadedFile
+from general_agent.infrastructure.provider import ImagePart, ModelFailure, ModelMessage, TextPart
+from general_agent.attachments.upload import UploadedFile, SKILL_SOURCE_EXTENSIONS
 from general_agent.prompts import attachment_data, image_material_label
 
 LOGGER = logging.getLogger(__name__)
@@ -78,8 +76,7 @@ class AttachmentService:
         self.transport = transport
         self.settings_directory = directory
         self.directory = directory / 'attachments'
-        self.files = DeepSeekFiles(SettingsStore(directory), transport)
-        self.vision = DocumentVision(directory, self.files, transport)
+        self.vision = DocumentVision(directory, transport)
         self.documents = DocumentTools(database, self.policy, DocumentRetrieval(database, directory, transport))
 
     @property
@@ -168,7 +165,7 @@ class AttachmentService:
             self.process_file(attachment_id)
 
     def process_file(self, attachment_id: UUID) -> None:
-        """用同一计数快照完成原生或 OCR 解析，再统一描述插图和切片，发布前重核 TTL。"""
+        """解析文字与图片；制作专用格式只保留原件并标记，不误作 UTF-8 文本或可检索正文。"""
         info: dict[str, Any] = {}
         try:
             with self.database.connect() as connection:
@@ -178,15 +175,28 @@ class AttachmentService:
             policy = self.policy
             path = self.directory / str(attachment_id)
             extension = Path(str(row['filename'])).suffix.lower()
+            if extension in SKILL_SOURCE_EXTENSIONS:
+                if extension in {'.pptx', '.xlsx', '.xlsm'}:
+                    from zipfile import ZipFile, BadZipFile
+                    try:
+                        with ZipFile(path) as package:
+                            names = package.namelist()
+                            expected = 'ppt/presentation.xml' if extension == '.pptx' else 'xl/workbook.xml'
+                            if len(names) > 20000 or expected not in names or sum(item.file_size for item in package.infolist()) > 500_000_000:
+                                raise ValueError('Office 文件结构无效或展开后过大。')
+                    except BadZipFile:
+                        raise ValueError('Office 文件不是有效的 PPTX 或 XLSX 包。') from None
+                with self.database.connect() as connection:
+                    connection.execute("UPDATE attachments SET status='ready',parse_info=%s,error=NULL WHERE id=%s AND status='processing' AND expires_at>CURRENT_TIMESTAMP", (Jsonb({'format': extension[1:], 'skill_source': True}), attachment_id))
+                return
             if extension in {'.png', '.jpg', '.jpeg'}:
                 metadata = validate_image(path, extension)
-                remote = self.files.upload(path, str(row['filename']), metadata['mime'])
                 with self.database.connect() as connection:
                     connection.execute(
-                        "UPDATE attachments SET provider_file=%s,image_metadata=%s,"
+                        "UPDATE attachments SET image_metadata=%s,"
                         "status=CASE WHEN status='processing' THEN 'ready' ELSE status END,error=NULL "
                         "WHERE id=%s AND (status IN ('processing','deleting') OR expires_at<=CURRENT_TIMESTAMP)",
-                        (Jsonb(remote), Jsonb(metadata), attachment_id),
+                        (Jsonb(metadata), attachment_id),
                     )
                 return
             with TemporaryDirectory(dir=self.directory, prefix='.pagination-') as temporary:
@@ -277,10 +287,9 @@ class AttachmentService:
                 results.append(item)
                 continue
             try:
-                description, remote = self.vision.describe(directory / image.storage_name, image)
+                description = self.vision.describe(directory / image.storage_name, image)
                 item.update(
                     description=description,
-                    provider_file=remote,
                     vision_status='complete',
                     vision_model=self.vision.name,
                     vision_revision=self.vision.revision,
@@ -294,7 +303,7 @@ class AttachmentService:
                 )
             cache[image.sha256] = {
                 key: item[key] for key in (
-                    'description', 'provider_file',
+                    'description',
                     'vision_status', 'vision_model', 'vision_revision', 'vision_error',
                 ) if key in item
             }
@@ -322,7 +331,7 @@ class AttachmentService:
         return path, str(row['filename'])
 
     def prepare(self, conversation_id: UUID, account_id: UUID) -> AttachmentContext:
-        """每轮提供已升级的有效文档清单和图片身份，正文由工具按需读取。"""
+        """提供授权会话的文档清单、制作原件清单及本地图片内容。"""
         with self.database.connect() as connection:
             if not connection.execute(
                 "SELECT id FROM conversations WHERE id=%s AND user_id=%s AND NOT deleting",
@@ -330,7 +339,7 @@ class AttachmentService:
             ).fetchone():
                 raise LookupError("会话不存在。")
             rows = connection.execute(
-                "SELECT id,filename,parse_info,image_metadata,provider_file,knowledge_version FROM attachments "
+                 "SELECT id,filename,parse_info,image_metadata,knowledge_version FROM attachments "
                 "WHERE conversation_id=%s AND status='ready' AND expires_at>CURRENT_TIMESTAMP ORDER BY created_at,id",
                 (conversation_id,),
             ).fetchall()
@@ -345,63 +354,33 @@ class AttachmentService:
             if row['image_metadata'] is None and row['knowledge_version'] == 2
         ]
         images = [row for row in rows if row['image_metadata'] is not None]
-        if not documents and not images:
+        originals = [{'source_id': str(row['id']), 'filename': row['filename'], 'kind': 'attachment'}
+            for row in rows if row['parse_info'].get('skill_source')]
+        if not documents and not images and not originals:
             return AttachmentContext()
 
         messages: list[ModelMessage] = []
+        if originals:
+            import json
+            messages.append({'role': 'user', 'content': '制作专用附件原件（尚未读取内容，可通过 import_skill_source 导入）：' + json.dumps(originals, ensure_ascii=False)})
         if documents:
             messages.append({'role': 'user', 'content': attachment_data(documents)})
         if images:
-            parts: list[TextPart | FilePart] = []
+            parts: list[TextPart | ImagePart] = []
             for index, row in enumerate(images, 1):
                 parts.append({'type': 'text', 'text': image_material_label(f'图片{index}', str(row['filename']))})
-                remote = self.image_file(row['id'])
-                parts.append({'type': 'file', 'file_id': remote['id']})
+                parts.append(image_url_part(self.directory / str(row['id']), row['image_metadata']['mime']))
             messages.append({'role': 'user', 'content': parts})
         return AttachmentContext(messages)
 
-    def image_file(self, attachment_id: UUID) -> dict[str, Any]:
-        """读取未到期图片身份，旧图片补上传；同时核对应用及供应商有效期。"""
-        with self.database.connect() as lock:
-            lock.autocommit = True
-            lock.execute('SELECT pg_advisory_lock(%s,%s)', (FILE_LOCK_NAMESPACE, attachment_id.int % (2**31 - 1)))
-            row = lock.execute(
-                "SELECT filename,image_metadata,provider_file FROM attachments WHERE id=%s AND status='ready' AND expires_at>CURRENT_TIMESTAMP",
-                (attachment_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError('图片已删除或不可用，请重新上传。')
-            remote = row['provider_file']
-            if remote is None:
-                remote = self.files.upload(self.directory / str(attachment_id), row['filename'], row['image_metadata']['mime'])
-                lock.execute("UPDATE attachments SET provider_file=%s WHERE id=%s AND status IN ('ready','deleting')", (Jsonb(remote), attachment_id))
-            if remote['expires_at'] <= time.time():
-                lock.execute("UPDATE attachments SET status='failed',error='图片的 30 天有效期已结束，请重新上传。' WHERE id=%s AND status='ready'", (attachment_id,))
-                raise ValueError('图片的 30 天有效期已结束，请重新上传。')
-            settings = self.files.settings.read()
-            if settings is None or file_api_base(settings) != remote['base_url']:
-                raise ValueError('LLM 服务地址已变化，请在当前服务重新上传图片。')
-            if not lock.execute("SELECT id FROM attachments WHERE id=%s AND status='ready' AND expires_at>CURRENT_TIMESTAMP", (attachment_id,)).fetchone():
-                raise ValueError('图片已删除或不可用。')
-            return dict(remote)
-
     def delete_file(self, attachment_id: UUID) -> None:
-        """串行清理独立图片、文档图片的远端身份，以及原件、分页副本和派生图片目录。"""
+        """串行清理本地原件、分页副本和派生图片目录。"""
         with self.database.connect() as lock:
             lock.autocommit = True
-            lock.execute('SELECT pg_advisory_lock(%s,%s)', (FILE_LOCK_NAMESPACE, attachment_id.int % (2**31 - 1)))
-            row = lock.execute('SELECT provider_file FROM attachments WHERE id=%s', (attachment_id,)).fetchone()
-            if row and row['provider_file']:
-                self.files.delete(row['provider_file'])
-                lock.execute('UPDATE attachments SET provider_file=NULL WHERE id=%s', (attachment_id,))
-            document_files = lock.execute(
-                'SELECT DISTINCT provider_file FROM document_images '
-                'WHERE attachment_id=%s AND provider_file IS NOT NULL',
-                (attachment_id,),
-            ).fetchall()
-            for item in document_files:
-                self.files.delete(item['provider_file'])
-            lock.execute('UPDATE document_images SET provider_file=NULL WHERE attachment_id=%s', (attachment_id,))
+            lock.execute(
+                'SELECT pg_advisory_lock(%s,%s)',
+                (FILE_LOCK_NAMESPACE, attachment_id.int % (2**31 - 1)),
+            )
             (self.directory / str(attachment_id)).unlink(missing_ok=True)
             (self.directory / f'{attachment_id}.pdf').unlink(missing_ok=True)
             shutil.rmtree(self.directory / f'{attachment_id}.images', ignore_errors=True)
@@ -427,40 +406,21 @@ class AttachmentService:
             ).fetchone():
                 raise LookupError('会话不存在。')
             rows = connection.execute(
-                'SELECT i.id,i.attachment_id,i.storage_name,i.mime,i.provider_file,i.location,'
+                'SELECT i.id,i.attachment_id,i.storage_name,i.mime,i.location,'
                 'a.filename FROM document_images i JOIN attachments a ON a.id=i.attachment_id '
                 'WHERE i.id=ANY(%s) AND a.conversation_id=%s AND a.status=\'ready\' '
                 'AND a.expires_at>CURRENT_TIMESTAMP ORDER BY a.created_at,a.id,i.ordinal',
                 (identifiers, conversation_id),
             ).fetchall()
-        parts: list[TextPart | FilePart] = []
+        parts: list[TextPart | ImagePart] = []
         selected: list[UUID] = []
         for index, row in enumerate(rows, 1):
-            remote = self.document_image_file(row)
+            path = self.directory / f"{row['attachment_id']}.images" / row['storage_name']
             label = f"{row['filename']}；{row['location']}"
             parts.append({'type': 'text', 'text': image_material_label(f'文档图片{index}', label)})
-            parts.append({'type': 'file', 'file_id': remote['id']})
+            parts.append(image_url_part(path, row['mime']))
             selected.append(row['id'])
         return ({'role': 'user', 'content': parts} if parts else None), selected
-
-    def document_image_file(self, row: dict[str, Any]) -> dict[str, Any]:
-        """复用有效派生图片身份；过期或服务变更时从本地图片重新上传。"""
-        remote = row['provider_file']
-        settings = self.files.settings.read()
-        if remote is not None and settings is not None and file_api_base(settings) == remote['base_url'] and remote['expires_at'] > time.time():
-            return dict(remote)
-        path = self.directory / f"{row['attachment_id']}.images" / row['storage_name']
-        if not path.is_file():
-            raise ValueError('文档图片原文件已不可用，请重新处理附件。')
-        remote = self.files.upload(path, row['storage_name'], row['mime'])
-        with self.database.connect() as connection:
-            connection.execute(
-                "UPDATE document_images SET provider_file=%s WHERE id=%s AND ("
-                "SELECT status='ready' AND expires_at>CURRENT_TIMESTAMP FROM attachments "
-                "WHERE id=document_images.attachment_id)",
-                (Jsonb(remote), row['id']),
-            )
-        return remote
 
     def expire(self) -> None:
         """先停用到期附件，再清理所有派生内容和文件；失败保留到期身份供定时重试。"""

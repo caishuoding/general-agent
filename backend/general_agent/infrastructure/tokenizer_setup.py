@@ -1,23 +1,21 @@
-"""安装固定来源及校验值的 DeepSeek 官方分词数据，不执行下载包中的代码。"""
+"""安装固定来源及校验值的 GLM-5.3-Flash 官方分词数据，不执行下载内容。"""
 
 import argparse
 from hashlib import sha256
-from io import BytesIO
 import json
 import os
 from pathlib import Path
 import tempfile
-from zipfile import ZipFile
 
 import httpx
 from tokenizers import Tokenizer
 
 from general_agent.infrastructure.tokens import TokenCounter, _Registration, _Registry
 
-OFFICIAL_URL = 'https://cdn.deepseek.com/api-docs/deepseek_v4_tokenizer.zip'
-OFFICIAL_SHA256 = '89085f12ef79460ac5f66d1119325ddfc694b4ab209d80bbd81d35f081dc9614'
-TOKENIZER_PATH = Path('tokenizers/deepseek-v4/tokenizer.json')
-MAX_BYTES = 16 * 1024 * 1024
+OFFICIAL_URL = 'https://huggingface.co/zai-org/GLM-5.3-Flash/resolve/46a050bec13002ad29ee795c16e61cf4fa3c4a9c/tokenizer.json'
+OFFICIAL_SHA256 = '19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d'
+TOKENIZER_PATH = Path('tokenizers/glm-5.3-flash/tokenizer.json')
+MAX_BYTES = 32 * 1024 * 1024
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
@@ -34,9 +32,9 @@ def _atomic_write(path: Path, data: bytes) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
-def install_deepseek(directory: Path, *, base_url: str = 'https://api.deepseek.com',
-                     transport: httpx.BaseTransport | None = None) -> TokenCounter:
-    """安装并注册 deepseek-flash 官方文件，保留其他模型注册，重复执行复用已校验资产。"""
+def install_glm(directory: Path, *, base_url: str = 'https://open.bigmodel.cn/api/paas/v4',
+                transport: httpx.BaseTransport | None = None) -> TokenCounter:
+    """安装并注册 glm-5.3-flash 官方文件，保留其他模型注册，重复执行复用已校验资产。"""
     registry_path = directory / 'tokenizers.json'
     registry = _Registry.model_validate_json(registry_path.read_bytes()) if registry_path.exists() else _Registry(models=[])
     destination = directory / TOKENIZER_PATH
@@ -49,17 +47,13 @@ def install_deepseek(directory: Path, *, base_url: str = 'https://api.deepseek.c
                 for part in response.iter_bytes():
                     archive.extend(part)
                     if len(archive) > MAX_BYTES:
-                        raise ValueError('官方分词器下载包超过大小限制。')
-        with ZipFile(BytesIO(archive)) as bundle:
-            member = bundle.getinfo('deepseek_v4_tokenizer/tokenizer.json')
-            if member.file_size > MAX_BYTES:
-                raise ValueError('官方分词器数据超过大小限制。')
-            data = bundle.read(member)
+                        raise ValueError('官方分词器文件超过大小限制。')
+        data = bytes(archive)
         if sha256(data).hexdigest() != OFFICIAL_SHA256:
             raise ValueError('官方分词器文件校验失败，未修改现有配置。')
         Tokenizer.from_str(data.decode('utf-8'))
         _atomic_write(destination, data)
-    entry = _Registration(base_url=base_url.rstrip('/'), model='deepseek-flash', adapter='huggingface',
+    entry = _Registration(base_url=base_url.rstrip('/'), model='glm-5.3-flash', adapter='huggingface',
                           path=TOKENIZER_PATH.as_posix(), sha256=OFFICIAL_SHA256, source=OFFICIAL_URL)
     registry.models = [item for item in registry.models if (item.base_url.rstrip('/'), item.model) != (entry.base_url, entry.model)]
     registry.models.append(entry)
@@ -69,11 +63,11 @@ def install_deepseek(directory: Path, *, base_url: str = 'https://api.deepseek.c
 
 def main() -> None:
     """提供可重复安装入口，打印不含凭据的资产身份与离线计数结果。"""
-    parser = argparse.ArgumentParser(description='安装 DeepSeek 官方分词器')
+    parser = argparse.ArgumentParser(description='安装 GLM-5.3-Flash 官方分词器')
     parser.add_argument('--directory', type=Path, default=Path(os.environ.get('APP_DATA_DIR', '.local')))
-    parser.add_argument('--base-url', default='https://api.deepseek.com')
+    parser.add_argument('--base-url', default='https://open.bigmodel.cn/api/paas/v4')
     args = parser.parse_args()
-    counter = install_deepseek(args.directory, base_url=args.base_url)
+    counter = install_glm(args.directory, base_url=args.base_url)
     print(json.dumps({'model': counter.model, 'method': counter.method, 'fingerprint': counter.fingerprint,
                       'sample': '你好，世界！', 'tokens': counter.count('你好，世界！')}, ensure_ascii=False))
 

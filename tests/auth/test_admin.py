@@ -10,9 +10,7 @@ from psycopg.rows import dict_row
 
 from general_agent.app import create_app
 from tests.auth.support import (
-    TEST_ADMIN_PASSWORD,
     admin_client,
-    login_admin,
     login_and_change_password,
 )
 
@@ -179,8 +177,8 @@ def test_admin_can_view_all_user_content_read_only_and_audit_it(
             json={"content": "管理员不能代发"},
         ).status_code in {404, 405}
 
-        with psycopg.connect(database_url, row_factory=dict_row) as connection:
-            audit = connection.execute(
+        with psycopg.connect(database_url, row_factory=dict_row) as audit_connection:
+            audit = audit_connection.execute(
                 "SELECT admin_user_id, target_user_id, resource_type, action "
                 "FROM admin_audit_log WHERE target_user_id=%s ORDER BY created_at",
                 (bob_id,),

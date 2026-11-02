@@ -85,3 +85,10 @@ class StreamingMockTransport(httpx.MockTransport):
         body = ''.join('data: ' + json.dumps(event, ensure_ascii=False) + '\n\n' for event in events) + 'data: [DONE]\n\n'
         return httpx.Response(200, text=body, headers={'Content-Type': 'text/event-stream'})
 
+
+
+def current_tool_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """外部模型替身只依据当前用户请求后的工具结果推进，允许保留历史工具交互。"""
+    messages = payload['messages']
+    start = max((index for index, item in enumerate(messages) if item.get('role') == 'user'), default=-1)
+    return [item for item in messages[start + 1:] if item.get('role') == 'tool']

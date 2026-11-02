@@ -1,6 +1,6 @@
 # LangGraph 重构交接文档
 
-更新日期：2026-10-23
+更新日期：2026-11-01
 
 ## 1. 当前状态
 
@@ -20,23 +20,24 @@
 ### 提示词组装
 
 - `base_system_prompt` 是唯一静态系统提示。
-- `always_sent_prompt` 表示每次调用都必须携带的内容，`compose_system_prompt` 负责追加工具回合、工具结果、附件和记忆等动态片段。
-- 附件、记忆和网页原始数据只放 `user` 或 `tool` 消息；工具结果出现后只追加通用的不可信数据边界。
+- 工具图按当前有效 Skill、未配对工具步骤和压缩摘要组装动态系统指令；附件清单、长期记忆和网页原始数据只放 `user` 或 `tool` 消息。
+- 工具结果出现后只追加通用的不可信数据边界，压缩摘要不获得系统指令权限。
 
 ### 联网搜索
 
 - `search_web`、`fetch_web` 与记忆、文档、知识库工具注册在同一模型工具循环中，由模型自主决定调用。
-- 查询直接发送给 DeepSeek Search / Fetch，不经过正则意图路由、查询编辑或用户批准。
+- 查询直接发送给 智谱 Web Search / Reader，不经过正则意图路由、查询编辑或用户批准。
 - 工具结果按不可信数据处理；搜索记录、实际用量和网页来源核验继续保留。
 
 ### State 与持久化
 
-- prepare_context 返回模型消息、附件来源标识和调用预留；agent 从 State 读取并返回工具循环消息、回答和执行标志；finalize 返回核验后的消息、回答及来源。
-- runtime.context 不可变，只传递固定身份、模型配置、操作身份和传输模式，不再放 preparation、answer 或历史消息。
+- `prepare_context` 返回模型消息和附件来源标识；`agent` 从 State 读取并返回工具循环消息、回答和执行标志；`finalize` 返回核验后的消息、回答及来源。
+- `runtime.context` 不可变，只传递固定身份、模型配置、操作身份和传输模式，不放 preparation、answer 或历史消息。
 - 消息字段按完整快照覆盖，不使用追加 reducer 重复拼接历史；工具循环结果显式返回父图 State。
-- 外层图不配置 PostgreSQL checkpointer，也不再创建专用连接池。业务消息、流式增量、操作幂等及用量仍由既有表持久化，重启和重试语义保留。
-- 回答尝试 ID 继续用于追踪关联；迁移 052 已删除不再读取的旧 `langgraph` schema。
-- 当前决策与节点边界见 [ADR 0012](adr/0012-state-based-conversation-flow.md)；后文早期检查点建表记录属于历史实施证据。
+- 外层会话图使用稳定会话线程，主、子工具循环使用 `run:<run id>` 线程，并由官方 PostgreSQL checkpointer 同步保存。业务消息、流式增量、操作幂等及用量仍由既有表持久化。
+- 服务重启只暂停原执行；用户点击“继续执行”后沿用原回答、操作和预算恢复，不恢复 Python 调用栈或已断开的模型连接。无检查点的旧版生成会结束并要求重试。
+- 每次模型调用前按完整输入预算检查上下文；达到阈值后把较早交互压缩为资料摘要，原文仍完整保存在业务消息表中。
+- 当前决策与节点边界见 [ADR 0021](adr/0021-durable-context-and-compaction.md)；迁移 052 删除旧检查点结构属于历史实施记录，现行结构由启动时的 checkpointer 初始化重建。
 
 ### 长期记忆
 
@@ -119,7 +120,7 @@ bash scripts/start.sh
 
 - `model.json`：聊天模型配置
 - `embedding.json`：嵌入配置，供 Mem0 一次性配置容器读取
-- `search.json`：DeepSeek Search / Fetch 配置
+- `search.json`：智谱 Web Search / Reader 配置
 - `attachments/`：当前会话附件原文件
 - `logs/agent.log`：智能体节点流转日志
 

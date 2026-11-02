@@ -1,6 +1,5 @@
-"""DeepSeek Search / Fetch 的模型工具、操作记录与来源核验。"""
+"""Zhipu Web Search / Reader 的模型工具、操作记录与来源核验。"""
 
-import math
 import random
 import re
 import time
@@ -26,37 +25,29 @@ from general_agent.search.failures import WEB_MAX_ATTEMPTS, WEB_MAX_RETRY_WAIT, 
 
 SEARCH_CANDIDATE_COUNT = 15
 SEARCH_RESULT_LIMIT = 8
-HIGH_QUALITY_SCORE = 1.5
-LOW_QUALITY_SCORE = 1.0
-MIN_HIGH_QUALITY_RESULTS = 6
 MAX_RESULTS_PER_DOMAIN = 2
 
 
 class SearchSettingsInput(SettingsInput):
-    """固定 DeepSeek 搜索与抓取身份，独立凭据与可配置端点沿用安全 URL 校验。"""
+    """固定智谱搜索与网页读取身份，独立凭据与可配置端点沿用安全 URL 校验。"""
 
-    base_url: str = 'https://api.deepseek.com'
-    model: Literal['deepseek-search'] = 'deepseek-search'
+    base_url: str = 'https://open.bigmodel.cn/api/paas/v4'
+    model: Literal['zhipu-web'] = 'zhipu-web'
 
 
 class SearchWebInput(BaseModel):
-    """由模型同时生成搜索表达和不超过官方限制的原始用户意图。"""
+    """校验智谱 Web Search 的关键词查询。"""
 
     model_config = ConfigDict(str_strip_whitespace=True, extra='forbid', strict=True)
     query: str = Field(
         min_length=1,
-        max_length=128,
-        description='关键词化搜索表达，可按需加入 site:、lang:、after:、before: 等操作符。',
-    )
-    ori_question: str = Field(
-        min_length=1,
-        max_length=128,
-        description='触发搜索的当前用户完整意图；原话不超过 128 字时尽量原样填写，否则在不改变意图的前提下压缩。',
+        max_length=70,
+        description='关键词化搜索表达，智谱建议不超过 70 字；不要填写 URL。',
     )
 
 
 class FetchWebInput(BaseModel):
-    """校验交给 DeepSeek 抓取的网页地址，不在本机访问目标网站。"""
+    """校验交给智谱 Reader 抓取的网页地址，不在本机访问目标网站。"""
 
     model_config = ConfigDict(str_strip_whitespace=True, extra='forbid', strict=True)
     url: str = Field(min_length=1, max_length=8192)
@@ -86,52 +77,32 @@ def search_web_tool(name: str = "search_web") -> dict[str, Any]:
 
 
 def normalize_search_result(item: dict[str, Any], order: int) -> dict[str, Any] | None:
-    """收窄一条有效搜索结果，并保留官方质量字段供排序和模型判断。"""
-    if not isinstance(item.get('url'), str):
+    """保留智谱官方结果的标题、正文摘要、站点和日期，不臆造质量分数。"""
+    if not isinstance(item.get('link'), str):
         return None
     try:
-        url = FetchWebInput(url=item['url']).url
+        url = FetchWebInput(url=item['link']).url
     except ValueError:
         return None
     title = item.get('title')
-    summary = item.get('summary') or item.get('snippet') or ''
-    site_name = item.get('site_name')
-    date = item.get('date')
-    score = item.get('rerank_score')
-    authority = item.get('authority')
-    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(float(score)):
-        normalized_score = None
-    else:
-        normalized_score = float(score)
-    normalized_authority = (authority if isinstance(authority, int) and not isinstance(authority, bool)
-                            else None)
+    summary = item.get('content') or ''
+    site_name = item.get('media')
+    date = item.get('publish_date')
     return {
         'url': url,
         'title': str(title or '')[:500],
         'excerpt': str(summary)[:8000],
         'site_name': str(site_name or urlsplit(url).hostname or '')[:200],
         'date': str(date)[:100] if isinstance(date, str) and date.strip() else None,
-        'authority': normalized_authority,
-        'rerank_score': normalized_score,
         '_order': order,
     }
 
 
 def rank_search_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """按相关性和权威度排序，优先高质量结果并限制单一域名占满候选。"""
-    ranked = sorted(results, key=lambda item: (
-        -(item['rerank_score'] if item['rerank_score'] is not None else -1),
-        -(item['authority'] if item['authority'] is not None else -1),
-        item['_order'],
-    ))
-    high_quality = [item for item in ranked if item['rerank_score'] is not None
-                    and item['rerank_score'] >= HIGH_QUALITY_SCORE]
-    if len(high_quality) >= MIN_HIGH_QUALITY_RESULTS:
-        ranked = [item for item in ranked if item['rerank_score'] is None
-                  or item['rerank_score'] >= LOW_QUALITY_SCORE]
+    """保持供应商相关性顺序，并限制单一域名占满返回结果。"""
     selected: list[dict[str, Any]] = []
     domain_counts: dict[str, int] = {}
-    for item in ranked:
+    for item in results:
         domain = (urlsplit(item['url']).hostname or '').lower().removeprefix('www.')
         if domain and domain_counts.get(domain, 0) >= MAX_RESULTS_PER_DOMAIN:
             continue
@@ -166,22 +137,17 @@ class SearchService:
         user_message_id: UUID,
         query: str,
         operation: OperationContext,
-        source_attachment_ids: list[UUID] | None = None,
         *,
         kind: Literal["search", "fetch"] = "search",
-        ori_question: str | None = None,
     ) -> dict[str, Any]:
-        """执行一个搜索或抓取请求，校验模型给出的意图并复用本轮已有结果。"""
+        """执行搜索或抓取请求，校验参数并复用本轮已有结果。"""
         if kind == 'search':
-            if ori_question is None:
-                raise ValueError('搜索工具必须同时提供 query 和 ori_question。')
-            search_input = SearchWebInput(query=query, ori_question=ori_question)
-            query, ori_question = search_input.query, search_input.ori_question
+            query = SearchWebInput(query=query).query
         else:
             query = FetchWebInput(url=query).url
         saved = self.settings.read()
-        if saved is None or saved.model != 'deepseek-search':
-            raise ValueError('尚未配置 DeepSeek Search / Fetch。请在管理端填写 DeepSeek 搜索密钥。')
+        if saved is None or saved.model != 'zhipu-web':
+            raise ValueError('尚未配置 Zhipu Web Search / Reader。请在管理端填写智谱搜索密钥。')
         account_id = self.memory.account_id_for_conversation(conversation_id)
         with self.database.connect() as connection:
             self.memory.guard_source(connection, conversation_id, user_message_id, operation)
@@ -225,7 +191,7 @@ class SearchService:
                   or (kind == 'fetch' and item.get('kind') == 'fetch' and item['url'] == query)]
         if row['status'] in ('complete', 'failed') and (cached or (kind == 'search' and query in row['completed_queries'])):
             return {'query': query, 'results': cached}
-        if row['status'] in ('cancelled', 'rejected', 'expired'):
+        if row['status'] == 'cancelled':
             raise ValueError('该搜索已经结束或失效，请重新发送问题。')
         with self.database.connect() as connection:
             connection.execute(
@@ -234,7 +200,7 @@ class SearchService:
                 (kind == "search", query, row['id']),
             )
         try:
-            results = self.fetch(saved, query, operation, kind, ori_question)
+            results = self.fetch(saved, query, operation, kind)
         except Exception as error:
             detail = str(error) if isinstance(error, ModelFailure) else '联网搜索未完成，可以重试。'
             self.fail_request(operation, detail)
@@ -265,7 +231,7 @@ class SearchService:
         with self.database.connect() as connection:
             connection.execute(
                 "UPDATE search_requests SET status='failed',error=%s "
-                "WHERE operation_id=%s AND status IN ('planning','pending','approved')",
+                "WHERE operation_id=%s AND status='approved'",
                 (detail, operation.operation_id),
             )
 
@@ -278,18 +244,18 @@ class SearchService:
         with self.database.connect() as connection:
             connection.execute(
                 "UPDATE search_requests SET status='cancelled' "
-                "WHERE operation_id=%s AND status IN ('planning','pending','approved')",
+                "WHERE operation_id=%s AND status='approved'",
                 (operation_id,),
             )
 
     def fetch(
         self, settings: StoredSettings, query: str, operation: OperationContext,
-        kind: Literal["search", "fetch"] = "search", ori_question: str | None = None,
+        kind: Literal["search", "fetch"] = "search",
     ) -> list[dict[str, Any]]:
         """仅对临时网络故障执行初次加两次退避重试，每次外发独立鉴权、计数和计量。"""
         for attempt in range(WEB_MAX_ATTEMPTS):
             try:
-                return self.fetch_once(settings, query, operation, kind, ori_question)
+                return self.fetch_once(settings, query, operation, kind)
             except CallBudgetExceeded as error:
                 failure = WebRequestFailure(str(error), retryable=False, scope='execution', error_code='call_budget_exhausted')
                 failure.attempt_count = attempt
@@ -323,7 +289,7 @@ class SearchService:
 
     def fetch_once(
         self, settings: StoredSettings, query: str, operation: OperationContext,
-        kind: Literal['search', 'fetch'], ori_question: str | None,
+        kind: Literal['search', 'fetch'],
     ) -> list[dict[str, Any]]:
         """发送恰好一次真实请求，按官方 HTTP 状态分类失败并保留安全诊断字段。"""
         with self.database.connect() as connection:
@@ -332,51 +298,50 @@ class SearchService:
                 (operation.operation_id,),
             ).fetchone()
         base = settings.base_url.rstrip('/')
-        # 同时兼容官方根地址和常用的 /v1 地址，避免重复版本前缀。
-        endpoint = base + ('/tools/' if base.endswith('/v1') else '/v1/tools/') + kind
+        endpoint = base + ('/web_search' if kind == 'search' else '/reader')
         if kind == 'search':
-            if ori_question is None:
-                raise ValueError('搜索请求缺少模型生成的 ori_question。')
             body = {
-                'query': query,
-                'ori_question': ori_question,
+                'search_query': query,
+                'search_engine': 'search_pro',
+                'search_intent': False,
                 'count': SEARCH_CANDIDATE_COUNT,
-                'need_content': False,
+                'content_size': 'high',
             }
         else:
-            body = {'url': query}
+            body = {'url': query, 'return_format': 'markdown', 'retain_images': False}
         with self.calls.bind(operation).call(settings, 'credits', assistant_message_id=answer['id'] if answer else None,
                                              web_kind=kind) as call_id:
             try:
                 with httpx.Client(transport=self.transport, timeout=30, follow_redirects=False, trust_env=False) as client:
                     response = client.post(endpoint, headers={'Authorization': 'Bearer ' + settings.api_key}, json=body)
             except httpx.TimeoutException:
-                raise WebRequestFailure('DeepSeek 联网请求超时，本次未取得可核验结果。', retryable=True) from None
+                raise WebRequestFailure('智谱联网请求超时，本次未取得可核验结果。', retryable=True) from None
             except httpx.RequestError:
-                raise WebRequestFailure('无法连接 DeepSeek 联网服务，本次未取得可核验结果。', retryable=True) from None
+                raise WebRequestFailure('无法连接智谱联网服务，本次未取得可核验结果。', retryable=True) from None
             if response.status_code != 200:
                 self.calls.operations.record(call_id, TokenUsage(), credits=Decimal(0))
                 raise http_failure(response)
             try:
                 payload = response.json()
             except ValueError:
-                raise WebRequestFailure('DeepSeek 返回了无效 JSON，本次未完成请求。', retryable=False) from None
+                raise WebRequestFailure('智谱返回了无效 JSON，本次未完成请求。', retryable=False) from None
             if not isinstance(payload, dict):
-                raise WebRequestFailure('DeepSeek 返回了无效结果，本次未完成请求。', retryable=False)
+                raise WebRequestFailure('智谱返回了无效结果，本次未完成请求。', retryable=False)
             if kind == 'fetch':
-                if not isinstance(payload.get('content'), str) or not isinstance(payload.get('title'), str):
-                    raise WebRequestFailure('DeepSeek 未返回有效网页正文，本次未完成抓取。', retryable=False)
-                content = payload['content']
+                result = payload.get('reader_result')
+                if not isinstance(result, dict) or not isinstance(result.get('content'), str) or not isinstance(result.get('title'), str):
+                    raise WebRequestFailure('智谱未返回有效网页正文，本次未完成抓取。', retryable=False)
+                content = result['content']
                 self.calls.operations.record(call_id, TokenUsage(), credits=Decimal(int(bool(content.strip()))))
                 if not content.strip():
-                    raise WebRequestFailure('DeepSeek 未返回可读取的网页正文。', retryable=False)
-                return [{'url': query, 'title': payload['title'], 'excerpt': content[:8000], 'content': content}]
-            if not isinstance(payload.get('results'), list):
-                raise WebRequestFailure('DeepSeek 未返回有效结果列表，本次未完成搜索。', retryable=False)
-            self.calls.operations.record(call_id, TokenUsage(), credits=Decimal(int(bool(payload['results']))))
+                    raise WebRequestFailure('智谱未返回可读取的网页正文。', retryable=False)
+                return [{'url': query, 'title': result['title'], 'excerpt': content[:8000], 'content': content}]
+            if not isinstance(payload.get('search_result'), list):
+                raise WebRequestFailure('智谱未返回有效结果列表，本次未完成搜索。', retryable=False)
+            self.calls.operations.record(call_id, TokenUsage(), credits=Decimal(int(bool(payload['search_result']))))
             results = [
                 normalized
-                for order, item in enumerate(payload['results'][:50])
+                for order, item in enumerate(payload['search_result'][:50])
                 if isinstance(item, dict)
                 and (normalized := normalize_search_result(item, order)) is not None
             ]

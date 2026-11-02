@@ -47,11 +47,7 @@ class MemoryRecall:
                 raise ValueError('原操作已失效，未保存迟到的召回检查点。')
             connection.execute('INSERT INTO memory_recalls(operation_id,message_id,user_id,status,matches,match_count,detail,embedding_revision) VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(operation_id) DO UPDATE SET user_id=EXCLUDED.user_id,status=EXCLUDED.status,matches=EXCLUDED.matches,match_count=EXCLUDED.match_count,detail=EXCLUDED.detail,embedding_revision=EXCLUDED.embedding_revision,updated_at=CURRENT_TIMESTAMP',(operation.operation_id,user_id,operation.conversation_id and self.memory.account_id_for_conversation(operation.conversation_id),status,Jsonb(hits),len(hits),detail,revision))
 
-    def prepare(self, user_id: UUID, query: str, operation: OperationContext, reserved: UUID | None, skip: bool = False) -> list[ModelMessage]:
-        """空间租约覆盖召回检查点发布，维护期诚实降级而不把新向量用于旧表。"""
-        return self.prepare_leased(user_id,query,operation,reserved,skip)
-
-    def prepare_leased(self, user_id: UUID, query: str, operation: OperationContext, reserved: UUID | None, skip: bool = False) -> list[ModelMessage]:
+    def prepare(self, user_id: UUID, query: str, operation: OperationContext) -> list[ModelMessage]:
         """召回或重读已完成标识；失败时明确降级当前会话回答并保留已完成步骤。"""
         if operation.conversation_id is None:
             raise ValueError("召回缺少会话范围。")
@@ -66,7 +62,7 @@ class MemoryRecall:
                 detail='长期记忆重新核验失败，本次仅按当前会话回答。'
                 self.record(operation,user_id,'failed',detail)
                 return self.failure_material(detail)
-        if skip or not self.available(account_id):
+        if not self.available(account_id):
             self.record(operation,user_id,'skipped','当前没有需要召回的已批准长期记忆。')
             return []
         self.record(operation,user_id,'pending','正在检索相关长期记忆。')

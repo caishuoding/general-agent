@@ -22,3 +22,10 @@
 真实 LangSmith SDK 在本地收集追踪树，关闭网络投递；验证 prepare_context 输出可见准备材料、agent 读取相同 State、回答可见，节点输入输出不含模型配置密钥。数据库测试使用隔离 PostgreSQL 库，模型在 HTTP 边界采用受控响应。
 
 本次不新增中断恢复、压缩或附件处理策略，也没有进行生产部署。附件真实使用、RAG 质量和长文章总结仍按 [附件待办](../.scratch/conversation-document-tools/TODO.md) 保持待验／待设计，不以本次回归替代。
+
+
+## 2026-11-01 当前实现补充
+
+本文其余内容记录 2026-10-21 的历史验证。此后 ADR 0021 已恢复 PostgreSQL 检查点并增加自动上下文压缩：`ConversationState` 不再保存 `reserved_call_id`，`reserve_first()`、`chat_reservation()` 和旧预留在业务入口中的透传均已删除。调用网关仍在每次真实外发时创建并计量独立记录。外层具备 Skill 能力时预留 128 轮图递归空间，业务轮数仍由集中 `LIMITS` 控制。
+
+断线续写会在新增 assistant 前缀和 continuation 用户消息后再次执行压缩，模型与外发预算只统计仍可用工具。独立 `MemoryTools.prepare` 旧图和其 `memory_tool_runs` 表已删除；Skill 自由文本 `stage`/`route` 也已由自动任务状态替代。

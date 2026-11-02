@@ -78,7 +78,7 @@ def test_each_agent_has_separate_search_and_fetch_budgets(orchestration: tuple[A
         assert repository.transition(UUID(child['run_id']), 'running')
         children.append(repository.info(UUID(child['run_id'])))
     operations = OperationService(repository.database)
-    settings = StoredSettings(base_url='https://search.example', model='deepseek-search', api_key='test-key')
+    settings = StoredSettings(base_url='https://search.example', model='zhipu-web', api_key='test-key')
 
     def context(run: dict[str, Any], purpose: str) -> OperationContext:
         """按执行轮次构造真实操作身份，输入为运行记录和用途，输出为调用账本上下文。"""

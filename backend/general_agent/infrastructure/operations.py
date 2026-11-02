@@ -88,7 +88,7 @@ class OperationService:
 
     def begin(self, context: OperationContext, call_id: UUID, settings: StoredSettings, assistant_message_id: UUID | None = None,
               web_kind: WebKind | None = None) -> None:
-        """输入操作、预留、配置及联网类别，外发前核验期限与分类额度；成功后无返回值。"""
+        """外发前核验操作、期限、分类额度及根执行的普通或 Skill Run 调用预算。"""
         with self.database.connect() as connection:
             run = connection.execute('SELECT r.id,r.agent_id,r.deadline,r.status,a.answer_attempt_id,a.parent_agent_id FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE r.operation_id=%s', (context.operation_id,)).fetchone()
             if run:
@@ -115,7 +115,7 @@ class OperationService:
                         raise CallBudgetExceeded(f'当前智能体已达到{limit}次{label}请求上限。')
                     connection.execute(f'UPDATE agents SET {field}={field}+1 WHERE id=%s', (run['agent_id'],))
                 else:
-                    if root['model_count'] >= LIMITS.model_calls:
+                    if root['model_count'] >= root['model_limit']:
                         raise CallBudgetExceeded('本次回答已达到共享调用预算。')
                     connection.execute('UPDATE agents SET model_count=model_count+1 WHERE id=%s', (root['id'],))
                 connection.execute('UPDATE model_calls SET agent_id=%s,agent_run_id=%s,assistant_message_id=%s WHERE id=%s', (run['agent_id'],run['id'],run['answer_attempt_id'],call_id))
@@ -132,7 +132,7 @@ class OperationService:
     def record(self, call_id: UUID, usage: TokenUsage, status: str | None = None, credits: Decimal | None = None) -> None:
         """记录服务商返回的 token 或 credits 以及调用终态。"""
         with self.database.connect() as connection:
-            connection.execute("UPDATE model_calls SET prompt_tokens=coalesce(%s,prompt_tokens),completion_tokens=coalesce(%s,completion_tokens),total_tokens=coalesce(%s,total_tokens),credits=coalesce(%s,credits),status=CASE WHEN status='stopped' THEN status ELSE coalesce(%s,status) END,finished_at=CASE WHEN %s::text IS NULL THEN finished_at ELSE CURRENT_TIMESTAMP END WHERE id=%s", (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens, credits, status, status, call_id))
+            connection.execute("UPDATE model_calls SET prompt_tokens=coalesce(%s,prompt_tokens),completion_tokens=coalesce(%s,completion_tokens),total_tokens=coalesce(%s,total_tokens),cached_tokens=coalesce(%s,cached_tokens),credits=coalesce(%s,credits),status=CASE WHEN status='stopped' THEN status ELSE coalesce(%s,status) END,finished_at=CASE WHEN %s::text IS NULL THEN finished_at ELSE CURRENT_TIMESTAMP END WHERE id=%s", (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens, usage.cached_tokens, credits, status, status, call_id))
 
     def cancel_reservation(self, call_id: UUID) -> None:
         """仅终结未外发的预留，保留已开始或已完成调用的真实状态及用量。"""

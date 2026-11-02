@@ -4,9 +4,7 @@ import json
 from pathlib import Path
 
 import httpx
-from fastapi.testclient import TestClient
 
-from general_agent.app import create_app
 from tests.auth.support import authenticated_client
 from tests.memory.test_memory import configure_memory, final_model_reply, memory_final_answer, memory_provider, configure_memory_settings
 from tests.conversation.test_streaming import wait_message

@@ -31,4 +31,7 @@
 
 删除附件或会话先停用来源，再串行清理远端文件和本机原文件；远端删除失败保留删除身份及重试入口。图片上传与删除共用附件锁，防止上传的迟到结果逃过远端清理。文字附件、会话归属及不提取附件长期记忆的边界保持不变。
 
-协议依据见 [Files API](https://api-docs.deepseek.com/guides/files_api/) 和 [Vision](https://api-docs.deepseek.com/guides/vision/)，核对记录见 [DeepSeek Files 研究笔记](../research-deepseek-files.md)。
+协议依据见 [Files API](https://api-docs.deepseek.com/guides/files_api/) 和 [Vision](https://api-docs.deepseek.com/guides/vision/)，核对记录见 [DeepSeek Files 研究笔记](0024-zhipu-model-and-web.md)。
+
+
+2026-11-02：以上供应商文件协议为历史实现，当前图片链路由 [智谱迁移决策](0024-zhipu-model-and-web.md) 替代。

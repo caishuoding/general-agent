@@ -9,7 +9,7 @@ type Props = {
   onDelete: (id: string, name: string) => void;
 };
 
-// 上传资料并只展示本次上传的临时状态，不读取或列出会话历史附件。
+// 上传问答资料与制作原件，仅展示本次上传的临时状态。
 export function AttachmentPanel({ conversationId, disabled, revision, resetToken, onDelete }: Props) {
   const [files, setFiles] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -129,12 +129,12 @@ export function AttachmentPanel({ conversationId, disabled, revision, resetToken
     return <p key={notice}>{notice}</p>;
   }
 
-  // 展示上传状态和固定分页范围，PDF 与 Word 使用相同页单位。
+  // 展示上传状态；制作原件不伪称已解析正文，PDF 与 Word 使用相同页单位。
   function renderFile(file: Attachment) {
     const info = file.parse_info;
     // 以当前文件的独立身份打开删除预览。
     function removeFile() { onDelete(file.id, file.filename); }
-    const label = file.status === 'ready' ? (info?.format ? (info.coverage === 'partial' ? '部分内容可读取' : '内容可读取') : '已就绪') : file.status === 'failed' ? '读取失败' : file.status === 'deleting' ? '正在清理' : '正在读取';
+    const label = file.status === 'ready' ? (info?.skill_source ? '制作原件已就绪' : info?.format ? (info.coverage === 'partial' ? '部分内容可读取' : '内容可读取') : '已就绪') : file.status === 'failed' ? '读取失败' : file.status === 'deleting' ? '正在清理' : '正在读取';
     return <li key={file.id} className={`attachment-chip ${file.status}`}>
       <span className="attachment-chip-main">
         <span>{label} · {file.filename}</span>
@@ -142,7 +142,7 @@ export function AttachmentPanel({ conversationId, disabled, revision, resetToken
       </span>
       {file.image_metadata && <small className="attachment-image-info">{file.image_metadata.format} · {file.image_metadata.width} × {file.image_metadata.height} 像素</small>}
       {file.error && <small role="alert">{file.error}</small>}
-      {info?.format && <small>文字提取：{info.readable_units || 0} / {info.total_units || 0} {['pdf', 'docx'].includes(info.format) ? '页' : '段落'}</small>}
+      {info?.format && !info.skill_source && <small>文字提取：{info.readable_units || 0} / {info.total_units || 0} {['pdf', 'docx'].includes(info.format) ? '页' : '段落'}</small>}
       {info?.missing_units?.map(renderNotice)}
       {info?.limitations?.map(renderNotice)}
     </li>;
@@ -150,7 +150,7 @@ export function AttachmentPanel({ conversationId, disabled, revision, resetToken
 
   return <section className="attachment-composer" aria-label="添加文件">
     <div className="attachment-tools">
-      <label className={`upload-label ${disabled || !conversationId ? 'disabled' : ''}`} title="支持 TXT、Markdown、PDF、Word、PNG 和 JPEG；每次最多 5 个，每个 20 MB，PDF 最多 200 页">＋ 添加文件<input aria-label="上传会话附件" type="file" accept=".txt,.md,.markdown,.pdf,.docx,.png,.jpg,.jpeg" multiple onChange={upload} disabled={disabled || !conversationId || uploading} /></label>
+      <label className={`upload-label ${disabled || !conversationId ? 'disabled' : ''}`} title="支持文档、PPTX、Excel、图片、媒体和模板包；每次最多 5 个，每个 20 MB，PDF 最多 200 页">＋ 添加文件<input aria-label="上传会话附件" type="file" accept=".txt,.md,.markdown,.pdf,.docx,.png,.jpg,.jpeg,.pptx,.xlsx,.xlsm,.csv,.tsv,.svg,.webp,.epub,.html,.htm,.doc,.odt,.rtf,.mp3,.wav,.mp4,.zip" multiple onChange={upload} disabled={disabled || !conversationId || uploading} /></label>
       <span className="attachment-hint">{conversationId ? 'PDF、Word、文本或图片 · 每个不超过 20 MB' : '开始新对话后可以添加文件'}</span>
     </div>
     {uploading && <p role="status">正在上传…</p>}

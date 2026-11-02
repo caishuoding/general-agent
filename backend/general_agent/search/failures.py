@@ -71,7 +71,7 @@ def retry_after_seconds(value: str | None) -> float:
 
 
 def http_failure(response: httpx.Response) -> WebRequestFailure:
-    """只对 408、429 和 5xx 允许后端重试，并提取格式受限的诊断字段。"""
+    """结合智谱业务码与 HTTP 状态分级，欠费和权限问题不重试，诊断字段严格收窄。"""
     status = response.status_code
     retryable = status in (408, 429) or 500 <= status <= 599
     scope: Literal['request', 'provider'] = 'provider' if status in (401, 402) else 'request'
@@ -80,20 +80,29 @@ def http_failure(response: httpx.Response) -> WebRequestFailure:
         403: '抓取被安全策略拒绝', 404: '无法获取可用网页正文，可能被站点拦截、页面不可用或无可提取内容',
         408: '请求读取超时', 413: '请求内容过大，需要缩小请求', 429: '请求过于频繁',
     }
-    message = f"DeepSeek 联网请求失败（HTTP {status}）：{descriptions.get(status, '联网服务暂时不可用' if retryable else '服务拒绝该请求')}。"
-    message += '后端已进行有限重试或终止等待，本次请求未取得结果。' if retryable else '该请求不可原样重试。'
     try:
         payload = response.json()
     except ValueError:
         payload = None
     error = payload.get('error') if isinstance(payload, dict) else None
     code = error.get('code') if isinstance(error, dict) else None
+    request_id = payload.get('request_id') if isinstance(payload, dict) else None
+    if isinstance(code, int) and not isinstance(code, bool):
+        code = str(code)
     detail = error.get('message') if isinstance(error, dict) else None
     error_code = code if isinstance(code, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', code) else None
     match = re.search(r'request_id:\s*([A-Za-z0-9_.-]{1,100})', detail) if isinstance(detail, str) else None
-    request_id = match.group(1) if match else response.headers.get('x-request-id')
-    if request_id is not None and not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', request_id):
+    request_id = match.group(1) if match else request_id or response.headers.get('x-request-id')
+    if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', request_id):
         request_id = None
+    if error_code in {'1000', '1001', '1003', '1005', '1113', '1220', '1308', '1309', '1310',
+                      '1311', '1313', '1314', '1315', '1316', '1317', '1318', '1319', '1320', '1321'}:
+        retryable, scope = False, 'provider'
+    description = ('联网服务余额不足' if error_code == '1113' else
+                   '联网服务权限或配额不可用' if scope == 'provider' else
+                   descriptions.get(status, '联网服务暂时不可用' if retryable else '服务拒绝该请求'))
+    message = f'智谱联网请求失败（HTTP {status}）：{description}。'
+    message += '后端已进行有限重试或终止等待，本次请求未取得结果。' if retryable else '该请求不可原样重试。'
     return WebRequestFailure(
         message, retryable=retryable, http_status=status, scope=scope,
         error_code=error_code, request_id=request_id,

@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { SearchSettings } from "./SearchSettings";
 import { EmbeddingSettings } from "./EmbeddingSettings";
+import { SkillSettings } from "./SkillSettings";
 import { api, errorMessage, type Settings, type Usage } from "./api";
 
 type Props = {
@@ -9,7 +10,7 @@ type Props = {
   onSaved: (value: Settings) => void;
 };
 
-// 管理聊天、独立嵌入与搜索设置以及真实调用用量；保存不代表验证通过。
+// 管理聊天、嵌入、搜索与 Skill 提供商设置和真实用量；保存不代表连接验证通过。
 export function SettingsPanel({ settings, usage, onSaved }: Props) {
   const [recentUsage, setRecentUsage] = useState(usage ?? []);
   const [saving, setSaving] = useState(false);
@@ -24,7 +25,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
     if (usage !== undefined) setRecentUsage(await api<Usage[]>("/usage"));
   }
 
-  // 读取连接与文档读取预算，将数字字段转为整数后保存并清空密钥。
+  // 保存连接、上下文预算和自动压缩比例，将表单数字规范化并清空密钥。
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -38,6 +39,8 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
         body: JSON.stringify({ ...Object.fromEntries(data),
           context_window_tokens: Number(data.get("context_window_tokens")),
           output_reserve_tokens: Number(data.get("output_reserve_tokens")),
+          compression_trigger_ratio: Number(data.get("compression_trigger_ratio")) / 100,
+          compression_target_ratio: Number(data.get("compression_target_ratio")) / 100,
         }),
       });
       onSaved(next);
@@ -131,7 +134,11 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
             <input id="context-window" name="context_window_tokens" type="number" min={1024} max={10000000} required defaultValue={settings.context_window_tokens ?? 32768} />
             <label htmlFor="output-reserve">回答预留（Token）</label>
             <input id="output-reserve" name="output_reserve_tokens" type="number" min={1} max={1000000} required defaultValue={settings.output_reserve_tokens ?? 4096} />
-            <p className="field-help">按模型实际能力填写，用于限制文档原文读取量。</p>
+            <label htmlFor="compression-trigger">上下文压缩触发比例（%）</label>
+            <input id="compression-trigger" name="compression_trigger_ratio" type="number" min={1} max={99} step={1} required defaultValue={Math.round((settings.compression_trigger_ratio ?? 0.75) * 100)} />
+            <label htmlFor="compression-target">压缩后目标比例（%）</label>
+            <input id="compression-target" name="compression_target_ratio" type="number" min={1} max={99} step={1} required defaultValue={Math.round((settings.compression_target_ratio ?? 0.5) * 100)} />
+            <p className="field-help">按模型实际窗口填写。比例以扣除回答预留后的输入预算计算，压缩目标需低于触发比例，原始聊天记录完整保留。</p>
           </details>
           {error && (
             <p className="notice error" role="alert">
@@ -153,6 +160,7 @@ export function SettingsPanel({ settings, usage, onSaved }: Props) {
       </div>
       <EmbeddingSettings settings={settings} />
       <SearchSettings onSaved={searchSaved} />
+      <SkillSettings />
       {usage !== undefined && <div className="settings-card usage-card">
         <div className="card-heading">
           <h3>最近调用</h3>

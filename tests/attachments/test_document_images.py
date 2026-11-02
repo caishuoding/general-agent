@@ -63,38 +63,22 @@ def wait_ready(client: TestClient, conversation_id: str, attachment_id: str) -> 
     raise AssertionError(row)
 
 
-def image_files_response() -> httpx.Response:
-    """返回符合当前 Files API 合同的受控远程图片身份。"""
-    created_at = int(time())
-    return httpx.Response(200, json={
-        'id': 'file-api-word-chart',
-        'created_at': created_at,
-        'expires_at': created_at + 30 * 24 * 60 * 60,
-    })
-
-
 def test_word_image_description_is_searchable_and_readable(
     database_url: str, tmp_path: Path,
 ) -> None:
     """模型直接返回纯文字，切片原样保存描述并在搜索和阅读时绑定同一原图。"""
     requests: list[dict[str, Any]] = []
-    deleted: list[str] = []
     description = '季度销售趋势图：橙色柱状图显示季度销售额逐季增长。'
 
     def provider(request: httpx.Request) -> httpx.Response:
         """返回无 JSON 包装的图片描述，并记录模型实际收到的原图请求。"""
-        if request.url.path == '/files':
-            return image_files_response()
-        if request.method == 'DELETE':
-            deleted.append(request.url.path)
-            return httpx.Response(200)
         payload = json.loads(request.content)
         requests.append(payload)
         assert payload['model'] == 'controlled'
         assert payload['stream'] is False
         assert any(
             isinstance(message.get('content'), list)
-            and any(part.get('type') == 'file' for part in message['content'])
+            and any(part.get('type') == 'image_url' for part in message['content'])
             for message in payload['messages']
         )
         return httpx.Response(200, json={
@@ -150,7 +134,6 @@ def test_word_image_description_is_searchable_and_readable(
                    for row in chunks if row['image_id'] is None)
         assert stored_image == {'caption': '图 03 订单状态图及风险冻结旁路', 'description': description}
         service.delete_file(UUID(uploaded['id']))
-        assert deleted == ['/files/file-api-word-chart']
         assert not (tmp_path / 'attachments' / f"{uploaded['id']}.images").exists()
         database = Database(database_url)
         with database.connect() as connection:
@@ -176,15 +159,11 @@ def test_recalled_word_image_is_sent_back_to_the_model_once(
     database_url: str, tmp_path: Path,
 ) -> None:
     """图片切片召回后，下一次模型请求收到原图身份并保留工具调用关系。"""
-    uploads = 0
     image_requests = 0
 
     def provider(request: httpx.Request) -> httpx.Response:
         """先返回纯文字描述，再模拟搜索并核验下一轮原图注入。"""
-        nonlocal uploads, image_requests
-        if request.url.path == '/files':
-            uploads += 1
-            return image_files_response()
+        nonlocal image_requests
         payload = json.loads(request.content)
         if payload['stream'] is False:
             description = '季度销售趋势图：橙色柱状图显示季度销售额逐季增长。'
@@ -206,9 +185,9 @@ def test_recalled_word_image_is_sent_back_to_the_model_once(
             for message in payload['messages']
             if isinstance(message.get('content'), list)
             for part in message['content']
-            if part.get('type') == 'file'
+            if part.get('type') == 'image_url'
         ]
-        assert image_parts == [{'type': 'file', 'file_id': 'file-api-word-chart'}]
+        assert len(image_parts) == 1 and image_parts[0]['image_url']['url'].startswith('data:image/png;base64,')
         image_requests += 1
         event = {
             'choices': [{'delta': {'content': '图中销售额逐季增长。'}, 'finish_reason': 'stop'}],
@@ -231,7 +210,6 @@ def test_recalled_word_image_is_sent_back_to_the_model_once(
         assert response.status_code == 202
         assert wait_message(client, conversation, 'complete')['content'] == '图中销售额逐季增长。'
         assert image_requests == 1
-        assert uploads == 1
 
 
 def test_pdf_without_text_layer_uses_embedded_image_description(
@@ -240,12 +218,6 @@ def test_pdf_without_text_layer_uses_embedded_image_description(
     """扫描 PDF 的纯文字图片描述可直接召回，不依赖文字层或结构化字段。"""
     def provider(request: httpx.Request) -> httpx.Response:
         """响应 PDF 图片上传，并让模型直接输出一段自然语言描述。"""
-        if request.url.path == '/files':
-            return httpx.Response(200, json={
-                'id': 'file-api-pdf-scan',
-                'created_at': int(time()),
-                'expires_at': int(time()) + 30 * 24 * 60 * 60,
-            })
         description = '蓝色扫描画面：蓝灰色方块组成的扫描页图像。'
         return httpx.Response(200, json={
             'choices': [{'message': {'content': description}}],
@@ -277,8 +249,7 @@ def test_word_text_remains_available_when_image_description_fails(
 ) -> None:
     """视觉服务失败只标记图片，不能把仍然可读的 Word 正文判为失败。"""
     def provider(request: httpx.Request) -> httpx.Response:
-        """让图片上传失败，并确认应用不会继续调用聊天模型生成描述。"""
-        assert request.url.path == '/files'
+        """让视觉描述失败，但 Word 正文仍可检索。"""
         return httpx.Response(503)
 
     configure_settings(database_url, tmp_path)
@@ -309,15 +280,11 @@ def test_duplicate_word_images_reuse_one_visual_description(
     database_url: str, tmp_path: Path,
 ) -> None:
     """同一文档内字节相同的图片只上传和描述一次，但保留两个出现位置。"""
-    uploads = 0
     descriptions = 0
 
     def provider(request: httpx.Request) -> httpx.Response:
-        """统计图片上传及纯文字描述的真实请求次数。"""
-        nonlocal uploads, descriptions
-        if request.url.path == '/files':
-            uploads += 1
-            return image_files_response()
+        """统计纯文字描述的真实请求次数。"""
+        nonlocal descriptions
         descriptions += 1
         description = '重复图表：橙色图表示例。'
         return httpx.Response(200, json={
@@ -335,5 +302,4 @@ def test_duplicate_word_images_reuse_one_visual_description(
         assert attachment['status'] == 'ready'
         assert attachment['parse_info']['image_count'] == 2
         assert attachment['parse_info']['image_described_count'] == 2
-        assert uploads == 1
         assert descriptions == 1

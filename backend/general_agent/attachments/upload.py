@@ -11,6 +11,7 @@ from python_multipart.multipart import parse_options_header
 
 MAX_FILE_BYTES = 20_000_000
 MAX_FILES = 5
+SKILL_SOURCE_EXTENSIONS = {'.pptx', '.xlsx', '.xlsm', '.csv', '.tsv', '.svg', '.webp', '.epub', '.html', '.htm', '.doc', '.odt', '.rtf', '.mp3', '.wav', '.mp4', '.zip'}
 
 
 @dataclass
@@ -72,7 +73,7 @@ class FileReceiver:
         self.value.clear()
 
     def headers_finished(self) -> None:
-        """验证文件字段后以随机路径创建私有暂存文件。"""
+        """验证资料或制作原件格式，以随机路径创建有界私有暂存文件。"""
         _, options = parse_options_header(self.headers.get(b'content-disposition', b''))
         if options.get(b'name') != b'files' or b'filename' not in options:
             raise HTTPException(422, '请通过 files 字段上传附件，不接受普通表单字段。')
@@ -83,8 +84,8 @@ class FileReceiver:
         filename = filename.replace('\\', '/').rsplit('/', 1)[-1]
         if not filename or len(filename) > 240 or any(ord(char) < 32 for char in filename):
             raise HTTPException(422, '附件文件名无效或过长。')
-        if Path(filename).suffix.lower() not in {'.txt', '.md', '.markdown', '.pdf', '.docx', '.png', '.jpg', '.jpeg'}:
-            raise HTTPException(422, '当前支持 TXT、Markdown、文本 PDF、DOCX、PNG、JPEG；其他格式暂未启用。')
+        if Path(filename).suffix.lower() not in {'.txt', '.md', '.markdown', '.pdf', '.docx', '.png', '.jpg', '.jpeg'} | SKILL_SOURCE_EXTENSIONS:
+            raise HTTPException(422, '文件格式不受支持，请上传文档、演示文稿、表格、图片或媒体资料。')
         path = self.directory / (uuid4().hex + '.upload')
         self.handle = path.open('xb')
         path.chmod(0o600)

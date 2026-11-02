@@ -3,7 +3,7 @@ import { api, errorMessage, type Settings } from './api';
 
 type Props = { onSaved: () => Promise<void> };
 
-// 管理独立 DeepSeek 搜索与抓取凭据，保存或删除不会触发联网请求。
+// 管理独立智谱搜索与网页读取凭据，保存或删除不会触发联网请求。
 export function SearchSettings({ onSaved }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [busy, setBusy] = useState(false);
@@ -44,7 +44,7 @@ export function SearchSettings({ onSaved }: Props) {
     finally { setBusy(false); }
   }
   return <div className="settings-card">
-    <div className="card-heading"><h3>联网搜索</h3><span className="small-label">独立配置</span></div>
+    <div className="card-heading"><h3>联网搜索（智谱）</h3><span className="small-label">独立配置</span></div>
     <details className="settings-help">
       <summary>联网时的数据说明</summary>
       <p>助手会按需联网，搜索词和网页地址会发送给搜索服务。查询可能包含当前对话或长期记忆中的信息。未配置不会影响其他功能。</p>

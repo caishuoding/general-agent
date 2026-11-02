@@ -76,14 +76,12 @@ def test_uploaded_pdf_reads_body_image_body_in_original_order(database_url: str,
     from general_agent.infrastructure.database import Database
     from general_agent.infrastructure.tokens import TokenCounter
     from tests.attachments.test_attachments import configure, configure_settings
-    from tests.attachments.test_document_images import image_files_response, wait_ready
+    from tests.attachments.test_document_images import wait_ready
     from tests.attachments.test_knowledge import owner
     from tests.auth.support import authenticated_client
 
     def provider(request: httpx.Request) -> httpx.Response:
         """只在视觉输入边界返回受控图片说明，文件操作沿用正式协议。"""
-        if request.url.path == '/files':
-            return image_files_response()
         if request.method == 'DELETE':
             return httpx.Response(200)
         payload = json.loads(request.content)

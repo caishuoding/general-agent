@@ -8,10 +8,8 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
-from psycopg.types.json import Jsonb
 
 from general_agent.infrastructure.agent_cleanup import invalidate_agent_material
-from general_agent.attachments.service import AttachmentService
 from general_agent.attachments.knowledge import ChunkPolicy, configured_chunk_policy
 from general_agent.attachments.upload import UploadedFile
 from general_agent.infrastructure.calls import CallGateway
@@ -27,11 +25,10 @@ LOGGER = logging.getLogger(__name__)
 class KnowledgeService:
     """对外提供账号范围内的知识库管理，任务持久化于独立文档记录。"""
 
-    def __init__(self, database: Database, directory: Path, attachments: AttachmentService,
-                 calls: CallGateway, transport: httpx.BaseTransport | None = None) -> None:
+    def __init__(self, database: Database, directory: Path, calls: CallGateway,
+                 transport: httpx.BaseTransport | None = None) -> None:
         """复用公共切片策略和模型连接，文件与后台队列保持独立。"""
         self.database, self.directory = database, directory / 'knowledge'
-        self.files = attachments.files
         self.calls, self.transport, self.settings_directory = calls, transport, directory
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='knowledge')
 
@@ -284,19 +281,14 @@ class KnowledgeService:
         self.cleanup_bases()
 
     def cleanup(self, document_id: UUID) -> None:
-        """清理远端及本机文件后删除派生记录，失败保留 deleting 状态供后续重试。"""
-        with self.database.connect() as connection:
-            images = connection.execute('SELECT provider_file FROM knowledge_document_images WHERE document_id=%s', (document_id,)).fetchall()
+        """清理本机文件后删除派生记录，失败保留 deleting 状态供后续重试。"""
         try:
-            for image in images:
-                if image['provider_file']:
-                    self.files.delete(image['provider_file'])
             folder = self.directory / str(document_id)
             if folder.exists():
                 shutil.rmtree(folder)
             with self.database.connect() as connection:
                 connection.execute("DELETE FROM knowledge_documents WHERE id=%s AND status='deleting'", (document_id,))
-        except (ValueError, OSError):
+        except OSError:
             with self.database.connect() as connection:
                 connection.execute("UPDATE knowledge_documents SET error='清理未完成，请重试删除。' WHERE id=%s AND status='deleting'", (document_id,))
         self.cleanup_bases()

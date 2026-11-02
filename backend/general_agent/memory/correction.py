@@ -28,8 +28,8 @@ class MemoryCorrection:
             raise LookupError('记忆更正记录不存在。')
         return row
 
-    def apply(self, action_id: UUID, fact: str, expected_version: int, identifier: UUID, operation: OperationContext, source_message_id: UUID | None = None, source_conversation_id: UUID | None = None, cached: dict[str, list[float]] | None = None, account_id: UUID | None = None) -> dict[str, Any]:
-        """按版本更新并支持原生已计量向量，空间租约覆盖 SDK 写入及来源核验。"""
+    def apply(self, action_id: UUID, fact: str, expected_version: int, identifier: UUID, operation: OperationContext, source_message_id: UUID | None = None, source_conversation_id: UUID | None = None, account_id: UUID | None = None) -> dict[str, Any]:
+        """按版本更新，空间租约覆盖 SDK 写入及来源核验。"""
         with self.database.connect() as lock:
             lock.autocommit=True
             lock.execute('SELECT pg_advisory_lock(%s)',(action_id.int % (2**63-1),))

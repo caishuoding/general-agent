@@ -18,29 +18,35 @@ class TextPart(TypedDict):
     text: str
 
 
-class FilePart(TypedDict):
-    """通过 DeepSeek Files API 返回的身份引用图片，不重复发送原始字节。"""
-    type: Literal['file']
-    file_id: str
+class ImagePart(TypedDict):
+    """描述智谱视觉请求中的本地原图 data URL。"""
+    type: Literal['image_url']
+    image_url: dict[str, str]
 
 
 class ModelMessage(TypedDict):
     """使用明确的文字或多模态内容类型描述模型消息。"""
     role: str
-    content: str | list[TextPart | FilePart]
+    content: str | list[TextPart | ImagePart]
 
 
 class TokenUsage(BaseModel):
     prompt_tokens: StrictInt | None = Field(default=None, ge=0)
     completion_tokens: StrictInt | None = Field(default=None, ge=0)
     total_tokens: StrictInt | None = Field(default=None, ge=0)
+    cached_tokens: StrictInt | None = Field(default=None, ge=0)
 
 
     @classmethod
     def from_payload(cls, payload: object) -> "TokenUsage":
         """逐字段保留非负整数用量，一个缺失或畸形字段不抹掉其余真实数值。"""
         data = payload if isinstance(payload, dict) else {}
-        return cls.model_validate({key: value for key, value in data.items() if key in cls.model_fields and type(value) is int and 0 <= value <= 2147483647})
+        values = {key: value for key, value in data.items() if key in {"prompt_tokens", "completion_tokens", "total_tokens"} and type(value) is int and 0 <= value <= 2147483647}
+        details = data.get("prompt_tokens_details")
+        cached = details.get("cached_tokens") if isinstance(details, dict) else None
+        if type(cached) is int and 0 <= cached <= 2147483647:
+            values["cached_tokens"] = cached
+        return cls.model_validate(values)
 
 
 class EmbeddingVector(BaseModel):
@@ -140,7 +146,7 @@ class ModelClient:
 
     @traceable(name="chat.stream", run_type="llm", process_inputs=model_inputs, reduce_fn=stream_outputs)
     def stream(self, settings: StoredSettings, messages: list[ModelMessage], tools: list[dict[str, Any]] | None = None) -> Iterator[StreamChunk]:
-        """用配置、消息和可用工具发起流式请求；逐段返回文字与工具调用，追踪真实用量。"""
+        """开启智谱工具流，逐段返回文字、推理与工具参数，并追踪真实用量。"""
         usage = TokenUsage()
         has_content = False
         has_tool_calls = False
@@ -149,7 +155,7 @@ class ModelClient:
         body: dict[str, object] = {"model": settings.model, "messages": messages, "stream": True, "stream_options": {"include_usage": True}}
         if tools is not None:
             # 流式请求允许一轮返回多个工具调用；派工工具执行时会分别启动后台任务。
-            body.update(tools=tools, tool_choice="auto", parallel_tool_calls=True)
+            body.update(tools=tools, tool_choice="auto", tool_stream=True)
         try:
             with httpx.Client(transport=self.transport, timeout=60, follow_redirects=False, trust_env=False) as client:
                 with client.stream(
